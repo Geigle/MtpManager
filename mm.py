@@ -11,6 +11,7 @@ from ffmpeg import FFmpeg
 from mutagen.easyid3 import EasyID3
 from mutagen.flac import FLAC
 from mutagen.mp3 import MP3
+from mutagen.asf import ASF
 from tkinter import *
 from tkinter import ttk
 from tkinter import messagebox
@@ -210,7 +211,7 @@ def SortTrackDetails(details = []):
         for tag in tags:
             tags[tag].sort()
 
-def SendTrackToDevice_CMD(track_path):
+def SendMP3ToDevice_CMD(track_path):
     """
     Use the LibMTP Example program to send a track to an MTP device.
     Note: Presumes an MP3.
@@ -227,9 +228,19 @@ def SendTrackToDevice_CMD(track_path):
     cpsr=TryGetID3(tag, 'composer')
     #dnum=TryGetID3(tag, 'discnumber')
     genr=TryGetID3(tag, 'genre')
-    trname="Music/{}/{}/{} - {} - {} {}.MP3".format(arts, albm, arts,albm,tnum,titl)
-    cmd = 'mtp-sendtr -t "{}" -a "{}" -A "{}" -w "{}" -l "{}" -c "{}" -g "{}" -n "{}" -y "{}" -d "{}" "{}" "{}"'.format(titl, arts, alar, cpsr, albm, "mp3", genr, tnum, aldt, trk.info.length, track_path, trname)
+    SendTrackToDevice_CMD(track_path, tnum, titl, albm, arts, aldt, alar, cpsr, genr, trk.info.length)
+    #trname="Music/{}/{}/{} - {} - {} {}.MP3".format(arts, albm, arts,albm,tnum,titl)
+    #cmd = 'mtp-sendtr -t "{}" -a "{}" -A "{}" -w "{}" -l "{}" -c "{}" -g "{}" -n "{}" -y "{}" -d "{}" "{}" "{}"'.format(titl, arts, alar, cpsr, albm, "mp3", genr, tnum, aldt, trk.info.length, track_path, trname)
+    #rv = os.system(cmd)
+    #print(rv)
+
+
+def SendTrackToDevice_CMD(track_path, tnum, titl, albm, arts, aldt, alar, cpsr, genr, length):
+    filename, file_extension = os.path.splitext(track_path)
+    trname=f"Music/{arts}/{albm}/{arts} - {albm} - {tnum} {titl}"
+    cmd = f'mtp-sendtr -t "{titl}" -a "{arts}" -A "{alar}" -w "{cpsr}" -l "{albm}" -c "{file_extension}" -g "{genr}" -n "{tnum}" -y "{aldt}" -d "{length}" "{track_path}" "{trname}"'
     rv = os.system(cmd)
+    print(rv)
 
 def GetTracksInDir(dir_path):
     """
@@ -304,15 +315,15 @@ def PopulateListBox(item_list):
     item_list: {0: {path: {details}}}
     """
     lb.delete(0,END) # Clear content of ListBox.
+    lbry_idx = 1
     for item in item_list:
         path = list(item_list[item].keys())[0]
         trk = item_list[item][path]["tracknumber"]
-        ttl = item_list[item][path]["title"][:20]
-        art = item_list[item][path]["artist"][:10]
-        alb = item_list[item][path]["album"][:8]
-        smry = f"{ttl}, {art}, {alb}, ({trk})"
+        ttl = item_list[item][path]["title"]
+        art = item_list[item][path]["artist"]
+        alb = item_list[item][path]["album"]
+        smry = f"{ttl[:20]}, {art[:10]}, {alb[:8]}, ({trk})"
         lb.insert(item, smry)
-
 
 def BuildLibrary(library_path):
     new_library = {} # List of sorted/indexed tracks
@@ -415,10 +426,25 @@ def Action_SingleTrack(track_index):
     ConvertAndTransferTrack(mypath, "mp3", use_cmd)
 
 
+def Action_SingleTrackWMA(track_index):
+    """
+    GUI Action, Send selected track to device.
+    track_index: An int from Listbox.curselection()
+    """
+    if len(track_index) == 0:
+        messagebox.showinfo("Index", "You forgot to select a track.")
+        return
+
+    idx = track_index[0]+1
+    mypath=list(library[idx])[0]
+    use_cmd = (tk_use_cmd.get() == 1)
+    ConvertAndTransferTrack(mypath, "wma", use_cmd)
+
 
 def ConvertAndTransferTrack(track_path, my_format, use_cmd):
     output_file = "/tmp/TRANSCODE."+my_format
-    if (not FileIsMP3(track_path)):
+    # Only transcode if it's not the target format.'
+    if (FileIsMusic(track_path, [my_format])):
         # Got this from Brave Leo AI.
         ffmpeg = (
             FFmpeg()
@@ -432,7 +458,7 @@ def ConvertAndTransferTrack(track_path, my_format, use_cmd):
         ffmpeg.execute()
         print("Done.")
         if(use_cmd):
-            SendTrackToDevice_CMD(output_file)
+            SendMP3ToDevice_CMD(output_file)
         else:
             SendTrackToDevice_MTP(output_file)
         if(os.path.exists(output_file)):
@@ -446,8 +472,11 @@ def ConvertAndTransferTrack(track_path, my_format, use_cmd):
                 print("Error while deleting {}: {}".format(output_file, e))
         else:
             print("{} does not exist. That's probably okay.".format(output_file))
-    else: # Already MP3
-        SendTrackToDevice_CMD(track_path)
+    else: # Already the target format.
+        if(use_cmd):
+            SendMP3ToDevice_CMD(track_path)
+        else:
+            SendTrackToDevice_MTP(track_path)
 
 
 def Action_AllFromArtist(track_index):
@@ -461,12 +490,15 @@ def Action_AllFromArtist(track_index):
     ti = track_index[0]+1
     print(ti)
     try:
-        mypath=paths[ti]
-        artist=tracks[mypath]["artist"]
+        mypath=list(library[ti].keys())[0]
+        print(mypath)
+        artist=library[ti][mypath]["artist"]
+        print(artist)
         ar_paths = []
-        for t in tracks:
-            if tracks[t]["artist"] == artist:
-                ar_paths.append(t)
+        for t in library:
+            t_path = list(library[t].keys())[0]
+            if library[t][t_path]["artist"] == artist:
+                ar_paths.append(t_path)
         ar_paths.sort()
         plen = len(ar_paths)
         count = 1
@@ -588,7 +620,7 @@ def Action_ConvertAndTransferAlbum():
                 )
             ffmpeg.execute()
             print("Converted {} to {}".format(input_file, output_file))
-            SendTrackToDevice_CMD(output_file)
+            SendMP3ToDevice_CMD(output_file)
             if(os.path.exists(output_file)):
                 try:
                     os.remove(output_file)
@@ -610,8 +642,11 @@ def ExecuteAction():
     ex_option = sendtype_combo.get()
     #messagebox.showinfo("Option Chosen", ex_option)
 
-    if ex_option == "Single Track":
+    if ex_option == "Single Track MP3":
         Action_SingleTrack( lb.curselection() )
+
+    elif ex_option == "Single Track WMA":
+        Action_SingleTrackWMA( lb.curselection() )
 
     elif ex_option == "All from Artist":
         Action_AllFromArtist( lb.curselection() )
@@ -685,7 +720,7 @@ bottomframe.pack(side=BOTTOM, fill=BOTH)
 label=Label(frame, text="MTP Manager")
 label.pack()
 
-sendtype_options = ["Single Track", "All from Album", "All from Artist", "Set Device Name", "Read Folder List", "Create a New Folder", "Copy Track to PC", "Delete All Tracks", "Get File Info", "Convert and Transfer Album"]
+sendtype_options = ["Single Track MP3", "Single Track WMA", "All from Album", "All from Artist", "Set Device Name", "Read Folder List", "Create a New Folder", "Copy Track to PC", "Delete All Tracks", "Get File Info", "Convert and Transfer Album"]
 sendtype_combo = ttk.Combobox(leftframe, values=sendtype_options)
 sendtype_combo.set("Single Track")
 sendtype_combo.pack(padx=3,pady=3)
