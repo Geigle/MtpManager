@@ -1,2 +1,2 @@
 #!/bin/bash
-~/MtpManager_venv/bin/python ~/MtpManager/mm.py
+~/MtpManager_venv/bin/python mm.py
