@@ -2,7 +2,8 @@
 import os
 import time
 import pymtp
-import asyncio
+import logging
+#import asyncio
 import collections
 import configparser
 import mtp_actions
@@ -31,7 +32,7 @@ use_cmd = 0
 config = configparser.ConfigParser()
 config.read("ps.ini")
 library = {} # Core Library
-
+logging.basicConfig(level=logging.DEBUG)
 
 """
 Relates Listbox index to a track path. This enables us to corelate any
@@ -229,10 +230,20 @@ def SendMP3ToDevice_CMD(track_path):
     #dnum=TryGetID3(tag, 'discnumber')
     genr=TryGetID3(tag, 'genre')
     SendTrackToDevice_CMD(track_path, tnum, titl, albm, arts, aldt, alar, cpsr, genr, trk.info.length)
-    #trname="Music/{}/{}/{} - {} - {} {}.MP3".format(arts, albm, arts,albm,tnum,titl)
-    #cmd = 'mtp-sendtr -t "{}" -a "{}" -A "{}" -w "{}" -l "{}" -c "{}" -g "{}" -n "{}" -y "{}" -d "{}" "{}" "{}"'.format(titl, arts, alar, cpsr, albm, "mp3", genr, tnum, aldt, trk.info.length, track_path, trname)
-    #rv = os.system(cmd)
-    #print(rv)
+
+def SendWMAToDevice_CMD(track_path):
+    trk = ASF(track_path)
+    tags = trk.tags.as_dict()
+    tnum=TryGetAsfTag(tags, 'tracknumber')
+    titl=TryGetAsfTag(tags, 'title')
+    albm=TryGetAsfTag(tags, 'album')
+    arts=TryGetAsfTag(tags, 'artist')
+    aldt=TryGetAsfTag(tags, 'date')
+    alar=TryGetAsfTag(tags, 'albumartist')
+    cpsr=TryGetAsfTag(tags, 'composer')
+    #dnum=TryGetID3(tag, 'discnumber')
+    genr=TryGetAsfTag(tags, 'genre')
+    SendTrackToDevice_CMD(track_path, tnum, titl, albm, arts, aldt, alar, cpsr, genr, trk.info.length)
 
 
 def SendTrackToDevice_CMD(track_path, tnum, titl, albm, arts, aldt, alar, cpsr, genr, length):
@@ -443,38 +454,56 @@ def Action_SingleTrackWMA(track_index):
 
 def ConvertAndTransferTrack(track_path, my_format, use_cmd):
     output_file = "/tmp/TRANSCODE."+my_format
+    if(os.path.exists(output_file)):
+        try:
+            os.remove(output_file)
+        except FileNotFoundError:
+            print("{} not found for deletion.".format(output_file))
+        except PermissionError:
+            print("No permission to delete {}".format(output_file))
+        except Exception as e:
+            print("Error while deleting {}: {}".format(output_file, e))
+    
     # Only transcode if it's not the target format.'
     if (FileIsMusic(track_path, [my_format])):
+        outputdetails = {"qscale:a": "0"}
+        if(my_format == "wma"):
+            outputdetails = {"codec:a": "wmav2"}
         # Got this from Brave Leo AI.
         ffmpeg = (
             FFmpeg()
             .input(track_path)
-            .output(
-                output_file,
-                {"qscale:a": "0"}
-                )
+            .output(output_file, outputdetails)
             )
         print("Converting {} to {}".format(track_path, output_file))
-        ffmpeg.execute()
+
+        try:
+            ffmpeg.execute()
+        except Exception as e:
+            print(f"FFMPEG FAILED: {e}")
+
         print("Done.")
         if(use_cmd):
-            SendMP3ToDevice_CMD(output_file)
+            if(my_format == "mp3"):
+                SendMP3ToDevice_CMD(output_file)
+            elif(my_format == "wma"):
+                #SendWMAToDevice_CMD(output_file)
+                SendTrackToDevice_CMD()
+            else:
+                print("Logic path not ready!")
+                return
         else:
             SendTrackToDevice_MTP(output_file)
-        if(os.path.exists(output_file)):
-            try:
-                os.remove(output_file)
-            except FileNotFoundError:
-                print("{} not found for deletion.".format(output_file))
-            except PermissionError:
-                print("No permission to delete {}".format(output_file))
-            except Exception as e:
-                print("Error while deleting {}: {}".format(output_file, e))
-        else:
-            print("{} does not exist. That's probably okay.".format(output_file))
+
     else: # Already the target format.
         if(use_cmd):
-            SendMP3ToDevice_CMD(track_path)
+            if(my_format == "mp3"):
+                SendMP3ToDevice_CMD(track_path)
+            elif(my_format == "wma"):
+                SendWMAToDevice_CMD(track_path)
+            else:
+                print("Logic path not ready!")
+                return
         else:
             SendTrackToDevice_MTP(track_path)
 
@@ -722,7 +751,7 @@ label.pack()
 
 sendtype_options = ["Single Track MP3", "Single Track WMA", "All from Album", "All from Artist", "Set Device Name", "Read Folder List", "Create a New Folder", "Copy Track to PC", "Delete All Tracks", "Get File Info", "Convert and Transfer Album"]
 sendtype_combo = ttk.Combobox(leftframe, values=sendtype_options)
-sendtype_combo.set("Single Track")
+sendtype_combo.set("Single Track MP3")
 sendtype_combo.pack(padx=3,pady=3)
 
 tk_use_cmd = IntVar()
