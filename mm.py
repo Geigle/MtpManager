@@ -216,7 +216,6 @@ def SendMP3ToDevice_CMD(track_path):
     """
     Use the LibMTP Example program to send a track to an MTP device.
     Note: Presumes an MP3.
-    TODO: Generalize for more track types.
     """
     tag = EasyID3(track_path)
     trk = MP3(track_path)
@@ -247,11 +246,31 @@ def SendWMAToDevice_CMD(track_path):
 
 
 def SendTrackToDevice_CMD(track_path, tnum, titl, albm, arts, aldt, alar, cpsr, genr, length):
+    """
+    Use LibMTP example program through command line interface.
+    usage: sendtr 
+        [ -D debuglvl ]
+        [ -q ] (-q means the program will not ask for missing information.)
+        -t <title> 
+        -a <artist> 
+        -A <Album artist> 
+        -w <writer or composer> 
+        -l <album> 
+        -c <codec> 
+        -g <genre> 
+        -n <track number> 
+        -y <year> 
+        -d <duration in seconds> 
+        -s <storage_id> 
+        <local path> 
+        <remote path> 
+    """
     filename, file_extension = os.path.splitext(track_path)
     trname=f"Music/{arts}/{albm}/{arts} - {albm} - {tnum} {titl}"
-    cmd = f'mtp-sendtr -t "{titl}" -a "{arts}" -A "{alar}" -w "{cpsr}" -l "{albm}" -c "{file_extension}" -g "{genr}" -n "{tnum}" -y "{aldt}" -d "{length}" "{track_path}" "{trname}"'
-    rv = os.system(cmd)
-    print(rv)
+    cmd = f'mtp-sendtr -q -t "{titl}" -a "{arts}" -A "{alar}" -w "{cpsr}" -l "{albm}" -c "{file_extension}" -g "{genr}" -n "{tnum}" -y "{aldt}" -d "{length}" "{track_path}" "{trname}"'
+    os.system(cmd)
+    # rv = os.system(cmd)
+    # print(rv)
 
 def GetTracksInDir(dir_path):
     """
@@ -487,8 +506,7 @@ def ConvertAndTransferTrack(track_path, my_format, use_cmd):
             if(my_format == "mp3"):
                 SendMP3ToDevice_CMD(output_file)
             elif(my_format == "wma"):
-                #SendWMAToDevice_CMD(output_file)
-                SendTrackToDevice_CMD()
+                SendWMAToDevice_CMD(output_file)
             else:
                 print("Logic path not ready!")
                 return
@@ -546,18 +564,23 @@ def Action_AllFromAlbum( track_index ):
     if len(track_index) == 0:
         messagebox.showinfo("Index", "You forgot to select a track.")
         return
-
     print(track_index)
     ti = track_index[0]+1
     print(ti)
     try:
-        mypath=paths[ti]
-        album=tracks[mypath]["album"]
-        artist=tracks[mypath]["artist"]
+        mypath=list(library[ti].keys())[0]
+        print(mypath)
+        artist=library[ti][mypath]["artist"]
+        album=library[ti][mypath]["album"]
+        print(artist)
         al_paths = []
-        for t in tracks:
-            if tracks[t]["album"] == album and tracks[t]["artist"] == artist:
-                al_paths.append(t)
+        for t in library:
+            t_path = list(library[t].keys())[0]
+            ar = (library[t][t_path]["artist"] == artist)
+            al = (library[t][t_path]["album"] == album)
+            if ar and al:
+                al_paths.append(t_path)
+        
         al_paths.sort()
         plen = len(al_paths)
         count = 1
@@ -568,7 +591,6 @@ def Action_AllFromAlbum( track_index ):
             count=count+1
     except IndexError:
         messagebox.showinfo("Usage", "You forgot to select a track.")
-
 
 
 def Action_EntireLibrary():
@@ -584,7 +606,6 @@ def Action_EntireLibrary():
         use_cmd = (tk_use_cmd.get() == 1)
         ConvertAndTransferTrack(x, "mp3", use_cmd)
         count = count + 1
-
 
 
 def FileIsMusic(track_path, exclusions={}):
