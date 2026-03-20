@@ -1,7 +1,38 @@
 # mtp_actions.py
 import pymtp
+from ctypes import c_char_p, c_uint32
+from mutagen.easyid3 import EasyID3
+from mutagen.mp3 import MP3
+from tkinter import messagebox
 
-def ConnectMTP():
+def TryGetID3(EasyID3_inst, tag_id):
+    """
+    Fetch an ID3 tag from an EasyID3 object.
+    Provides alternative values if not found.
+    """
+    if EasyID3_inst.__contains__(tag_id):
+        this_tag = ""
+        if tag_id == 'tracknumber' and EasyID3_inst[tag_id][0].__contains__('/'):
+            this_tag = EasyID3_inst[tag_id][0].split('/')[0]
+        else:
+            this_tag = EasyID3_inst[tag_id][0]
+        if len(this_tag) < 2:
+            this_tag = "0"+this_tag
+        return this_tag
+    else:
+        if tag_id == 'tracknumber' or tag_id == 'discnumber':
+            return "1" # Sometimes singles aren't tagged properly.
+        elif tag_id == 'albumartist' or tag_id == 'composer':
+            return TryGetID3(EasyID3_inst, 'artist')
+        elif tag_id == 'date':
+            return TryGetID3(EasyID3_inst, 'year')
+        else:
+            return ""
+
+def CastNumberForMTP(num_list):
+    return int(''.join(num_list).split("/")[0])
+
+def ConnectMTP(mtp):
     """
     Establish MTP connection with device.
     """
@@ -12,7 +43,7 @@ def ConnectMTP():
     except pymtp.AlreadyConnected:
         print("{} already connected.".format(devname))
 
-def DisconnectMTP():
+def DisconnectMTP(mtp):
     """
     Terminate MTP connection with device. MTP handles this if the device is physically disconnected.
     """
@@ -23,18 +54,18 @@ def DisconnectMTP():
         print("No MTP device present.")
 
 
-def SyncAllToMTP():
+def SyncAllToMTP(mtp, tracks, progress):
     print("Synching...")
     count = 0
     tot = len(tracks)
     for track in tracks.keys():
         progress.step((count/tot)*100)
         print("PROGRESS: {}/{} - {}".format(count, tot, tracks[track][9]))
-        SendTrackToDevice_MTP(tracks[track][9])
+        SendTrackToDevice_MTP(mtp, tracks[track][9])
         count=count+1
     progress.step(100)
 
-def GetDeviceInfoMTP():
+def GetDeviceInfoMTP(mtp):
     """
     Must have already called ConnectMTP.
     """
@@ -65,7 +96,7 @@ def GetDeviceInfoMTP():
     messagebox.showinfo("Device Info", summary0)
     return devdict
 
-def SendFileToDevice_MTP(file_path):
+def SendFileToDevice_MTP(mtp, file_path):
     """
     Send a generic file over MTP.
     Call ConnectMTP before this.
@@ -88,7 +119,7 @@ def SendFileToDevice_MTP(file_path):
     oid = mtp.send_file_from_file(file_path,c_char_p(fname.encode('utf-8')))
     print(oid)
 
-def SendTrackToDevice_MTP(file_path):
+def SendTrackToDevice_MTP(mtp, file_path):
     """
     Send a track to an MTP device (not a file).
     Make sure you have called ConnectMTP before this.

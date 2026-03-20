@@ -511,7 +511,7 @@ def ConvertAndTransferTrack(track_path, my_format, use_cmd):
                 print("Logic path not ready!")
                 return
         else:
-            SendTrackToDevice_MTP(output_file)
+            mtp_actions.SendTrackToDevice_MTP(mtp, output_file)
 
     else: # Already the target format.
         if(use_cmd):
@@ -523,7 +523,7 @@ def ConvertAndTransferTrack(track_path, my_format, use_cmd):
                 print("Logic path not ready!")
                 return
         else:
-            SendTrackToDevice_MTP(track_path)
+            mtp_actions.SendTrackToDevice_MTP(mtp, track_path)
 
 
 def Action_AllFromArtist(track_index):
@@ -708,10 +708,10 @@ def ExecuteAction():
         Action_EntireLibrary()
 
     elif ex_option == "Send Test File":
-        SendFileToDevice_MTP(file_entry.get())
+        mtp_actions.SendFileToDevice_MTP(mtp, file_entry.get())
 
     elif ex_option == "Send Test Track":
-        asyncio.run(SendTrackToDevice_MTP(file_entry.get()))
+        mtp_actions.SendTrackToDevice_MTP(mtp, file_entry.get())
 
     elif ex_option == "Set Device Name":
         SetDeviceName()
@@ -779,13 +779,13 @@ tk_use_cmd = IntVar()
 CMD_checkbox = Checkbutton(leftframe, text="Use CMD alternative", variable=tk_use_cmd, onvalue=1, offvalue=0, command=on_toggle_CMD_checkbox)
 CMD_checkbox.pack(padx=3,pady=3, side=TOP)
 
-button1 = Button(leftframe, width=20, text="Connect", command=mtp_actions.ConnectMTP)
+button1 = Button(leftframe, width=20, text="Connect", command=lambda: mtp_actions.ConnectMTP(mtp))
 button1.pack(padx=3,pady=3, side=TOP)
 
-button2 = Button(leftframe, width=20, text="Disconnect", command=mtp_actions.DisconnectMTP)
+button2 = Button(leftframe, width=20, text="Disconnect", command=lambda: mtp_actions.DisconnectMTP(mtp))
 button2.pack(padx=3,pady=3, side=TOP)
 
-button3 = Button(leftframe, width=20, text="Device Info", command=mtp_actions.GetDeviceInfoMTP)
+button3 = Button(leftframe, width=20, text="Device Info", command=lambda: mtp_actions.GetDeviceInfoMTP(mtp))
 button3.pack(padx=3,pady=3, side=TOP)
 
 button4 = Button(leftframe, width=20, text="Select Library", command=GetLibraryPath)
