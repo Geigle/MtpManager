@@ -1,1 +1,3 @@
-__pycache__/mtp_actions.cpython-314.pyc
+.venv/
+__pycache__/
+*.pyc

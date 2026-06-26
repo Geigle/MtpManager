@@ -7,7 +7,7 @@
             "request": "launch",
             "program": "${workspaceFolder}/mm.py",
             "console": "integratedTerminal",
-            "pythonPath": "${env:HOME}/Development/MtpManager_venv/bin/python",
+            "python": "${workspaceFolder}/.venv/bin/python",
             "justMyCode": true
         }
     ]
