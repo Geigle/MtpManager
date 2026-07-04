@@ -1,5 +1,5 @@
 # mtp_actions.py
-import pymtp
+import pymtp_wrapper as pymtp
 
 def ConnectMTP():
     """

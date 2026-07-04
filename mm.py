@@ -1,8 +1,9 @@
 # Libraries
 import os
 import time
-import pymtp
+import pymtp_wrapper as pymtp
 import logging
+import subprocess
 #import asyncio
 import collections
 import configparser
@@ -268,7 +269,7 @@ def SendTrackToDevice_CMD(track_path, tnum, titl, albm, arts, aldt, alar, cpsr, 
     filename, file_extension = os.path.splitext(track_path)
     trname=f"Music/{arts}/{albm}/{arts} - {albm} - {tnum} {titl}"
     cmd = f'mtp-sendtr -q -t "{titl}" -a "{arts}" -A "{alar}" -w "{cpsr}" -l "{albm}" -c "{file_extension}" -g "{genr}" -n "{tnum}" -y "{aldt}" -d "{length}" "{track_path}" "{trname}"'
-    os.system(cmd)
+    subprocess.run(cmd, shell=True)
     # rv = os.system(cmd)
     # print(rv)
 
