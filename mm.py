@@ -1,23 +1,29 @@
 # Libraries
 import os
 import time
-import pymtp
 import logging
-#import asyncio
+import subprocess
+import asyncio
 import collections
 import configparser
-import mtp_actions
 from ctypes import *
+
+# Transcoding Libraries
 from ffmpeg import FFmpeg
-from mutagen.easyid3 import EasyID3
-from mutagen.flac import FLAC
-from mutagen.mp3 import MP3
-from mutagen.asf import ASF
+
+# GUI Libraries
 from tkinter import *
-from tkinter import ttk
-from tkinter import messagebox
-from tkinter import filedialog
-from tkinter import Listbox
+from tkinter import ttk, messagebox, filedialog
+
+# Custom Libraries
+import mtp_actions
+import cmd_actions
+import tagging
+
+# Custom Wrappers
+import pymtp_wrapper as pymtp
+
+################################################################################
 
 # Setup Variables
 mtp = pymtp.MTP()
@@ -95,7 +101,6 @@ lengths = {}
 sizes = {}
 
 
-
 # Create Functions
 
 def CastCharListForMTP(char_list):
@@ -106,97 +111,13 @@ def CastCharListForMTP(char_list):
     """
     return cast(''.join(char_list),        c_char_p).value
 
+
 def CastNumberForMTP(num_list):
     return int(''.join(num_list).split("/")[0])
 
+
 def CharLst2Str(char_list):
     return ''.join(char_list)
-
-
-def TryGetID3(EasyID3_inst, tag_id):
-    """
-    Fetch an ID3 tag from an EasyID3 object.
-    Provides alternative values if not found.
-    """
-    if EasyID3_inst.__contains__(tag_id):
-        this_tag = ""
-        if tag_id == 'tracknumber' and EasyID3_inst[tag_id][0].__contains__('/'):
-            this_tag = EasyID3_inst[tag_id][0].split('/')[0]
-        else:
-            this_tag = EasyID3_inst[tag_id][0]
-        if len(this_tag) < 2:
-            this_tag = "0"+this_tag
-        return this_tag
-    else:
-        if tag_id == 'tracknumber' or tag_id == 'discnumber':
-            return "1" # Sometimes singles aren't tagged properly.
-        elif tag_id == 'albumartist' or tag_id == 'composer':
-            return TryGetID3(EasyID3_inst, 'artist')
-        elif tag_id == 'date':
-            return TryGetID3(EasyID3_inst, 'year')
-        else:
-            return ""
-
-def TryGetVorbisTag(tag_dict, tag_id):
-    """
-    Fetch a Vorbis tag from a dictionary.
-    Provides alternative values if not found.
-    """
-    if tag_dict.__contains__(tag_id):
-        this_tag = ""
-        if tag_id == 'TRACKNUMBER' and tag_dict[tag_id][0].__contains__('/'):
-            this_tag = tag_dict[tag_id][0].split('/')[0]
-        else:
-            this_tag = tag_dict[tag_id][0]
-        if len(this_tag) < 2:
-            this_tag = "0"+this_tag
-        return this_tag
-
-    else:
-        if tag_id == 'TRACKNUMBER' or tag_id == 'DISCNUMBER':
-            return "1"
-        elif tag_id == 'ALBUMARTIST' or tag_id == 'COMPOSER':
-            return TryGetVorbisTag(tag_dict, 'ARTIST')
-        elif tag_id == 'ARTIST':
-            return "Unknown Artist"
-        elif tag_id == 'DATE':
-            return TryGetVorbisTag(tag_dict, 'YEAR')
-        elif tag_id == 'ALBUM':
-            return "Unknown Album"
-        elif tag_id == 'TITLE':
-            return "Unknown Title"
-        else:
-            return ""
-
-def TryGetAsfTag(tag_dict, tag_id):
-    """
-    Must be mutagen.asf.ASFTags.as_dict()
-    """
-    if tag_dict.__contains__(tag_id):
-        this_tag = ""
-        if tag_id == 'TRACKNUMBER' and tag_dict[tag_id][0].__contains__('/'):
-            this_tag = tag_dict[tag_id][0].split('/')[0]
-        else:
-            this_tag = tag_dict[tag_id][0]
-        # Normalize for two digit tracknumbers. If you need 100... well, shit.
-        if len(this_tag) < 2:
-            this_tag = "0"+this_tag
-        return this_tag
-    else:
-        if tag_id == 'TRACKNUMBER' or tag_id == 'DISCNUMBER':
-            return "01"
-        elif tag_id == 'ALBUMARTIST' or tag_id == 'COMPOSER':
-            return TryGetVorbisTag(tag_dict, 'ARTIST')
-        elif tag_id == 'ARTIST':
-            return "Unknown Artist"
-        elif tag_id == 'DATE':
-            return TryGetVorbisTag(tag_dict, 'YEAR')
-        elif tag_id == 'ALBUM':
-            return "Unknown Album"
-        elif tag_id == 'TITLE':
-            return "Unknown Title"
-        else:
-            return ""
 
 
 def StoreTrackDetail(detail_dict, label, idx):
@@ -207,70 +128,12 @@ def StoreTrackDetail(detail_dict, label, idx):
         detail_dict[label] = []
         detail_dict[label].append(idx)
 
+
 def SortTrackDetails(details = []):
     for tags in details:
         for tag in tags:
             tags[tag].sort()
 
-def SendMP3ToDevice_CMD(track_path):
-    """
-    Use the LibMTP Example program to send a track to an MTP device.
-    Note: Presumes an MP3.
-    """
-    tag = EasyID3(track_path)
-    trk = MP3(track_path)
-    tnum=TryGetID3(tag, 'tracknumber')
-    titl=TryGetID3(tag, 'title')
-    albm=TryGetID3(tag, 'album')
-    arts=TryGetID3(tag, 'artist')
-    aldt=TryGetID3(tag, 'date')
-    alar=TryGetID3(tag, 'albumartist')
-    cpsr=TryGetID3(tag, 'composer')
-    #dnum=TryGetID3(tag, 'discnumber')
-    genr=TryGetID3(tag, 'genre')
-    SendTrackToDevice_CMD(track_path, tnum, titl, albm, arts, aldt, alar, cpsr, genr, trk.info.length)
-
-def SendWMAToDevice_CMD(track_path):
-    trk = ASF(track_path)
-    tags = trk.tags.as_dict()
-    tnum=TryGetAsfTag(tags, 'tracknumber')
-    titl=TryGetAsfTag(tags, 'title')
-    albm=TryGetAsfTag(tags, 'album')
-    arts=TryGetAsfTag(tags, 'artist')
-    aldt=TryGetAsfTag(tags, 'date')
-    alar=TryGetAsfTag(tags, 'albumartist')
-    cpsr=TryGetAsfTag(tags, 'composer')
-    #dnum=TryGetID3(tag, 'discnumber')
-    genr=TryGetAsfTag(tags, 'genre')
-    SendTrackToDevice_CMD(track_path, tnum, titl, albm, arts, aldt, alar, cpsr, genr, trk.info.length)
-
-
-def SendTrackToDevice_CMD(track_path, tnum, titl, albm, arts, aldt, alar, cpsr, genr, length):
-    """
-    Use LibMTP example program through command line interface.
-    usage: sendtr 
-        [ -D debuglvl ]
-        [ -q ] (-q means the program will not ask for missing information.)
-        -t <title> 
-        -a <artist> 
-        -A <Album artist> 
-        -w <writer or composer> 
-        -l <album> 
-        -c <codec> 
-        -g <genre> 
-        -n <track number> 
-        -y <year> 
-        -d <duration in seconds> 
-        -s <storage_id> 
-        <local path> 
-        <remote path> 
-    """
-    filename, file_extension = os.path.splitext(track_path)
-    trname=f"Music/{arts}/{albm}/{arts} - {albm} - {tnum} {titl}"
-    cmd = f'mtp-sendtr -q -t "{titl}" -a "{arts}" -A "{alar}" -w "{cpsr}" -l "{albm}" -c "{file_extension}" -g "{genr}" -n "{tnum}" -y "{aldt}" -d "{length}" "{track_path}" "{trname}"'
-    os.system(cmd)
-    # rv = os.system(cmd)
-    # print(rv)
 
 def GetTracksInDir(dir_path):
     """
@@ -302,27 +165,27 @@ def GetTracksInDir(dir_path):
                 pa= os.path.join(dir_path, filename)
                 sz= os.stat(os.path.join(dir_path, filename)).st_size
                 if FileIsMP3(filename):
-                    tag = EasyID3(tpath)
-                    trk = MP3(tpath)
-                    ar= TryGetID3(tag, 'artist')
-                    aa= TryGetID3(tag, 'albumartist')
-                    co= TryGetID3(tag, 'composer')
-                    al= TryGetID3(tag, 'album')
-                    ti= TryGetID3(tag, 'title')
-                    ge= TryGetID3(tag, 'genre')
-                    tn= TryGetID3(tag, 'tracknumber')
-                    dt= TryGetID3(tag, 'date')
+                    tag = tagging.EasyID3(tpath)
+                    trk = tagging.  MP3(tpath)
+                    ar= tagging.TryGetID3(tag, 'artist')
+                    aa= tagging.TryGetID3(tag, 'albumartist')
+                    co= tagging.TryGetID3(tag, 'composer')
+                    al= tagging.TryGetID3(tag, 'album')
+                    ti= tagging.TryGetID3(tag, 'title')
+                    ge= tagging.TryGetID3(tag, 'genre')
+                    tn= tagging.TryGetID3(tag, 'tracknumber')
+                    dt= tagging.TryGetID3(tag, 'date')
                     ln= trk.info.length
                 elif FileIsFLAC(filename):
-                    trk = FLAC(tpath)
-                    ar = TryGetVorbisTag(trk.tags, 'ARTIST')
-                    aa = TryGetVorbisTag(trk.tags, 'ALBUMARTIST')
-                    co = TryGetVorbisTag(trk.tags, 'COMPOSER')
-                    al = TryGetVorbisTag(trk.tags, 'ALBUM')
-                    ti = TryGetVorbisTag(trk.tags, 'TITLE')
-                    ge = TryGetVorbisTag(trk.tags, 'GENRE')
-                    tn = TryGetVorbisTag(trk.tags, 'TRACKNUMBER')
-                    dt = TryGetVorbisTag(trk.tags, 'DATE')
+                    trk = tagging.FLAC(tpath)
+                    ar = tagging.TryGetVorbisTag(trk.tags, 'ARTIST')
+                    aa = tagging.TryGetVorbisTag(trk.tags, 'ALBUMARTIST')
+                    co = tagging.TryGetVorbisTag(trk.tags, 'COMPOSER')
+                    al = tagging.TryGetVorbisTag(trk.tags, 'ALBUM')
+                    ti = tagging.TryGetVorbisTag(trk.tags, 'TITLE')
+                    ge = tagging.TryGetVorbisTag(trk.tags, 'GENRE')
+                    tn = tagging.TryGetVorbisTag(trk.tags, 'TRACKNUMBER')
+                    dt = tagging.TryGetVorbisTag(trk.tags, 'DATE')
                     ln = trk.info.length
 
                 dir_tracks[pa] = {
@@ -339,6 +202,7 @@ def GetTracksInDir(dir_path):
                 }
     return dir_tracks
 
+
 # 2025.10.25 Shit I wrote before was too complex. I can't work on it anymore. Broke it down.
 def PopulateListBox(item_list):
     """
@@ -354,6 +218,7 @@ def PopulateListBox(item_list):
         alb = item_list[item][path]["album"]
         smry = f"{ttl[:20]}, {art[:10]}, {alb[:8]}, ({trk})"
         lb.insert(item, smry)
+
 
 def BuildLibrary(library_path):
     new_library = {} # List of sorted/indexed tracks
@@ -382,52 +247,6 @@ def GetLibraryPath():
     PopulateListBox(library)
 
 
-def SetDeviceName():
-    """
-    Set the name of an MTP device.
-    Must have already called ConnectMTP.
-    """
-    dname = file_entry.get()
-    proceed = messagebox.askyesno("Confirm New Device Name", message = "Device will be renamed to {}.\nProceed?".format(dname))
-    if proceed:
-        mtp.set_devicename(dname.encode('utf-8'))
-
-
-def ReadFolderList():
-    """
-    BUGGY
-    Read the list of folders on an MTP device.
-    Must have already called ConnectMTP.
-    """
-    folders = mtp.get_folder_list()
-    lb.delete(0, END)
-    folders = mtp.get_folder_list()
-    print(folders)
-    fkeys = folders.keys()
-    print(fkeys)
-    fvals = folders.values()
-    print(fvals)
-    count = 0
-    for i in fkeys:
-        print(folders[i].name.decode('utf-8'))
-        lb.insert(count, "{:8} {}".format(i, folders[i].name.decode('utf-8')))
-        count = count + 1
-
-
-
-def CreateNewFolder():
-    """
-    Create a new folder on an MTP Device.
-    Must have already called ConnectMTP.
-    """
-    fname = file_entry.get()
-    proceed = messagebox.askyesno("Confirm New Folder Name", message = "Will create new folder: {}\nProceed?".format(fname))
-    if proceed:
-        mtp.create_folder(fname, parent=100)
-
-
-
-
 def DeleteAllTracks():
     """
     Delete all track objects on MTP device.
@@ -438,7 +257,6 @@ def DeleteAllTracks():
     #allother = mtp.get_filelisting() #LIBMTP_File
     for x in alltracks:
         print(x.storage_id)
-
 
 
 def Action_SingleTrack(track_index):
@@ -483,6 +301,7 @@ def ConvertAndTransferTrack(track_path, my_format, use_cmd):
         except Exception as e:
             print("Error while deleting {}: {}".format(output_file, e))
     
+
     # Only transcode if it's not the target format.'
     if (FileIsMusic(track_path, [my_format])):
         outputdetails = {"qscale:a": "0"}
@@ -504,26 +323,26 @@ def ConvertAndTransferTrack(track_path, my_format, use_cmd):
         print("Done.")
         if(use_cmd):
             if(my_format == "mp3"):
-                SendMP3ToDevice_CMD(output_file)
+                cmd_actions.SendMP3ToDevice_CMD(output_file)
             elif(my_format == "wma"):
-                SendWMAToDevice_CMD(output_file)
+                cmd_actions.SendWMAToDevice_CMD(output_file)
             else:
                 print("Logic path not ready!")
                 return
         else:
-            SendTrackToDevice_MTP(output_file)
+            mtp_actions.SendTrackToDevice_MTP(mtp, output_file)
 
     else: # Already the target format.
         if(use_cmd):
             if(my_format == "mp3"):
-                SendMP3ToDevice_CMD(track_path)
+                mtp_actions.SendTrackToDevice_MTP(mtp, track_path)
             elif(my_format == "wma"):
-                SendWMAToDevice_CMD(track_path)
+                mtp_actions.SendTrackToDevice_MTP(mtp, track_path)
             else:
                 print("Logic path not ready!")
                 return
         else:
-            SendTrackToDevice_MTP(track_path)
+            mtp_actions.SendTrackToDevice_MTP(mtp, track_path)
 
 
 def Action_AllFromArtist(track_index):
@@ -556,6 +375,7 @@ def Action_AllFromArtist(track_index):
             count=count+1
     except IndexError:
         messagebox.showinfo("Usage", "You forgot to select a track.")
+
 
 def Action_AllFromAlbum( track_index ):
     """
@@ -604,7 +424,7 @@ def Action_EntireLibrary():
         progress.step(round((count/tot)*100))
         print('{}/{} - "{}"'.format(count, tot, tracks[t]["path"]))
         use_cmd = (tk_use_cmd.get() == 1)
-        ConvertAndTransferTrack(x, "mp3", use_cmd)
+        ConvertAndTransferTrack(mtp, tracks[t]["path"], "mp3", use_cmd)
         count = count + 1
 
 
@@ -619,8 +439,6 @@ def FileIsMusic(track_path, exclusions={}):
             is_music = is_music +1
 
     return is_music
-
-
 
 
 def FileIsMP3(track_path):
@@ -670,7 +488,7 @@ def Action_ConvertAndTransferAlbum():
                 )
             ffmpeg.execute()
             print("Converted {} to {}".format(input_file, output_file))
-            SendMP3ToDevice_CMD(output_file)
+            cmd_actions.SendMP3ToDevice_CMD(output_file)
             if(os.path.exists(output_file)):
                 try:
                     os.remove(output_file)
@@ -708,19 +526,19 @@ def ExecuteAction():
         Action_EntireLibrary()
 
     elif ex_option == "Send Test File":
-        SendFileToDevice_MTP(file_entry.get())
+        mtp_actions.SendFileToDevice_MTP(mtp, file_entry.get())
 
     elif ex_option == "Send Test Track":
-        asyncio.run(SendTrackToDevice_MTP(file_entry.get()))
+        asyncio.run(mtp_actions.SendTrackToDevice_MTP(mtp, file_entry.get()))
 
     elif ex_option == "Set Device Name":
-        SetDeviceName()
+        mtp_actions.SetDeviceName(mtp)
 
     elif ex_option == "Read Folder List":
-        ReadFolderList()
+        mtp_actions.ReadFolderList(mtp, lb)
 
     elif ex_option == "Create a New Folder":
-        CreateNewFolder()
+        mtp_actions.CreateNewFolder_MTP(mtp)
 
     elif ex_option == "Delete All Tracks":
         DeleteAllTracks()
@@ -737,10 +555,20 @@ def ExecuteAction():
     else:
         messagebox.showinfo("Usage", "This option is not ready.")
 
+
 def on_toggle_CMD_checkbox():
     use_cmd = tk_use_cmd.get()
     print("Use CMD now {}".format(use_cmd))
 
+
+def Action_GetDeviceInfo():
+    """
+    GUI Action, Get device info and display in messagebox.
+    """
+    devinfo = mtp_actions.GetDeviceInfoMTP(mtp)
+    summary0="Name:{}\nSerial:{}\nManufacturer:{}\nBattery:{}\nModel:{}\nVersion:{}\nUsed:{:.2f}/{:.2f}\nUsed %:{:.2f}\nFree:{}"
+    summary0=summary0.format(devinfo["Name"],devinfo["Serial"],devinfo["Manufacturer"],devinfo["Battery"],devinfo["Model"],devinfo["Version"],devinfo["Used"]/1000000,devinfo["Total"]/1000000,devinfo["UsedPercent"],devinfo["Free"])
+    messagebox.showinfo("Device Info", summary0)
 
 
 root.geometry("1000x600")
@@ -779,13 +607,13 @@ tk_use_cmd = IntVar()
 CMD_checkbox = Checkbutton(leftframe, text="Use CMD alternative", variable=tk_use_cmd, onvalue=1, offvalue=0, command=on_toggle_CMD_checkbox)
 CMD_checkbox.pack(padx=3,pady=3, side=TOP)
 
-button1 = Button(leftframe, width=20, text="Connect", command=mtp_actions.ConnectMTP)
+button1 = Button(leftframe, width=20, text="Connect", command=lambda: mtp_actions.ConnectMTP(mtp))
 button1.pack(padx=3,pady=3, side=TOP)
 
-button2 = Button(leftframe, width=20, text="Disconnect", command=mtp_actions.DisconnectMTP)
+button2 = Button(leftframe, width=20, text="Disconnect", command=lambda: mtp_actions.DisconnectMTP(mtp))
 button2.pack(padx=3,pady=3, side=TOP)
 
-button3 = Button(leftframe, width=20, text="Device Info", command=mtp_actions.GetDeviceInfoMTP)
+button3 = Button(leftframe, width=20, text="Device Info", command=Action_GetDeviceInfo)
 button3.pack(padx=3,pady=3, side=TOP)
 
 button4 = Button(leftframe, width=20, text="Select Library", command=GetLibraryPath)
