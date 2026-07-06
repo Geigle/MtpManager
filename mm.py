@@ -532,13 +532,13 @@ def ExecuteAction():
         asyncio.run(mtp_actions.SendTrackToDevice_MTP(mtp, file_entry.get()))
 
     elif ex_option == "Set Device Name":
-        mtp_actions.SetDeviceName()
+        mtp_actions.SetDeviceName(mtp)
 
     elif ex_option == "Read Folder List":
-        mtp_actions.ReadFolderList()
+        mtp_actions.ReadFolderList(mtp, lb)
 
     elif ex_option == "Create a New Folder":
-        mtp_actions.CreateNewFolder()
+        mtp_actions.CreateNewFolder_MTP(mtp)
 
     elif ex_option == "Delete All Tracks":
         DeleteAllTracks()
@@ -607,10 +607,10 @@ tk_use_cmd = IntVar()
 CMD_checkbox = Checkbutton(leftframe, text="Use CMD alternative", variable=tk_use_cmd, onvalue=1, offvalue=0, command=on_toggle_CMD_checkbox)
 CMD_checkbox.pack(padx=3,pady=3, side=TOP)
 
-button1 = Button(leftframe, width=20, text="Connect", command=mtp_actions.ConnectMTP)
+button1 = Button(leftframe, width=20, text="Connect", command=lambda: mtp_actions.ConnectMTP(mtp))
 button1.pack(padx=3,pady=3, side=TOP)
 
-button2 = Button(leftframe, width=20, text="Disconnect", command=mtp_actions.DisconnectMTP)
+button2 = Button(leftframe, width=20, text="Disconnect", command=lambda: mtp_actions.DisconnectMTP(mtp))
 button2.pack(padx=3,pady=3, side=TOP)
 
 button3 = Button(leftframe, width=20, text="Device Info", command=Action_GetDeviceInfo)
