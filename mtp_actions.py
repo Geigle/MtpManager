@@ -1,53 +1,70 @@
 # mtp_actions.py
-import pymtp_wrapper as pymtp
+import os
 
-def ConnectMTP():
+import pymtp_wrapper as pymtp
+import tagging
+
+import ctypes
+from tkinter import END, messagebox
+
+def ConnectMTP(g_mtp):
     """
     Establish MTP connection with device.
     """
     try:
-        mtp.connect()
-        devname=mtp.get_devicename()
+        g_mtp.connect()
+        devname=g_mtp.get_devicename()
         print("Connected to {}".format(devname))
     except pymtp.AlreadyConnected:
         print("{} already connected.".format(devname))
 
-def DisconnectMTP():
+def DisconnectMTP(g_mtp):
     """
     Terminate MTP connection with device. MTP handles this if the device is physically disconnected.
     """
     try:
-        mtp.disconnect()
+        g_mtp.disconnect()
         #connected=False
     except pymtp.NotConnected:
         print("No MTP device present.")
 
 
-def SyncAllToMTP():
+def SetDeviceName(g_mtp, dname=None):
+    """
+    Set the name of an MTP device.
+    Must have already called ConnectMTP.
+    """
+    if dname is None:
+        dname = os.file_entry.get()
+    proceed = messagebox.askyesno("Confirm New Device Name", message = "Device will be renamed to {}.\nProceed?".format(dname))
+    if proceed:
+        g_mtp.set_devicename(dname.encode('utf-8'))
+
+def SyncAllToMTP(g_mtp, tracks, progress):
     print("Synching...")
     count = 0
     tot = len(tracks)
     for track in tracks.keys():
         progress.step((count/tot)*100)
         print("PROGRESS: {}/{} - {}".format(count, tot, tracks[track][9]))
-        SendTrackToDevice_MTP(tracks[track][9])
+        SendTrackToDevice_MTP(g_mtp, tracks[track][9])
         count=count+1
     progress.step(100)
 
-def GetDeviceInfoMTP():
+def GetDeviceInfoMTP(g_mtp):
     """
     Must have already called ConnectMTP.
     """
-    devname=mtp.get_devicename().decode('utf-8')
-    devserial=mtp.get_serialnumber().decode('utf-8')
-    devmfg=mtp.get_manufacturer().decode('utf-8')
-    devbattlvl=mtp.get_batterylevel() #.decode('utf-8')
-    devmodel=mtp.get_modelname().decode('utf-8')
-    devvers=mtp.get_deviceversion().decode('utf-8')
-    devfree=mtp.get_freespace() #.decode('utf-8')
-    devtotl=mtp.get_totalspace() #.decode('utf-8')
-    devused=mtp.get_usedspace() #.decode('utf-8')
-    devusedpercent=mtp.get_usedspace_percent() #.decode('utf-8')
+    devname=g_mtp.get_devicename().decode('utf-8')
+    devserial=g_mtp.get_serialnumber().decode('utf-8')
+    devmfg=g_mtp.get_manufacturer().decode('utf-8')
+    devbattlvl=g_mtp.get_batterylevel() #.decode('utf-8')
+    devmodel=g_mtp.get_modelname().decode('utf-8')
+    devvers=g_mtp.get_deviceversion().decode('utf-8')
+    devfree=g_mtp.get_freespace() #.decode('utf-8')
+    devtotl=g_mtp.get_totalspace() #.decode('utf-8')
+    devused=g_mtp.get_usedspace() #.decode('utf-8')
+    devusedpercent=g_mtp.get_usedspace_percent() #.decode('utf-8')
     devdict = {
         "Name": devname,
         "Serial": devserial,
@@ -60,12 +77,9 @@ def GetDeviceInfoMTP():
         "Used": devused,
         "UsedPercent": devusedpercent
         }
-    summary0="Name:{}\nSerial:{}\nManufacturer:{}\nBattery:{}\nModel:{}\nVersion:{}\nUsed:{:.2f}/{:.2f}\nUsed %:{:.2f}\nFree:{}"
-    summary0=summary0.format(devname,devserial,devmfg,devbattlvl,devmodel,devvers,devused/1000000,devtotl/1000000,devusedpercent,devfree)
-    messagebox.showinfo("Device Info", summary0)
     return devdict
 
-def SendFileToDevice_MTP(file_path):
+def SendFileToDevice_MTP(g_mtp, file_path):
     """
     Send a generic file over MTP.
     Call ConnectMTP before this.
@@ -85,63 +99,63 @@ def SendFileToDevice_MTP(file_path):
     fname="000_TEST_FILE.mp3"
     print("=====\n{}\n=====".format(file_path))
     #trid = mtp.send_track_from_file(track_path,c_char_p(trname.encode('utf-8')), mt)
-    oid = mtp.send_file_from_file(file_path,c_char_p(fname.encode('utf-8')))
+    oid = g_mtp.send_file_from_file(file_path,ctypes.c_char_p(fname.encode('utf-8')))
     print(oid)
 
-def SendTrackToDevice_MTP(file_path):
+def SendTrackToDevice_MTP(g_mtp, file_path):
     """
     Send a track to an MTP device (not a file).
     Make sure you have called ConnectMTP before this.
     """
-    tag = EasyID3(file_path)
-    trk = MP3(file_path)
-    tnum=TryGetID3(tag, 'tracknumber')
-    titl=TryGetID3(tag, 'title')
-    albm=TryGetID3(tag, 'album')
-    arts=TryGetID3(tag, 'artist')
-    aldt=TryGetID3(tag, 'date')
-    alar=TryGetID3(tag, 'albumartist')
-    cpsr=TryGetID3(tag, 'composer')
-    #dnum=TryGetID3(tag, 'discnumber')
-    genr=TryGetID3(tag, 'genre')
+    tag = tagging.EasyID3(file_path)
+    trk = tagging.MP3(file_path)
+    tnum=tagging.TryGetID3(tag, 'tracknumber')
+    titl=tagging.TryGetID3(tag, 'title')
+    albm=tagging.TryGetID3(tag, 'album')
+    arts=tagging.TryGetID3(tag, 'artist')
+    aldt=tagging.TryGetID3(tag, 'date')
+    alar=tagging.TryGetID3(tag, 'albumartist')
+    cpsr=tagging.TryGetID3(tag, 'composer')
+    #dnum=tagging.TryGetID3(tag, 'discnumber')
+    genr=tagging.TryGetID3(tag, 'genre')
     # getting fiddly with ctypes.
     mt = pymtp.LIBMTP_Track()
     #abm = (c_char_p)(addressof(create_string_buffer(64)))
-    mt.title        = c_char_p(titl.encode('utf-8'))
+    mt.title        = ctypes.c_char_p(titl.encode('utf-8'))
     #print("mt.title: {}".format(mt.title))
 
-    mt.artist       = c_char_p(arts.encode('utf-8'))
+    mt.artist       = ctypes.c_char_p(arts.encode('utf-8'))
     #print("mt.artist: {}".format(mt.artist))
 
-    mt.composer     = c_char_p(cpsr.encode('utf-8'))
+    mt.composer     = ctypes.c_char_p(cpsr.encode('utf-8'))
     #print("mt.composer: {}".format(mt.composer))
 
-    mt.genre        = c_char_p(genr.encode('utf-8'))
+    mt.genre        = ctypes.c_char_p(genr.encode('utf-8'))
     #print("mt.genre: {}".format(mt.genre))
 
-    mt.album        = c_char_p(albm.encode('utf-8'))
+    mt.album        = ctypes.c_char_p(albm.encode('utf-8'))
     #print("mt.album: {}".format(mt.album))
 
-    mt.date         = c_char_p(aldt.encode('utf-8'))
+    mt.date         = ctypes.c_char_p(aldt.encode('utf-8'))
     #print("mt.date: {}".format(mt.date))
 
-    mt.tracknumber  = CastNumberForMTP(tnum)
+    mt.tracknumber  = ctypes.c_int32(tnum)
     #print("mt.tracknumber: {}".format(mt.tracknumber))
 
-    mt.duration     = c_uint32(round(trk.info.length*1000))
+    mt.duration     = ctypes.c_uint32(round(trk.info.length*1000))
     #print("mt.duration: {}".format(mt.duration))
 
-    mt.samplerate   = trk.info.sample_rate
+    mt.samplerate   = ctypes.c_uint32(trk.info.sample_rate)
     #print("mt.samplerate: {}".format(mt.samplerate))
 
-    mt.nochannels   = trk.info.channels
+    mt.nochannels   = ctypes.c_uint32(trk.info.channels)
     #print("mt.nochannels: {}".format(mt.nochannels))
 
     # if len(trk.info.encoder_info)>0:
     #     mt.wavecodec    = trk.info.encoder_info
     #     print("mt.wavecodec: {}".format(mt.wavecodec))
 
-    mt.bitrate     = trk.info.bitrate
+    mt.bitrate     = ctypes.c_uint32(trk.info.bitrate)
     #print("mt.bitrate: {}".format(mt.bitrate))
 
     mt.bitratetype = trk.info.bitrate_mode
@@ -149,7 +163,7 @@ def SendTrackToDevice_MTP(file_path):
 
     fname="{} - {} - {} - {}.mp3".format(arts, albm, tnum, titl)
     #print("=====\n{}\n=====".format(file_path))
-    trid = mtp.send_track_from_file(file_path,c_char_p(fname.encode('utf-8')), mt) #, Callback_MtpSend)
+    trid = g_mtp.send_track_from_file(file_path,ctypes.c_char_p(fname.encode('utf-8')), mt) #, Callback_MtpSend)
     print(trid)
 
 def Callback_MtpSend(sent, total):
@@ -157,3 +171,38 @@ def Callback_MtpSend(sent, total):
 
 def Callback_MtpGet(total, sent):
     print(sent, total)
+
+
+
+
+def CreateNewFolder_MTP(g_mtp):
+    """
+    Create a new folder on an MTP Device.
+    Must have already called ConnectMTP.
+    """
+    fname = os.file_entry.get()
+    proceed = messagebox.askyesno("Confirm New Folder Name", message = "Will create new folder: {}\nProceed?".format(fname))
+    if proceed:
+        g_mtp.create_folder(fname, parent=100)
+
+
+
+def ReadFolderList(g_mtp, lb):
+    """
+    BUGGY
+    Read the list of folders on an MTP device.
+    Must have already called ConnectMTP.
+    """
+    folders = g_mtp.get_folder_list()
+    lb.delete(0, END)
+    folders = g_mtp.get_folder_list()
+    print(folders)
+    fkeys = folders.keys()
+    print(fkeys)
+    fvals = folders.values()
+    print(fvals)
+    count = 0
+    for i in fkeys:
+        print(folders[i].name.decode('utf-8'))
+        lb.insert(count, "{:8} {}".format(i, folders[i].name.decode('utf-8')))
+        count = count + 1
