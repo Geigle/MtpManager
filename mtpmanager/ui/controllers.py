@@ -33,10 +33,10 @@ class AppController:
         w.btn_device_info.configure(command=self.on_device_info)
         w.btn_select_library.configure(command=self.on_select_library)
         w.btn_action.configure(command=self.on_action)
-        w.cmd_checkbox.configure(command=self.on_toggle_cmd)
+        w.notebook.bind("<<NotebookTabChanged>>", self.on_mode_tab_changed)
 
     def _transport(self):
-        if self.win.use_cmd.get() == 1:
+        if self.win.active_mode() == "stable":
             return CmdTransport()
         return self.device
 
@@ -71,8 +71,10 @@ class AppController:
         except Exception:
             pass
 
-    def on_toggle_cmd(self) -> None:
-        print(f"Use CMD now {self.win.use_cmd.get()}")
+    def on_mode_tab_changed(self, _event=None) -> None:
+        mode = self.win.active_mode()
+        self.win.apply_mode_actions()
+        print(f"Mode now {mode} ({'CMD' if mode == 'stable' else 'PyMTP'})")
 
     def on_connect(self) -> None:
         try:
