@@ -136,7 +136,8 @@ rm -rf .venv
 
 | File | Role |
 |---|---|
-| `pymtp_wrapper.py` | macOS libmtp path fix; transparent pass-through on Linux |
+| `mtpmanager/infra/pymtp_wrapper.py` | macOS libmtp path fix; transparent pass-through on Linux |
+| `pymtp_wrapper.py` | Compatibility re-export of the above |
 | `MtpManager.sh` | Runs `.venv/bin/python mm.py`; creates venv if missing |
-| `mm.py` | GUI entry point; imports `pymtp_wrapper as pymtp` |
-| `mtp_actions.py` | MTP helpers; imports `pymtp_wrapper as pymtp` |
+| `mm.py` | Thin launcher → `mtpmanager` package |
+| `mtpmanager/` | App package (`domain`, `app`, `infra`, `ui`, `ports`) |
