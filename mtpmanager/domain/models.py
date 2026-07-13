@@ -1,0 +1,72 @@
+"""Domain models — pure data, no I/O."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+
+@dataclass(frozen=True)
+class TrackMetadata:
+    artist: str = "Unknown Artist"
+    albumartist: str = "Unknown Artist"
+    composer: str = "Unknown Composer"
+    album: str = "Unknown Album"
+    title: str = "Unknown Title"
+    genre: str = "Unknown Genre"
+    tracknumber: str = "01"
+    date: str = ""
+    length_sec: float = 0.0
+    # Technical stream info (optional; used by pymtp send)
+    sample_rate: int = 0
+    channels: int = 0
+    bitrate: int = 0
+    bitrate_mode: int = 0
+
+    def tracknumber_int(self) -> int:
+        raw = str(self.tracknumber).split("/")[0].strip()
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return 1
+
+
+@dataclass(frozen=True)
+class Track:
+    path: str
+    meta: TrackMetadata
+
+
+@dataclass(frozen=True)
+class DeviceInfo:
+    name: str = ""
+    serial: str = ""
+    manufacturer: str = ""
+    battery: Any = None
+    model: str = ""
+    version: str = ""
+    free: int = 0
+    total: int = 0
+    used: int = 0
+    used_percent: float = 0.0
+
+    def as_legacy_dict(self) -> dict:
+        """Shape expected by older UI formatting code."""
+        return {
+            "Name": self.name,
+            "Serial": self.serial,
+            "Manufacturer": self.manufacturer,
+            "Battery": self.battery,
+            "Model": self.model,
+            "Version": self.version,
+            "Free": self.free,
+            "Total": self.total,
+            "Used": self.used,
+            "UsedPercent": self.used_percent,
+        }
+
+
+@dataclass
+class FolderEntry:
+    folder_id: int
+    name: str
