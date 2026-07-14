@@ -14,6 +14,7 @@ from mtpmanager.infra.cmd_transport import CmdTransport
 from mtpmanager.infra.ffmpeg_transcode import FFmpegTranscoder
 from mtpmanager.infra.mutagen_tags import read_metadata
 from mtpmanager.infra.pymtp_device import PymtpDevice
+from mtpmanager.ports.transport import TransportError
 from mtpmanager.ui.formatting import device_info_summary, folder_line, track_summary
 from mtpmanager.ui.window import MainWindow
 
@@ -116,22 +117,42 @@ class AppController:
 
 
     def _transfer_one(self, track: Track, fmt: str) -> None:
-        transfer_track(
-            track,
-            target_format=fmt,
-            transport=self._transport(),
-            transcoder=self.transcoder,
-        )
+        try:
+            transfer_track(
+                track,
+                target_format=fmt,
+                transport=self._transport(),
+                transcoder=self.transcoder,
+            )
+        except TransportError as e:
+            logging.exception("Single-track transfer failed")
+            messagebox.showerror(
+                "Transfer failed",
+                f"{e}\n\n"
+                "If the player froze or was unplugged, disconnect/reconnect it "
+                "before trying again.",
+            )
 
 
     def _transfer_many(self, tracks: list[Track], fmt: str = "mp3") -> None:
-        transfer_tracks(
-            tracks,
-            target_format=fmt,
-            transport=self._transport(),
-            transcoder=self.transcoder,
-            on_progress=self._progress,
-        )
+        try:
+            transfer_tracks(
+                tracks,
+                target_format=fmt,
+                transport=self._transport(),
+                transcoder=self.transcoder,
+                on_progress=self._progress,
+            )
+        except TransportError as e:
+            logging.exception("Batch transfer aborted")
+            title = "Transfer aborted" if e.fatal else "Transfer failed"
+            messagebox.showerror(
+                title,
+                f"{e}\n\n"
+                "Batch stopped so remaining tracks are not sent into a dead "
+                "MTP session. Unplug/replug the player, free space if needed, "
+                "then resume from the failed track.",
+            )
 
 
     def action_single_track(self, fmt: str = "mp3") -> None:
@@ -145,7 +166,7 @@ class AppController:
         track = self._selected_track()
         if track is None:
             return
-        matches = self.library.filter_by_artist(track.meta.artist)
+        matches = self.library.filter_by_artist(track)
         matches.sort(key=lambda t: t.path)
         print(f"Artist {track.meta.artist}: {len(matches)} tracks")
         self._transfer_many(matches, "mp3")

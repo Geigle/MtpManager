@@ -53,6 +53,21 @@ def _albumartist_meaningful(albumartist: str) -> bool:
     return bool(albumartist) and albumartist != _UNKNOWN_ARTIST
 
 
+def _artist_meaningful(artist: str) -> bool:
+    return bool(artist) and artist != _UNKNOWN_ARTIST
+
+
+def _path_has_component(path: str, name: str) -> bool:
+    """True if any path component casefold-equals *name*."""
+    if not _artist_meaningful(name):
+        return False
+    key = name.casefold().strip()
+    return any(
+        part.casefold().strip() == key
+        for part in path.replace("\\", "/").split("/")
+    )
+
+
 def _album_path_hint(candidate: Track, seed: Track, album: str) -> bool:
     """True when path layout suggests candidate belongs with seed's album.
 
@@ -99,8 +114,37 @@ class Library:
     def get(self, index: int) -> Track:
         return self.tracks[index]
 
-    def filter_by_artist(self, artist: str) -> list[Track]:
-        return [t for t in self.tracks if t.meta.artist == artist]
+    def filter_by_artist(self, seed: Track) -> list[Track]:
+        """Tracks by the same artist as *seed*.
+
+        Primary identity is seed.meta.artist. Includes tracks with a matching
+        artist tag, albums credited to that artist via albumartist, or paths
+        that contain the artist name as a folder component. Logs when a track
+        is included despite a different artist tag (questionable membership).
+        """
+        artist = seed.meta.artist
+        artist_ok = _artist_meaningful(artist)
+
+        matches: list[Track] = []
+        for t in self.tracks:
+            reasons: list[str] = []
+            if t.meta.artist == artist:
+                reasons.append("same_artist")
+            if artist_ok and t.meta.albumartist == artist:
+                reasons.append("same_albumartist")
+            if artist_ok and _path_has_component(t.path, artist):
+                reasons.append("path_artist")
+
+            if not reasons:
+                continue
+
+            if "same_artist" not in reasons:
+                print(
+                    f"Artist match (questionable): {t.meta.title!r} by {t.meta.artist!r} "
+                    f"— reasons: {', '.join(reasons)}; artist={artist!r}"
+                )
+            matches.append(t)
+        return matches
 
     def filter_by_album(self, seed: Track) -> list[Track]:
         """Tracks belonging to the same album as *seed*.

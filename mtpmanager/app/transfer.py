@@ -8,7 +8,7 @@ from mtpmanager.domain.library import is_format
 from mtpmanager.domain.models import Track, TrackMetadata
 from mtpmanager.infra.mutagen_tags import read_metadata
 from mtpmanager.ports.transcoder import Transcoder
-from mtpmanager.ports.transport import Transport
+from mtpmanager.ports.transport import Transport, TransportError
 
 ProgressCallback = Callable[[int, int, str], None]
 
@@ -65,17 +65,41 @@ def transfer_tracks(
     transport: Transport,
     transcoder: Transcoder,
     on_progress: ProgressCallback | None = None,
-) -> None:
+    stop_on_fatal: bool = True,
+) -> int:
+    """Transfer many tracks. Returns number of successful sends.
+
+    On a fatal TransportError (dead USB/MTP session, timeout, storage unusable),
+    aborts the rest of the batch when *stop_on_fatal* is True (default) and
+    re-raises so the UI can report it.
+    """
     total = len(tracks)
+    succeeded = 0
     for i, track in enumerate(tracks):
         if on_progress:
             on_progress(i, total, track.path)
         print(f"{i + 1}/{total} - {track.path}")
-        transfer_track(
-            track,
-            target_format=target_format,
-            transport=transport,
-            transcoder=transcoder,
-        )
+        try:
+            transfer_track(
+                track,
+                target_format=target_format,
+                transport=transport,
+                transcoder=transcoder,
+            )
+            succeeded += 1
+        except TransportError as exc:
+            remaining = total - i - 1
+            print(f"FAILED ({i + 1}/{total}): {exc}")
+            if exc.fatal and stop_on_fatal:
+                print(
+                    f"Aborting batch: device/session looks unusable. "
+                    f"{remaining} track(s) not attempted. "
+                    f"Succeeded: {succeeded}/{total}."
+                )
+                if on_progress and total:
+                    on_progress(i + 1, total, track.path)
+                raise
+            print(f"Continuing after non-fatal failure ({remaining} left).")
     if on_progress and total:
         on_progress(total, total, "")
+    return succeeded

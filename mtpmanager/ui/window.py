@@ -130,7 +130,7 @@ class MainWindow:
         self.btn_select_library = Button(shared, width=20, text="Select Library")
         self.btn_select_library.pack(padx=3, pady=3, side=TOP)
 
-        self.btn_action = Button(shared, width=20, text="MTP Action")
+        self.btn_action = Button(shared, width=20, text="Execute Action")
         self.btn_action.pack(padx=3, pady=3, side=TOP)
 
         self.file_entry = Entry(rightframe, width=60)
