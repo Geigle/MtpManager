@@ -1,6 +1,6 @@
 from mtpmanager.ports.device import DevicePort
 from mtpmanager.ports.tags import TagReader
 from mtpmanager.ports.transcoder import Transcoder
-from mtpmanager.ports.transport import Transport
+from mtpmanager.ports.transport import Transport, TransportError
 
-__all__ = ["DevicePort", "TagReader", "Transcoder", "Transport"]
+__all__ = ["DevicePort", "TagReader", "Transcoder", "Transport", "TransportError"]
