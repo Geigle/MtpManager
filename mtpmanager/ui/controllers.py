@@ -26,6 +26,7 @@ class AppController:
         self.transcoder = FFmpegTranscoder()
         self._wire()
 
+
     def _wire(self) -> None:
         w = self.win
         w.btn_connect.configure(command=self.on_connect)
@@ -35,10 +36,12 @@ class AppController:
         w.btn_action.configure(command=self.on_action)
         w.notebook.bind("<<NotebookTabChanged>>", self.on_mode_tab_changed)
 
+
     def _transport(self):
         if self.win.active_mode() == "stable":
             return CmdTransport()
         return self.device
+
 
     def _selected_index(self) -> int | None:
         sel = self.win.listbox.curselection()
@@ -46,6 +49,7 @@ class AppController:
             messagebox.showinfo("Index", "You forgot to select a track.")
             return None
         return int(sel[0])
+
 
     def _selected_track(self) -> Track | None:
         idx = self._selected_index()
@@ -56,10 +60,12 @@ class AppController:
             return None
         return self.library.get(idx)
 
+
     def _populate_listbox(self, library: Library) -> None:
         self.win.listbox.delete(0, END)
         for track in library.tracks:
             self.win.listbox.insert(END, track_summary(track))
+
 
     def _progress(self, done: int, total: int, path: str) -> None:
         if total <= 0:
@@ -71,10 +77,12 @@ class AppController:
         except Exception:
             pass
 
+
     def on_mode_tab_changed(self, _event=None) -> None:
         mode = self.win.active_mode()
         self.win.apply_mode_actions()
         print(f"Mode now {mode} ({'CMD' if mode == 'stable' else 'PyMTP'})")
+
 
     def on_connect(self) -> None:
         try:
@@ -82,8 +90,10 @@ class AppController:
         except Exception as e:
             messagebox.showerror("Connect", str(e))
 
+
     def on_disconnect(self) -> None:
         device_ops.disconnect(self.device)
+
 
     def on_device_info(self) -> None:
         try:
@@ -91,6 +101,7 @@ class AppController:
             messagebox.showinfo("Device Info", device_info_summary(info))
         except Exception as e:
             messagebox.showerror("Device Info", str(e))
+
 
     def on_select_library(self) -> None:
         path = filedialog.askdirectory(
@@ -103,6 +114,7 @@ class AppController:
         self._populate_listbox(self.library)
         print(f"Loaded {len(self.library)} tracks from {path}")
 
+
     def _transfer_one(self, track: Track, fmt: str) -> None:
         transfer_track(
             track,
@@ -110,6 +122,7 @@ class AppController:
             transport=self._transport(),
             transcoder=self.transcoder,
         )
+
 
     def _transfer_many(self, tracks: list[Track], fmt: str = "mp3") -> None:
         transfer_tracks(
@@ -120,11 +133,13 @@ class AppController:
             on_progress=self._progress,
         )
 
+
     def action_single_track(self, fmt: str = "mp3") -> None:
         track = self._selected_track()
         if track is None:
             return
         self._transfer_one(track, fmt)
+
 
     def action_all_from_artist(self) -> None:
         track = self._selected_track()
@@ -135,20 +150,23 @@ class AppController:
         print(f"Artist {track.meta.artist}: {len(matches)} tracks")
         self._transfer_many(matches, "mp3")
 
+
     def action_all_from_album(self) -> None:
         track = self._selected_track()
         if track is None:
             return
-        matches = self.library.filter_by_album(track.meta.artist, track.meta.album)
+        matches = self.library.filter_by_album(track)
         matches.sort(key=lambda t: t.path)
         print(f"Album {track.meta.album}: {len(matches)} tracks")
         self._transfer_many(matches, "mp3")
+
 
     def action_entire_library(self) -> None:
         if not self.library.tracks:
             messagebox.showinfo("Library", "Load a library first.")
             return
         self._transfer_many(list(self.library.tracks), "mp3")
+
 
     def action_set_device_name(self) -> None:
         name = self.win.file_entry.get().strip()
@@ -165,6 +183,7 @@ class AppController:
         except Exception as e:
             messagebox.showerror("Set Device Name", str(e))
 
+
     def action_create_folder(self) -> None:
         name = self.win.file_entry.get().strip()
         if not name:
@@ -180,6 +199,7 @@ class AppController:
         except Exception as e:
             messagebox.showerror("Create Folder", str(e))
 
+
     def action_read_folder_list(self) -> None:
         try:
             folders = device_ops.list_folders(self.device)
@@ -190,6 +210,7 @@ class AppController:
         for entry in folders:
             print(entry.name)
             self.win.listbox.insert(END, folder_line(entry))
+
 
     def action_delete_all_tracks(self) -> None:
         """Stub: lists storage ids only (same as previous incomplete behavior)."""
@@ -205,6 +226,7 @@ class AppController:
             "Not fully implemented — listed track storage IDs to console only.",
         )
 
+
     def action_get_file_info(self) -> None:
         obid = 2654
         try:
@@ -213,6 +235,7 @@ class AppController:
             messagebox.showinfo("File Info", str(fmd))
         except Exception as e:
             messagebox.showerror("File Info", str(e))
+
 
     def action_convert_and_transfer_album(self) -> None:
         """Pick a directory, scan it, transfer every track as MP3 via pipeline."""
@@ -228,6 +251,7 @@ class AppController:
             return
         self._transfer_many(list(album_lib.tracks), "mp3")
 
+
     def action_send_test_file(self) -> None:
         path = self.win.file_entry.get().strip()
         if not path:
@@ -237,6 +261,7 @@ class AppController:
             device_ops.send_test_file(self.device, path)
         except Exception as e:
             messagebox.showerror("Send File", str(e))
+
 
     def action_send_test_track(self) -> None:
         path = self.win.file_entry.get().strip()
@@ -249,6 +274,7 @@ class AppController:
             self._transfer_one(track, "mp3")
         except Exception as e:
             messagebox.showerror("Send Track", str(e))
+
 
     def on_action(self) -> None:
         option = self.win.sendtype_combo.get()
