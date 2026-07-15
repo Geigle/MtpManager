@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 
 from mutagen.asf import ASF
@@ -11,6 +12,8 @@ from mutagen.mp3 import MP3
 
 from mtpmanager.domain.library import is_format
 from mtpmanager.domain.models import TrackMetadata
+
+logger = logging.getLogger(__name__)
 
 
 def _pad_tracknum(value: str) -> str:
@@ -189,7 +192,7 @@ def read_metadata(path: str) -> TrackMetadata:
         except Exception:
             pass
     except Exception as exc:
-        print(f"Tag read failed for {path}: {exc}")
+        logger.warning("Tag read failed for %s: %s", path, exc)
 
     base = os.path.splitext(os.path.basename(path))[0]
     return TrackMetadata(title=base or "Unknown Title")

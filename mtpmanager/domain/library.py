@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from dataclasses import dataclass, field
 from typing import Iterable
 
 from mtpmanager.domain.models import Track
+
+logger = logging.getLogger(__name__)
 
 MUSIC_EXTENSIONS = frozenset(
     {"aac", "alac", "flac", "mp3", "ogg", "vorbis", "wav", "wma"}
@@ -139,9 +142,12 @@ class Library:
                 continue
 
             if "same_artist" not in reasons:
-                print(
-                    f"Artist match (questionable): {t.meta.title!r} by {t.meta.artist!r} "
-                    f"— reasons: {', '.join(reasons)}; artist={artist!r}"
+                logger.debug(
+                    "Artist match (questionable): %r by %r — reasons: %s; artist=%r",
+                    t.meta.title,
+                    t.meta.artist,
+                    ", ".join(reasons),
+                    artist,
                 )
             matches.append(t)
         return matches
@@ -191,9 +197,12 @@ class Library:
                 continue
 
             if "same_artist" not in reasons:
-                print(
-                    f"Album match (questionable): {t.meta.title!r} by {t.meta.artist!r} "
-                    f"— reasons: {', '.join(reasons)}; album={album!r}"
+                logger.debug(
+                    "Album match (questionable): %r by %r — reasons: %s; album=%r",
+                    t.meta.title,
+                    t.meta.artist,
+                    ", ".join(reasons),
+                    album,
                 )
             matches.append(t)
         return matches

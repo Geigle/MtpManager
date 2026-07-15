@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Sequence
 
 from mtpmanager.domain.library import is_format
 from mtpmanager.domain.models import Track, TrackMetadata
+from mtpmanager.infra.logging_setup import start_transfer_log, stop_transfer_log
 from mtpmanager.infra.mutagen_tags import read_metadata
 from mtpmanager.ports.transcoder import Transcoder
 from mtpmanager.ports.transport import Transport, TransportError
+
+logger = logging.getLogger(__name__)
 
 ProgressCallback = Callable[[int, int, str], None]
 
@@ -66,40 +70,79 @@ def transfer_tracks(
     transcoder: Transcoder,
     on_progress: ProgressCallback | None = None,
     stop_on_fatal: bool = True,
+    session_log: bool = True,
 ) -> int:
     """Transfer many tracks. Returns number of successful sends.
 
     On a fatal TransportError (dead USB/MTP session, timeout, storage unusable),
     aborts the rest of the batch when *stop_on_fatal* is True (default) and
     re-raises so the UI can report it.
+
+    When *session_log* is True, attaches a per-batch ``transfer-*.log`` handler
+    for the duration of the batch.
     """
     total = len(tracks)
     succeeded = 0
-    for i, track in enumerate(tracks):
-        if on_progress:
-            on_progress(i, total, track.path)
-        print(f"{i + 1}/{total} - {track.path}")
+    session_handler = None
+    if session_log:
         try:
-            transfer_track(
-                track,
-                target_format=target_format,
-                transport=transport,
-                transcoder=transcoder,
-            )
-            succeeded += 1
-        except TransportError as exc:
-            remaining = total - i - 1
-            print(f"FAILED ({i + 1}/{total}): {exc}")
-            if exc.fatal and stop_on_fatal:
-                print(
-                    f"Aborting batch: device/session looks unusable. "
-                    f"{remaining} track(s) not attempted. "
-                    f"Succeeded: {succeeded}/{total}."
+            session_handler = start_transfer_log()
+        except OSError as exc:
+            logger.warning("Could not open transfer session log: %s", exc)
+
+    logger.info(
+        "Batch transfer start: %d track(s) target_format=%s",
+        total,
+        target_format,
+    )
+    try:
+        for i, track in enumerate(tracks):
+            if on_progress:
+                on_progress(i, total, track.path)
+            logger.info("%d/%d - %s", i + 1, total, track.path)
+            try:
+                transfer_track(
+                    track,
+                    target_format=target_format,
+                    transport=transport,
+                    transcoder=transcoder,
                 )
-                if on_progress and total:
-                    on_progress(i + 1, total, track.path)
-                raise
-            print(f"Continuing after non-fatal failure ({remaining} left).")
-    if on_progress and total:
-        on_progress(total, total, "")
-    return succeeded
+                succeeded += 1
+            except TransportError as exc:
+                remaining = total - i - 1
+                logger.error(
+                    "FAILED (%d/%d): %s fatal=%s path=%s rc=%s",
+                    i + 1,
+                    total,
+                    exc,
+                    exc.fatal,
+                    exc.path or track.path,
+                    exc.returncode,
+                )
+                if exc.stderr:
+                    logger.error("Transport stderr:\n%s", exc.stderr)
+                if exc.fatal and stop_on_fatal:
+                    logger.error(
+                        "Aborting batch: device/session looks unusable. "
+                        "%d track(s) not attempted. Succeeded: %d/%d.",
+                        remaining,
+                        succeeded,
+                        total,
+                    )
+                    if on_progress and total:
+                        on_progress(i + 1, total, track.path)
+                    raise
+                logger.warning(
+                    "Continuing after non-fatal failure (%d left).",
+                    remaining,
+                )
+        if on_progress and total:
+            on_progress(total, total, "")
+        logger.info(
+            "Batch transfer finished: succeeded=%d/%d",
+            succeeded,
+            total,
+        )
+        return succeeded
+    finally:
+        stop_transfer_log(session_handler)

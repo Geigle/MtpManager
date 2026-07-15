@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import tempfile
 
 from ffmpeg import FFmpeg
 
 from mtpmanager.domain.library import is_format
+
+logger = logging.getLogger(__name__)
 
 
 class FFmpegTranscoder:
@@ -29,14 +32,14 @@ class FFmpegTranscoder:
         else:
             output_details = {"qscale:a": "0"}
 
-        print(f"Converting {src_path} to {output_file}")
+        logger.info("Converting %s to %s", src_path, output_file)
         ffmpeg = FFmpeg().input(src_path).output(output_file, output_details)
         try:
             ffmpeg.execute()
         except Exception as e:
-            print(f"FFMPEG FAILED: {e}")
+            logger.error("FFMPEG FAILED: %s", e)
             raise
-        print("Done.")
+        logger.info("Done converting %s", src_path)
         return output_file
 
     def cleanup(self, path: str | None) -> None:
@@ -51,8 +54,8 @@ class FFmpegTranscoder:
         try:
             os.remove(path)
         except FileNotFoundError:
-            print(f"{path} not found for deletion.")
+            logger.warning("%s not found for deletion.", path)
         except PermissionError:
-            print(f"No permission to delete {path}")
+            logger.warning("No permission to delete %s", path)
         except Exception as e:
-            print(f"Error while deleting {path}: {e}")
+            logger.warning("Error while deleting %s: %s", path, e)

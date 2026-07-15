@@ -7,7 +7,15 @@ import sys
 
 
 def main(argv: list[str] | None = None) -> int:
-    logging.basicConfig(level=logging.DEBUG)
+    from mtpmanager.infra.logging_setup import configure_logging, prune_old_logs
+
+    log_dir = configure_logging()
+    removed = prune_old_logs(log_dir)
+    log = logging.getLogger("mtpmanager")
+    log.info("Logging to %s", log_dir.resolve())
+    if removed:
+        log.info("Pruned %d stale log file(s) from %s", removed, log_dir)
+
     # Ensure project root is importable when run as script path variants
     from mtpmanager.infra.pymtp_device import PymtpDevice
     from mtpmanager.ui.controllers import AppController
