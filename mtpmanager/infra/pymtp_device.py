@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import ctypes
+import logging
 import os
 
 import mtpmanager.infra.pymtp_wrapper as pymtp
 from mtpmanager.domain.models import DeviceInfo, FolderEntry, TrackMetadata
+
+logger = logging.getLogger(__name__)
 
 
 def _c_str(value: str) -> ctypes.c_char_p:
@@ -35,21 +38,22 @@ class PymtpDevice:
         try:
             self._mtp.connect()
             name = _decode(self._mtp.get_devicename())
-            print(f"Connected to {name}")
+            logger.info("Connected to %s", name)
             return name
         except pymtp.AlreadyConnected:
             try:
                 name = _decode(self._mtp.get_devicename())
             except Exception:
                 name = "(unknown)"
-            print(f"{name} already connected.")
+            logger.info("%s already connected.", name)
             return name
 
     def disconnect(self) -> None:
         try:
             self._mtp.disconnect()
+            logger.info("Disconnected MTP device.")
         except pymtp.NotConnected:
-            print("No MTP device present.")
+            logger.info("No MTP device present.")
 
     def get_info(self) -> DeviceInfo:
         return DeviceInfo(
@@ -83,9 +87,9 @@ class PymtpDevice:
 
     def send_file(self, path: str, remote_name: str | None = None) -> None:
         fname = remote_name or "000_TEST_FILE.mp3"
-        print(f"=====\n{path}\n=====")
+        logger.debug("send_file path=%s remote=%s", path, fname)
         oid = self._mtp.send_file_from_file(path, _c_str(fname))
-        print(oid)
+        logger.debug("send_file object_id=%s", oid)
 
     def get_tracklisting(self):
         return self._mtp.get_tracklisting()
@@ -116,4 +120,4 @@ class PymtpDevice:
         ext = ext or ".mp3"
         fname = f"{meta.artist} - {meta.album} - {meta.tracknumber} - {meta.title}{ext}"
         trid = self._mtp.send_track_from_file(path, _c_str(fname), mt)
-        print(trid)
+        logger.debug("send_track object_id=%s path=%s", trid, path)

@@ -12,11 +12,14 @@ from mtpmanager.domain.library import Library
 from mtpmanager.domain.models import Track
 from mtpmanager.infra.cmd_transport import CmdTransport
 from mtpmanager.infra.ffmpeg_transcode import FFmpegTranscoder
+from mtpmanager.infra.logging_setup import start_transfer_log, stop_transfer_log
 from mtpmanager.infra.mutagen_tags import read_metadata
 from mtpmanager.infra.pymtp_device import PymtpDevice
 from mtpmanager.ports.transport import TransportError
 from mtpmanager.ui.formatting import device_info_summary, folder_line, track_summary
 from mtpmanager.ui.window import MainWindow
+
+logger = logging.getLogger(__name__)
 
 
 class AppController:
@@ -82,13 +85,18 @@ class AppController:
     def on_mode_tab_changed(self, _event=None) -> None:
         mode = self.win.active_mode()
         self.win.apply_mode_actions()
-        print(f"Mode now {mode} ({'CMD' if mode == 'stable' else 'PyMTP'})")
+        logger.info(
+            "Mode now %s (%s)",
+            mode,
+            "CMD" if mode == "stable" else "PyMTP",
+        )
 
 
     def on_connect(self) -> None:
         try:
             device_ops.connect(self.device)
         except Exception as e:
+            logger.exception("Connect failed")
             messagebox.showerror("Connect", str(e))
 
 
@@ -101,6 +109,7 @@ class AppController:
             info = device_ops.get_device_info(self.device)
             messagebox.showinfo("Device Info", device_info_summary(info))
         except Exception as e:
+            logger.exception("Device info failed")
             messagebox.showerror("Device Info", str(e))
 
 
@@ -113,25 +122,50 @@ class AppController:
             return
         self.library = scan_library(path)
         self._populate_listbox(self.library)
-        print(f"Loaded {len(self.library)} tracks from {path}")
+        logger.info("Loaded %d tracks from %s", len(self.library), path)
+
+
+    def _log_transport_error(self, label: str, exc: TransportError) -> None:
+        logger.exception(
+            "%s path=%s fatal=%s rc=%s",
+            label,
+            exc.path,
+            exc.fatal,
+            exc.returncode,
+        )
+        if exc.stderr:
+            logger.error("Transport stderr:\n%s", exc.stderr)
 
 
     def _transfer_one(self, track: Track, fmt: str) -> None:
+        session_handler = None
         try:
+            session_handler = start_transfer_log()
+        except OSError as exc:
+            logger.warning("Could not open transfer session log: %s", exc)
+        try:
+            logger.info(
+                "Single-track transfer start: path=%s target_format=%s",
+                track.path,
+                fmt,
+            )
             transfer_track(
                 track,
                 target_format=fmt,
                 transport=self._transport(),
                 transcoder=self.transcoder,
             )
+            logger.info("Single-track transfer done: path=%s", track.path)
         except TransportError as e:
-            logging.exception("Single-track transfer failed")
+            self._log_transport_error("Single-track transfer failed", e)
             messagebox.showerror(
                 "Transfer failed",
                 f"{e}\n\n"
                 "If the player froze or was unplugged, disconnect/reconnect it "
                 "before trying again.",
             )
+        finally:
+            stop_transfer_log(session_handler)
 
 
     def _transfer_many(self, tracks: list[Track], fmt: str = "mp3") -> None:
@@ -144,7 +178,7 @@ class AppController:
                 on_progress=self._progress,
             )
         except TransportError as e:
-            logging.exception("Batch transfer aborted")
+            self._log_transport_error("Batch transfer aborted", e)
             title = "Transfer aborted" if e.fatal else "Transfer failed"
             messagebox.showerror(
                 title,
@@ -168,7 +202,11 @@ class AppController:
             return
         matches = self.library.filter_by_artist(track)
         matches.sort(key=lambda t: t.path)
-        print(f"Artist {track.meta.artist}: {len(matches)} tracks")
+        logger.info(
+            "Artist %s: %d tracks",
+            track.meta.artist,
+            len(matches),
+        )
         self._transfer_many(matches, "mp3")
 
 
@@ -178,7 +216,11 @@ class AppController:
             return
         matches = self.library.filter_by_album(track)
         matches.sort(key=lambda t: t.path)
-        print(f"Album {track.meta.album}: {len(matches)} tracks")
+        logger.info(
+            "Album %s: %d tracks",
+            track.meta.album,
+            len(matches),
+        )
         self._transfer_many(matches, "mp3")
 
 
@@ -202,6 +244,7 @@ class AppController:
         try:
             device_ops.set_device_name(self.device, name)
         except Exception as e:
+            logger.exception("Set device name failed")
             messagebox.showerror("Set Device Name", str(e))
 
 
@@ -218,6 +261,7 @@ class AppController:
         try:
             device_ops.create_folder(self.device, name)
         except Exception as e:
+            logger.exception("Create folder failed")
             messagebox.showerror("Create Folder", str(e))
 
 
@@ -225,11 +269,12 @@ class AppController:
         try:
             folders = device_ops.list_folders(self.device)
         except Exception as e:
+            logger.exception("List folders failed")
             messagebox.showerror("Folders", str(e))
             return
         self.win.listbox.delete(0, END)
         for entry in folders:
-            print(entry.name)
+            logger.debug("Folder: %s", entry.name)
             self.win.listbox.insert(END, folder_line(entry))
 
 
@@ -238,10 +283,11 @@ class AppController:
         try:
             alltracks = self.device.get_tracklisting()
         except Exception as e:
+            logger.exception("Delete tracks listing failed")
             messagebox.showerror("Delete", str(e))
             return
         for x in alltracks:
-            print(x.storage_id)
+            logger.debug("Track storage_id=%s", x.storage_id)
         messagebox.showinfo(
             "Delete All Tracks",
             "Not fully implemented — listed track storage IDs to console only.",
@@ -252,9 +298,10 @@ class AppController:
         obid = 2654
         try:
             fmd = self.device.get_file_metadata(obid)
-            print(fmd)
+            logger.debug("File metadata for %s: %s", obid, fmd)
             messagebox.showinfo("File Info", str(fmd))
         except Exception as e:
+            logger.exception("Get file info failed")
             messagebox.showerror("File Info", str(e))
 
 
@@ -281,6 +328,7 @@ class AppController:
         try:
             device_ops.send_test_file(self.device, path)
         except Exception as e:
+            logger.exception("Send test file failed")
             messagebox.showerror("Send File", str(e))
 
 
@@ -294,6 +342,7 @@ class AppController:
         try:
             self._transfer_one(track, "mp3")
         except Exception as e:
+            logger.exception("Send test track failed")
             messagebox.showerror("Send Track", str(e))
 
 
@@ -321,5 +370,5 @@ class AppController:
         try:
             handler()
         except Exception as e:
-            logging.exception("Action failed: %s", option)
+            logger.exception("Action failed: %s", option)
             messagebox.showerror("Action failed", str(e))

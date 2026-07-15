@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import os
 
 from mtpmanager.domain.library import Library, is_music_file
 from mtpmanager.domain.models import Track
 from mtpmanager.infra.mutagen_tags import read_metadata
+
+logger = logging.getLogger(__name__)
 
 
 def _scan_dir(dir_path: str) -> list[Track]:
@@ -14,7 +17,7 @@ def _scan_dir(dir_path: str) -> list[Track]:
     try:
         entries = os.listdir(dir_path)
     except OSError as e:
-        print(f"Cannot list {dir_path}: {e}")
+        logger.warning("Cannot list %s: %s", dir_path, e)
         return tracks
 
     for name in entries:

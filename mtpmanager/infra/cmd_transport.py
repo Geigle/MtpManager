@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import subprocess
-import sys
 import threading
 import time
 
 from mtpmanager.domain.models import TrackMetadata
 from mtpmanager.ports.transport import TransportError
+
+logger = logging.getLogger(__name__)
+mtp_sendtr_log = logging.getLogger(__name__ + ".mtp_sendtr")
 
 # Patterns that indicate the device/session is dead or this send cannot complete.
 _FATAL_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
@@ -168,18 +171,24 @@ class _StreamWatch:
                     self.fatal_at = time.monotonic()
 
 
-def _tee_stream(stream, sink, watch: _StreamWatch, *, is_err: bool) -> None:
+def _tee_stream(stream, watch: _StreamWatch, *, is_err: bool) -> None:
+    """Collect lines for pattern matching and log each at DEBUG.
+
+    Console visibility is controlled by the StreamHandler level (INFO by default;
+    DEBUG when MTP_MANAGER_DEBUG=1). File handlers always capture DEBUG.
+    """
     try:
         for line in iter(stream.readline, ""):
             watch.note_line(line, is_err=is_err)
-            sink.write(line)
-            sink.flush()
+            stripped = line.rstrip("\n\r")
+            if stripped:
+                mtp_sendtr_log.debug("%s", stripped)
     finally:
         stream.close()
 
 
 def _run_sendtr(cmd: list[str], timeout: float) -> subprocess.CompletedProcess[str]:
-    """Run mtp-sendtr, stream output live, kill on hang or post-fatal stall."""
+    """Run mtp-sendtr, stream output to logs, kill on hang or post-fatal stall."""
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -191,13 +200,13 @@ def _run_sendtr(cmd: list[str], timeout: float) -> subprocess.CompletedProcess[s
     threads = [
         threading.Thread(
             target=_tee_stream,
-            args=(proc.stdout, sys.stdout, watch),
+            args=(proc.stdout, watch),
             kwargs={"is_err": False},
             daemon=True,
         ),
         threading.Thread(
             target=_tee_stream,
-            args=(proc.stderr, sys.stderr, watch),
+            args=(proc.stderr, watch),
             kwargs={"is_err": True},
             daemon=True,
         ),
@@ -317,12 +326,24 @@ class CmdTransport:
             path,
             remote,
         ]
-        print("CMD:", " ".join(cmd))
-        print(f"Remote object: {remote} (storage=0x{self.storage_id:08x})")
+        logger.debug(
+            "CMD: %s",
+            " ".join(cmd),
+        )
+        logger.debug(
+            "Remote object: %s (storage=0x%08x)",
+            remote,
+            self.storage_id,
+        )
         timeout = _timeout_for(path, self.timeout_sec)
         try:
             result = _run_sendtr(cmd, timeout)
         except FileNotFoundError as exc:
+            logger.error(
+                "mtp-sendtr binary not found: %s path=%s",
+                self.binary,
+                path,
+            )
             raise TransportError(
                 f"mtp-sendtr binary not found: {self.binary}",
                 fatal=True,
@@ -346,6 +367,15 @@ class CmdTransport:
                 )
             fatal_hit = _match_any(partial, _FATAL_PATTERNS)
             if fatal_hit:
+                logger.error(
+                    "mtp-sendtr failed path=%s remote=%s storage=0x%08x "
+                    "rc=timeout fatal=%s\n%s",
+                    path,
+                    remote,
+                    self.storage_id,
+                    fatal_hit,
+                    partial,
+                )
                 raise TransportError(
                     f"mtp-sendtr failed then hung ({fatal_hit}). "
                     f"Often a finalize/metadata error at ~99% on Creative ZEN. "
@@ -354,6 +384,15 @@ class CmdTransport:
                     path=path,
                     stderr=partial,
                 ) from exc
+            logger.error(
+                "mtp-sendtr timed out path=%s remote=%s storage=0x%08x "
+                "timeout=%.0fs\n%s",
+                path,
+                remote,
+                self.storage_id,
+                timeout,
+                partial,
+            )
             raise TransportError(
                 f"mtp-sendtr timed out after {timeout:.0f}s (device likely hung). "
                 f"Unplug/replug the player before retrying. Path: {path}",
@@ -382,6 +421,15 @@ class CmdTransport:
             else:
                 reason = f"send failed ({fail_hit})"
 
+            logger.error(
+                "mtp-sendtr failed path=%s remote=%s storage=0x%08x rc=%s fatal=%s\n%s",
+                path,
+                remote,
+                self.storage_id,
+                result.returncode,
+                fatal_hit or fail_hit or killed,
+                output,
+            )
             raise TransportError(
                 f"mtp-sendtr failed: {reason}. Remote={remote}. Path: {path}",
                 fatal=True,
