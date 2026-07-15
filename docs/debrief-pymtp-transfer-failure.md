@@ -1,8 +1,8 @@
 # Debrief: Experimental PyMTP transfer failure on Creative ZEN
 
-**Status:** Resolved (layered fixes + CMD fallback)  
+**Status:** Resolved (layered binding fixes; no silent CMD fallback)  
 **Device:** Creative ZEN Vision:M (`VID=041e`, `PID=413e`)  
-**Transport:** Experimental mode via PyMTP → libmtp 1.1.23 (with mtp-sendtr fallback)  
+**Transport:** Experimental mode via pure PyMTP → libmtp 1.1.23 (Stable/CMD is a user choice)  
 **Symptom track:** Forhill — *Outlines* track 01 (and any experimental single-track send)  
 **Date context:** July 2026  
 **Related:** [debrief-zen-track-send-failure.md](./debrief-zen-track-send-failure.md) (stable/CMD finalize bugs)
@@ -18,9 +18,9 @@ Each fix unmasked the next layer. The durable outcome is:
 1. **Shared ZEN remote contract** with CMD (Music folder 100, storage `0x00010001`, short sanitized names).  
 2. **Correct libmtp filetype values** (`MP3 = 2`, not `1`).  
 3. **Hardened ctypes send path** (argtypes, path encoding, error-stack capture, no NULL-device dump).  
-4. **One-shot fallback** to `mtp-sendtr` when pure PyMTP still hits a dead PTP session (`02ff`), then reconnect.
+4. **Honest failure UX** — experimental send does **not** silently call `mtp-sendtr`; on failure the UI explains the error and tells the user how to recover via **Stable Mode** if they want the proven path.
 
-Stable mode was never the regression target; this work brings experimental send up to the same device contract and makes failures observable.
+Stable mode remains the recommended transfer path. Experimental mode is for PyMTP/libmtp device tools and for deliberately testing the in-process send.
 
 ---
 
@@ -33,7 +33,7 @@ Stable mode was never the regression target; this work brings experimental send 
 | Pre-fix experimental | Connect OK → convert FLAC→MP3 OK → bare `pymtp.CommandFailed` ~1s later → UI freeze feel → reconnect needed |
 | After parent/storage/naming | Still `CommandFailed` in ~1s; logs now showed `parent=100 storage=0x00010001 remote=01 Outlines.mp3` |
 | After filetype fix | Logs showed `filetype=2`; real PTP text appeared: `02ff Could not send object` + `LIBMTP PANIC: … NULL device!` |
-| After ctypes + fallback | Pure path hardened; if session still dies, automatic retry via proven `mtp-sendtr` |
+| After ctypes hardening | Pure path fixed where possible; remaining failures surface with recovery guidance to Stable Mode (no silent fallback) |
 
 ### Log shapes
 
@@ -172,13 +172,15 @@ That is a **dead session** class of error, not “wrong folder id.”
 
 Stable mode opens a **fresh** `mtp-sendtr` process per track (connect → send → exit). Experimental mode holds one libmtp session from **Connect** until **Disconnect**. After a bad send, that session is often unusable (`Could not close session!`); further pure-PyMTP attempts fail fast with `02ff`.
 
-**Fix (resilience):** If pure PyMTP fails with markers like `02ff`, `PTP I/O Error`, `Could not send object`, then:
+**Product choice (no silent fallback):** Do **not** auto-retry via `mtp-sendtr` from experimental send. That would hide PyMTP regressions and mix transports without an explicit user decision.
 
-1. Disconnect / clear the poisoned session.  
-2. Retry **once** via `CmdTransport` (same remote naming + storage as stable).  
-3. Reconnect PyMTP so experimental device tools still work.
+**UX instead:** On `TransportError` in experimental mode, the dialog shows the failure (including libmtp stack text when available) and recovery steps:
 
-Logged explicitly as a fallback, not silent success.
+1. Disconnect on the Experimental tab (unplug/replug if needed).  
+2. Switch to **Stable Mode**.  
+3. Retry the transfer there (`mtp-sendtr`).
+
+Logs remain the source of truth for debugging pure PyMTP.
 
 ### 6. UI freeze (partially separate)
 
@@ -198,7 +200,7 @@ Working backwards from logs and parity with CMD:
 4. **Compare filetype** — CMD `type: mp3, 2` vs pymtp table `MP3: 1` and `libmtp.h` enum order including `FOLDER` → layer 2.  
 5. **Capture error stack into app logs** — exposed `02ff` / NULL-device PANIC → layers 3–5.  
 6. **Measure struct sizes** — `LIBMTP_track_t` ctypes size matched C (136); device struct was stale (96 vs 112) but send only needs a correct device *pointer*; still tightened bindings.  
-7. **Reuse proven sender** when session is dead — CMD fallback.
+7. **Guide the user to Stable Mode** when experimental send dies — do not mask the failure with an automatic CMD retry.
 
 This is the same lesson as the CMD debrief: the device is picky but consistent; the app was asking for the wrong object context / type / call shape and then throwing away the evidence.
 
@@ -211,7 +213,8 @@ This is the same lesson as the CMD debrief: the device is picky but consistent; 
 | Shared remote naming | `mtpmanager/infra/remote_naming.py` | Music folder 100, storage `0x00010001`, sanitize, `build_remote_path` / `split_remote_path` / `year_arg` |
 | CMD transport | `mtpmanager/infra/cmd_transport.py` | Imports shared naming (behavior unchanged) |
 | PyMTP load + binding patches | `mtpmanager/infra/pymtp_wrapper.py` | Filetype table, ctypes argtypes, fixed `send_track_from_file` + `debug_stack` |
-| Device/transport adapter | `mtpmanager/infra/pymtp_device.py` | Parent/storage/tags/send, errorstack → `TransportError`, CMD fallback |
+| Device/transport adapter | `mtpmanager/infra/pymtp_device.py` | Parent/storage/tags/send, errorstack → `TransportError` (pure PyMTP) |
+| Transfer UI | `mtpmanager/ui/controllers.py` | Mode-aware recovery dialog (guide to Stable Mode after experimental failure) |
 | Tests | `tests/test_remote_naming.py`, `tests/test_pymtp_filetypes.py` | Naming + `MP3 == 2` / `find_filetype` |
 | Prior CMD-only debrief | `docs/debrief-zen-track-send-failure.md` | Follow-ups marked done where relevant |
 
@@ -230,11 +233,11 @@ LIBMTP_Track:
 ### Intended failure path
 
 ```text
-send_track
-  → try pure libmtp send
+send_track (experimental)
+  → pure libmtp send only
   → on CommandFailed: log errorstack, raise TransportError(fatal=True)
-  → if stderr matches 02ff / I/O / could not send object:
-        disconnect → CmdTransport.send_track → reconnect
+  → UI: show error + “Disconnect → Stable Mode → retry” guidance
+  → (no automatic mtp-sendtr)
 ```
 
 ---
@@ -260,7 +263,7 @@ Expect:
 3. Connect → Single Track MP3 (e.g. Forhill/Outlines).  
 4. Logs should show `filetype=2` and either:
    - pure success (`send_track object_id=…`), or  
-   - explicit fallback: `retrying via mtp-sendtr` then success.  
+   - a clear failure dialog with Stable Mode recovery steps (no silent `mtp-sendtr`).  
 5. Stable tab still sends the same library without regression.
 
 ### Diagnosis checklist (future PyMTP regressions)
@@ -269,7 +272,7 @@ Expect:
 2. Is `filetype` **2** for MP3 (not 1)?  
 3. Does ERROR log include **libmtp error_text**, not only `CommandFailed`?  
 4. Is there a NULL-device PANIC on dump? (should be gone)  
-5. After `02ff`, does one CMD fallback attempt run instead of grinding the batch?  
+5. After experimental failure, does the UI guide to Stable Mode without auto-retrying CMD?  
 6. Did the user Connect before send? (`NotConnected` is a separate footgun.)
 
 ---
@@ -290,16 +293,15 @@ Expect:
 
 - Move transfers off the Tk main thread (progress + cancel; no freeze on hang).  
 - Auto-discover Music folder id / storage id (multi-device) instead of ZEN defaults.  
-- Optionally make pure PyMTP the only path once long-lived session reliability is proven without fallback.  
 - Upstream or vendor a maintained libmtp binding (stock pymtp is effectively unmaintained vs libmtp 1.1.x).  
-- Clearer “Connect first” UX when experimental send hits `NotConnected`.
+- Clearer “Connect first” UX when experimental send hits `NotConnected` (partially covered in transfer error text).
 
 ---
 
 ## Outcome
 
 - **Cause (layered):** (1) parent/storage 0 + long names, (2) filetype off-by-one labeling MP3 as WAV, (3) invisible libmtp errors / NULL dump, (4) fragile ctypes send + poisoned long-lived session.  
-- **Fix:** Shared ZEN remote contract, correct filetype table, hardened libmtp bindings and diagnostics, `TransportError` integration, CMD one-shot fallback after PTP death.  
-- **Validation:** Progressive log evidence at each layer; unit tests for naming and filetypes; on-device experimental send succeeds (pure path and/or fallback).
+- **Fix:** Shared ZEN remote contract, correct filetype table, hardened libmtp bindings and diagnostics, `TransportError` integration; experimental failures stay visible and point the user at Stable Mode.  
+- **Validation:** Progressive log evidence at each layer; unit tests for naming and filetypes; pure PyMTP success when the binding is healthy, honest failure UX otherwise.
 
 This is the difference between “experimental mode is cursed” and “we were sending the wrong object context, then the wrong object type, then a poorly bound C call, while throwing away the PTP stack that would have said so on day one.”

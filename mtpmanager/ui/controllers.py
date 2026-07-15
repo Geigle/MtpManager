@@ -137,6 +137,59 @@ class AppController:
             logger.error("Transport stderr:\n%s", exc.stderr)
 
 
+    def _transfer_recovery_hint(self, *, batch: bool = False) -> str:
+        """User-facing next steps after a failed transfer (mode-aware)."""
+        if self.win.active_mode() == "experimental":
+            lines = [
+                "Experimental (PyMTP) send failed and was not retried automatically.",
+                "",
+                "Recommended recovery:",
+                "1. Click Disconnect on the Experimental tab "
+                "(unplug/replug the player if Disconnect errors).",
+                "2. Switch to the Stable Mode tab.",
+                "3. Retry the transfer there (uses mtp-sendtr).",
+                "",
+                "Stay on Experimental only if you are debugging PyMTP/libmtp; "
+                "check ~/Library/Logs/MtpManager for the full error stack.",
+            ]
+            if batch:
+                lines.insert(
+                    1,
+                    "The batch was stopped so remaining tracks are not sent "
+                    "into a dead session.",
+                )
+            return "\n".join(lines)
+
+        if batch:
+            return (
+                "Batch stopped so remaining tracks are not sent into a dead "
+                "MTP session. Unplug/replug the player, free space if needed, "
+                "then resume from the failed track."
+            )
+        return (
+            "If the player froze or was unplugged, disconnect/reconnect it "
+            "before trying again."
+        )
+
+
+    def _show_transfer_error(
+        self,
+        title: str,
+        exc: TransportError,
+        *,
+        batch: bool = False,
+    ) -> None:
+        # Prefer a short primary line; keep full detail available in the dialog
+        # but cap very long libmtp stacks so the recovery steps stay visible.
+        detail = str(exc).strip()
+        if len(detail) > 900:
+            detail = detail[:900].rstrip() + "\n…"
+        messagebox.showerror(
+            title,
+            f"{detail}\n\n{self._transfer_recovery_hint(batch=batch)}",
+        )
+
+
     def _transfer_one(self, track: Track, fmt: str) -> None:
         session_handler = None
         try:
@@ -158,12 +211,7 @@ class AppController:
             logger.info("Single-track transfer done: path=%s", track.path)
         except TransportError as e:
             self._log_transport_error("Single-track transfer failed", e)
-            messagebox.showerror(
-                "Transfer failed",
-                f"{e}\n\n"
-                "If the player froze or was unplugged, disconnect/reconnect it "
-                "before trying again.",
-            )
+            self._show_transfer_error("Transfer failed", e, batch=False)
         finally:
             stop_transfer_log(session_handler)
 
@@ -180,13 +228,7 @@ class AppController:
         except TransportError as e:
             self._log_transport_error("Batch transfer aborted", e)
             title = "Transfer aborted" if e.fatal else "Transfer failed"
-            messagebox.showerror(
-                title,
-                f"{e}\n\n"
-                "Batch stopped so remaining tracks are not sent into a dead "
-                "MTP session. Unplug/replug the player, free space if needed, "
-                "then resume from the failed track.",
-            )
+            self._show_transfer_error(title, e, batch=True)
 
 
     def action_single_track(self, fmt: str = "mp3") -> None:

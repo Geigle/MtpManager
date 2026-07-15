@@ -8,7 +8,6 @@ import os
 
 import mtpmanager.infra.pymtp_wrapper as pymtp
 from mtpmanager.domain.models import DeviceInfo, FolderEntry, TrackMetadata
-from mtpmanager.infra.cmd_transport import CmdTransport
 from mtpmanager.infra.remote_naming import (
     DEFAULT_MUSIC_FOLDER_ID,
     DEFAULT_STORAGE_ID,
@@ -19,15 +18,6 @@ from mtpmanager.infra.remote_naming import (
 from mtpmanager.ports.transport import TransportError
 
 logger = logging.getLogger(__name__)
-
-# After a dead PyMTP session (PTP 02ff), fall back to mtp-sendtr which opens a
-# fresh session — same path that already works in stable mode.
-_FALLBACK_MARKERS = (
-    "02ff",
-    "PTP I/O Error",
-    "Could not send object",
-    "Could not close session",
-)
 
 
 def _decode(value) -> str:
@@ -109,17 +99,12 @@ def _collect_errorstack(mtp: pymtp.MTP) -> str:
     return "\n".join(messages)
 
 
-def _should_fallback_to_cmd(stderr: str, message: str) -> bool:
-    blob = f"{stderr}\n{message}"
-    return any(m in blob for m in _FALLBACK_MARKERS)
-
-
 class PymtpDevice:
     """DevicePort + Transport implementation backed by pymtp.MTP.
 
-    Track send uses libmtp via pymtp first. On fatal PTP I/O (common when the
-    long-lived experimental session is poisoned), releases the session and
-    retries once via CmdTransport (mtp-sendtr), then reconnects.
+    Experimental send is pure libmtp/PyMTP. Failures raise TransportError and
+    are not silently retried via mtp-sendtr — the UI should guide the user to
+    Stable Mode when they choose that path.
     """
 
     def __init__(
@@ -128,12 +113,10 @@ class PymtpDevice:
         *,
         storage_id: int = DEFAULT_STORAGE_ID,
         music_folder_id: int = DEFAULT_MUSIC_FOLDER_ID,
-        cmd_fallback: bool = True,
     ):
         self._mtp = mtp if mtp is not None else pymtp.MTP()
         self.storage_id = storage_id
         self.music_folder_id = music_folder_id
-        self.cmd_fallback = cmd_fallback
 
     @property
     def raw(self) -> pymtp.MTP:
@@ -211,24 +194,9 @@ class PymtpDevice:
         Uses the same ZEN remote contract as CmdTransport: Music folder parent,
         explicit storage id, and a short sanitized object basename. Tags keep
         full title/artist/album (including characters unsafe in filenames).
+
+        On failure raises TransportError (fatal). Does not fall back to CMD.
         """
-        try:
-            self._send_track_pymtp(path, meta)
-            return
-        except TransportError as exc:
-            if not self.cmd_fallback or not _should_fallback_to_cmd(
-                exc.stderr or "", str(exc)
-            ):
-                raise
-            logger.warning(
-                "PyMTP send hit fatal PTP/session error; "
-                "releasing session and retrying via mtp-sendtr. err=%s",
-                exc,
-            )
-
-        self._send_track_cmd_fallback(path, meta)
-
-    def _send_track_pymtp(self, path: str, meta: TrackMetadata) -> None:
         _, ext = os.path.splitext(path)
         ext = ext or ".mp3"
         remote = build_remote_path(
@@ -286,7 +254,9 @@ class PymtpDevice:
             trid = self._mtp.send_track_from_file(path, basename_b, mt)
         except pymtp.NotConnected as exc:
             raise TransportError(
-                f"PyMTP send failed: device not connected. Path: {path}",
+                "PyMTP send failed: device not connected. "
+                "Use Connect on the Experimental tab first, or switch to "
+                "Stable Mode for mtp-sendtr transfers.",
                 fatal=True,
                 path=path,
             ) from exc
@@ -331,33 +301,3 @@ class PymtpDevice:
 
         _ = keep  # lifetime through C call
         logger.debug("send_track object_id=%s path=%s", trid, path)
-
-    def _send_track_cmd_fallback(self, path: str, meta: TrackMetadata) -> None:
-        """Release exclusive PyMTP session and send with proven mtp-sendtr."""
-        was_connected = getattr(self._mtp, "device", None) is not None
-        if was_connected:
-            try:
-                self.disconnect()
-            except Exception:
-                logger.debug("Disconnect before CMD fallback failed", exc_info=True)
-                # Force-clear so reconnect can open a new session.
-                try:
-                    self._mtp.device = None
-                except Exception:
-                    pass
-
-        try:
-            CmdTransport(
-                storage_id=self.storage_id,
-                music_folder_id=self.music_folder_id,
-            ).send_track(path, meta)
-            logger.info("CMD fallback send succeeded path=%s", path)
-        finally:
-            if was_connected:
-                try:
-                    self.connect()
-                except Exception:
-                    logger.exception(
-                        "Could not re-open PyMTP session after CMD fallback; "
-                        "use Connect again before device tools."
-                    )
