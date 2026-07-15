@@ -223,8 +223,9 @@ Documenting a single-track 99% log was what made the finalize path obvious.
 
 - Auto-discover storage id / Music folder id instead of ZEN defaults (multi-device support).  
 - Preflight free-space check before large albums (now that we know “full” can also be a lie after I/O death).  
-- Apply the same short-name sanitization to the PyMTP experimental transport for consistency.  
-- Consider a wrapper that skips album association after a failed send (would require not using stock `mtp-sendtr` as-is, or a custom sender).
+- ~~Apply the same short-name sanitization to the PyMTP experimental transport for consistency.~~ **Done:** `PymtpDevice.send_track` now shares `remote_naming` (Music folder 100, storage `0x00010001`, short sanitized basename) and wraps failures as `TransportError`.  
+- Consider a wrapper that skips album association after a failed send (would require not using stock `mtp-sendtr` as-is, or a custom sender).  
+- Move transfers off the Tk main thread so a slow/hung libmtp call does not freeze the UI.
 
 ---
 

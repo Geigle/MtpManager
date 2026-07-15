@@ -10,7 +10,16 @@ import threading
 import time
 
 from mtpmanager.domain.models import TrackMetadata
+from mtpmanager.infra.remote_naming import (
+    DEFAULT_MUSIC_FOLDER_ID,
+    DEFAULT_STORAGE_ID,
+    build_remote_path,
+    year_arg,
+)
 from mtpmanager.ports.transport import TransportError
+
+# Re-export for callers that imported build_remote_path from this module.
+__all__ = ["CmdTransport", "TransportError", "build_remote_path"]
 
 logger = logging.getLogger(__name__)
 mtp_sendtr_log = logging.getLogger(__name__ + ".mtp_sendtr")
@@ -58,22 +67,6 @@ _MAX_TIMEOUT_SEC = 900.0
 _BYTES_PER_SEC_ASSUMPTION = 256 * 1024
 _TIMEOUT_OVERHEAD_SEC = 60.0
 
-# Creative ZEN Vision:M (and many MTP players) use a short object-name limit.
-# Track 8 of Doom hit exactly 64 chars with the old long remote basename.
-_MAX_REMOTE_BASENAME = 56
-
-# Device layout from mtp-folders on ZEN Vision:M: folder 100 == "Music".
-# mtp-sendtr accepts a numeric parent as the dirname of the remote path.
-_DEFAULT_MUSIC_FOLDER_ID = 100
-
-# Storage Media on the ZEN Vision:M (mtp-detect: StorageID 0x00010001).
-# storage_id 0 makes get_suggested_storage_id fail after the bulk transfer.
-_DEFAULT_STORAGE_ID = 0x00010001
-
-# Unsafe in MTP object names on older Creative firmware.
-_UNSAFE_CHARS = re.compile(r'[/\\:*?"<>|&\x00-\x1f]')
-_WHITESPACE = re.compile(r"\s+")
-
 
 def _timeout_for(path: str, override: float | None) -> float:
     if override is not None:
@@ -92,52 +85,6 @@ def _match_any(text: str, patterns: tuple[re.Pattern[str], ...]) -> str | None:
         if m:
             return m.group(0)
     return None
-
-
-def _sanitize_component(value: str, max_len: int) -> str:
-    text = _UNSAFE_CHARS.sub(" ", str(value or ""))
-    text = _WHITESPACE.sub(" ", text).strip(" .")
-    if not text:
-        text = "unknown"
-    if len(text) > max_len:
-        text = text[:max_len].rstrip(" .")
-    return text or "unknown"
-
-
-def build_remote_path(
-    meta: TrackMetadata,
-    file_extension: str,
-    *,
-    music_folder_id: int = _DEFAULT_MUSIC_FOLDER_ID,
-    max_basename: int = _MAX_REMOTE_BASENAME,
-) -> str:
-    """Build a short remote path under the device Music folder.
-
-    mtp-sendtr uses dirname(remote) as parent id and basename as object name.
-    Nested Artist/Album paths are *not* created (parse_path only looks up
-    existing folders). A numeric parent (e.g. 100) is the reliable form.
-    """
-    ext = file_extension if file_extension.startswith(".") else f".{file_extension}"
-    if ext == ".":
-        ext = ".mp3"
-    # Leave room for extension inside the device name limit.
-    body_max = max(8, max_basename - len(ext))
-
-    track_no = str(meta.tracknumber).split("/")[0].strip() or "00"
-    # Prefer compact "08 Title.mp3"; fall back to title-only if still long.
-    title = _sanitize_component(meta.title, body_max)
-    candidate = _sanitize_component(f"{track_no} {title}", body_max)
-    if len(candidate) < 4:
-        artist = _sanitize_component(meta.artist, 20)
-        candidate = _sanitize_component(f"{track_no} {artist} {title}", body_max)
-
-    return f"{int(music_folder_id)}/{candidate}{ext}"
-
-
-def _year_arg(date: str) -> str:
-    raw = str(date or "").strip()
-    m = re.search(r"\b((?:19|20)\d{2})\b", raw)
-    return m.group(1) if m else raw
 
 
 def _duration_arg(length_sec: float) -> str:
@@ -283,8 +230,8 @@ class CmdTransport:
         binary: str = "mtp-sendtr",
         *,
         timeout_sec: float | None = None,
-        storage_id: int = _DEFAULT_STORAGE_ID,
-        music_folder_id: int = _DEFAULT_MUSIC_FOLDER_ID,
+        storage_id: int = DEFAULT_STORAGE_ID,
+        music_folder_id: int = DEFAULT_MUSIC_FOLDER_ID,
     ):
         self.binary = binary
         self.timeout_sec = timeout_sec
@@ -318,7 +265,7 @@ class CmdTransport:
             "-n",
             str(meta.tracknumber),
             "-y",
-            _year_arg(meta.date),
+            year_arg(meta.date),
             "-d",
             _duration_arg(meta.length_sec),
             "-s",
