@@ -1,0 +1,119 @@
+# System architecture
+
+MtpManager loads music onto picky MTP players (especially Creative ZEN Vision:M). MTP is an unreliable device protocol: Windows Media Player, Gnomad, and stock tooling fail for this use case. The app is a **small hexagonal layout** with dual transfer modes and a hard-won device send contract—not a general media library suite.
+
+**Related:** [device-contract.md](./device-contract.md) · [transfer-and-modes.md](./transfer-and-modes.md) · [decisions.md](./decisions.md)
+
+---
+
+## Problem framing
+
+- Old players speak MTP poorly; host software often assumes modern devices or WMP-centric workflows.
+- Need: FLAC (etc.) → device formats (MP3/WMA), reliable track send, honest failure handling when the session dies.
+- Hard lessons: nested remote paths, storage id 0, long object names, ignored subprocess status, and broken PyMTP bindings all look like “USB is haunted” until diagnosed. See debriefs under `docs/`.
+
+---
+
+## Layer diagram
+
+```text
+  ui  →  app  →  domain
+           ↓         ↑
+         ports  ←  infra
+```
+
+**Invariant:** dependency direction is `ui → app → domain/ports ← infra`.
+
+- `domain` and `ports` have no MTP CLI construction, no Tk, no ffmpeg subprocess details.
+- `ui` must not embed `mtp-sendtr` argv or libmtp ctypes; it picks a transport via the controller and calls app use cases.
+- `infra` implements ports; adapters are composed at the edges (`AppController`, `__main__`).
+
+---
+
+## Package map
+
+| Package | Responsibility | Key modules |
+|---------|----------------|-------------|
+| `domain/` | Pure models + library selection logic | `models.py` (`Track`, `TrackMetadata`, `DeviceInfo`), `library.py` (scan helpers, `filter_by_artist` / `filter_by_album`) |
+| `ports/` | Protocols + shared error type | `transport.py` (`Transport`, `TransportError`), `device.py` (`DevicePort`), `tags.py`, `transcoder.py` |
+| `app/` | Use cases (orchestration only) | `transfer.py`, `scan_library.py`, `device_ops.py` |
+| `infra/` | libmtp / ffmpeg / mutagen / logging | `cmd_transport.py`, `pymtp_device.py`, `pymtp_wrapper.py`, `remote_naming.py`, `ffmpeg_transcode.py`, `mutagen_tags.py`, `logging_setup.py` |
+| `ui/` | Tk layout + event wiring | `window.py`, `controllers.py`, `formatting.py` |
+
+---
+
+## Composition root
+
+| Entry | Role |
+|-------|------|
+| `./MtpManager.sh` | Ensures `.venv` (Homebrew Python 3.13 on macOS), runs `mm.py` |
+| `mm.py` | Thin launcher → `mtpmanager.__main__.main` |
+| `python -m mtpmanager` | Same: configure logging, build UI + device, mainloop |
+
+`mtpmanager/__main__.py` wires:
+
+1. `configure_logging()` / `prune_old_logs()`
+2. `MainWindow()` + `PymtpDevice()` + `AppController(window, device)`
+3. `window.mainloop()`
+
+`PymtpDevice` is always constructed (for Experimental Connect / device admin). Stable transfers use a **separate** `CmdTransport()` instance and do not require an open PyMTP session.
+
+---
+
+## Dual-mode composition
+
+`AppController._transport()` (`ui/controllers.py`):
+
+| UI tab | Mode id | Transport |
+|--------|---------|-----------|
+| **Stable Mode** | `"stable"` | `CmdTransport()` — one `mtp-sendtr` process per track |
+| **Experimental Mode** | `"experimental"` | `self.device` (`PymtpDevice`) — also implements device admin |
+
+Action lists (`ui/window.py`):
+
+- **Stable:** transfer-oriented actions only (`STABLE_ACTIONS`).
+- **Experimental:** transfers + Connect/Disconnect/Device Info + folder/name/admin tools (`EXPERIMENTAL_ACTIONS`).
+
+Stable is the recommended transfer path. Experimental is for PyMTP/libmtp tools and deliberate in-process send testing. Experimental **does not** silently fall back to CMD on failure (see [decisions.md](./decisions.md) D3).
+
+---
+
+## Data flow (high level)
+
+```text
+Select Library → scan_library → Library[Track]
+     → user action → transfer_track(s)
+     → (optional) FFmpegTranscoder → Transport.send_track
+```
+
+Details: [transfer-and-modes.md](./transfer-and-modes.md).
+
+Remote object naming for **both** transports is centralized in `infra/remote_naming.py` ([device-contract.md](./device-contract.md)).
+
+---
+
+## Logging architecture
+
+Configured in `infra/logging_setup.py`; paths documented in root [README.md](../README.md).
+
+| File | Role |
+|------|------|
+| `mtpmanager.log` | Full app detail (DEBUG+), size-rotated |
+| `errors.log` | ERROR+ only |
+| `transfer-YYYYMMDD-HHMMSS.log` | One file per transfer batch / single-track session |
+
+Platform defaults: macOS `~/Library/Logs/MtpManager`; Linux `~/.local/share/mtpmanager/logs` (or XDG). Override with `MTP_MANAGER_LOG_DIR`. Console defaults to INFO; set `MTP_MANAGER_DEBUG=1` for DEBUG on console.
+
+---
+
+## What is intentionally not abstracted yet
+
+| Gap | Where it lives today |
+|-----|----------------------|
+| Hardcoded ZEN Music folder / storage defaults | `remote_naming.DEFAULT_*`; constructors on both transports |
+| Multi-device discovery | Not implemented; user must match device layout |
+| Transfers on Tk main thread | Controllers call `transfer_*` inline → UI freezes during send/hang |
+| Full “Delete All Tracks” | Stub lists storage ids only |
+| Upstream-maintained libmtp Python binding | Stock pymtp patched in-process via `pymtp_wrapper.py` |
+
+These are known limitations, not accidental omissions in the docs. Product follow-ups stay out of this architecture description except as honest gaps.

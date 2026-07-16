@@ -22,6 +22,20 @@ mtpmanager/
 
 Dependency direction: `ui → app → domain/ports ← infra`.
 
+## Documentation
+
+Design intent and device rules (start here if you are changing send behavior or onboarding as an agent):
+
+| Doc | Contents |
+|-----|----------|
+| **[docs/README.md](docs/README.md)** | Documentation map and reading order |
+| [docs/architecture.md](docs/architecture.md) | Layers, packages, dual-mode composition |
+| [docs/device-contract.md](docs/device-contract.md) | MTP/ZEN remote path, storage, filename rules |
+| [docs/decisions.md](docs/decisions.md) | Why dual mode, no silent fallback, fatal batch abort, … |
+| [docs/transfer-and-modes.md](docs/transfer-and-modes.md) | Transfer pipeline; Stable vs Experimental |
+| [docs/debrief-*.md](docs/) | Incident narratives (CMD finalize, PyMTP layers) |
+| [AGENTS.md](AGENTS.md) | Short invariants and change surfaces for AI agents |
+
 ## Logs
 
 Diagnostics are written under a platform log directory (not next to your music library):

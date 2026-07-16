@@ -1,5 +1,7 @@
 # Debrief: Creative ZEN Vision:M track send failure at 99%
 
+> **See also:** durable rules in [device-contract.md](./device-contract.md) and [architecture.md](./architecture.md); decision summary in [decisions.md](./decisions.md). This file is the forensic incident narrative.
+
 **Status:** Resolved  
 **Device:** Creative ZEN Vision:M (`VID=041e`, `PID=413e`), firmware `1.61.01_0.00.23`  
 **Transport:** Stable mode via libmtp `mtp-sendtr` (1.1.23)  
