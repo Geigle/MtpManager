@@ -1,5 +1,7 @@
 # Debrief: Experimental PyMTP transfer failure on Creative ZEN
 
+> **See also:** durable rules in [device-contract.md](./device-contract.md) and [architecture.md](./architecture.md); decision summary in [decisions.md](./decisions.md) (especially D3, D4, D8). This file is the forensic incident narrative.
+
 **Status:** Resolved (layered binding fixes; no silent CMD fallback)  
 **Device:** Creative ZEN Vision:M (`VID=041e`, `PID=413e`)  
 **Transport:** Experimental mode via pure PyMTP → libmtp 1.1.23 (Stable/CMD is a user choice)  
