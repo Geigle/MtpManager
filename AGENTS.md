@@ -50,6 +50,7 @@ Do **not**:
 | UI actions, mode, recovery dialogs | `mtpmanager/ui/controllers.py`, `window.py` |
 | Artist/album selection | `mtpmanager/domain/library.py` |
 | Scan / tags | `app/scan_library.py`, `infra/mutagen_tags.py` |
+| Library index (persist/restore) | `infra/library_index.py`, `infra/app_paths.py` |
 
 ---
 

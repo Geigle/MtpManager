@@ -162,6 +162,10 @@ class MainWindow:
         mode = mode or self.active_mode()
         return list(STABLE_ACTIONS if mode == "stable" else EXPERIMENTAL_ACTIONS)
 
+    def set_library_button_label(self, text: str) -> None:
+        """Set the Select Library / Scan Library button caption."""
+        self.btn_select_library.configure(text=text)
+
     def apply_mode_actions(self) -> None:
         """Refresh combobox values for the active tab; keep selection when possible."""
         options = self.actions_for_mode()
