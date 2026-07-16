@@ -7,7 +7,9 @@ from typing import Literal
 from tkinter import (
     BOTH,
     BOTTOM,
+    DISABLED,
     LEFT,
+    NORMAL,
     RIGHT,
     TOP,
     X,
@@ -17,6 +19,7 @@ from tkinter import (
     Frame,
     Label,
     Listbox,
+    Menu,
     Scrollbar,
     Tk,
     ttk,
@@ -57,13 +60,17 @@ EXPERIMENTAL_ACTIONS = [
 SENDTYPE_OPTIONS = EXPERIMENTAL_ACTIONS
 
 _PATH_DISPLAY_MAX = 72
+_DEAD_TRACK_FG = "gray50"
+
+# Menu labels (used for entryconfig by label).
+MENU_SELECT_ROOT = "Select Library Root…"
+MENU_UPDATE_LIBRARY = "Update Library"
 
 
 def _elide_path(path: str, max_len: int = _PATH_DISPLAY_MAX) -> str:
     """Shorten a path for the toolbar; keep the end (basename) visible."""
     if not path or len(path) <= max_len:
         return path
-    # Prefer eliding the middle so root volume + leaf stay readable.
     keep = max_len - 1  # room for ellipsis
     head = keep // 3
     tail = keep - head
@@ -78,11 +85,20 @@ class MainWindow:
         self.root["borderwidth"] = 3
         self.root["relief"] = "sunken"
 
+        # Menubar — library discovery commands live here (not as toolbar buttons).
+        self.menubar = Menu(self.root)
+        self.root.config(menu=self.menubar)
+
+        self.menu_library = Menu(self.menubar, tearoff=0)
+        self.menubar.add_cascade(label="Library", menu=self.menu_library)
+        self.menu_library.add_command(label=MENU_SELECT_ROOT)
+        self.menu_library.add_command(label=MENU_UPDATE_LIBRARY, state=DISABLED)
+
         header = Frame(self.root)
         header.pack(side=TOP, fill=X)
         Label(header, text="MTP Manager").pack()
 
-        # Full-width library / media discovery toolbar under the title.
+        # Status toolbar: path + track count only (actions are in the Library menu).
         library_toolbar = Frame(self.root, borderwidth=3, relief="sunken")
         library_toolbar.pack(side=TOP, fill=X, padx=2, pady=2)
 
@@ -96,17 +112,7 @@ class MainWindow:
         self.lbl_library_path.pack(side=LEFT, fill=X, expand=True, padx=2, pady=4)
 
         self.lbl_library_count = Label(library_toolbar, text="0 tracks")
-        self.lbl_library_count.pack(side=LEFT, padx=6, pady=4)
-
-        self.btn_select_library = Button(
-            library_toolbar, width=16, text="Select Library"
-        )
-        self.btn_select_library.pack(side=LEFT, padx=3, pady=4)
-
-        self.btn_change_library = Button(
-            library_toolbar, width=16, text="Change Library…"
-        )
-        self.btn_change_library.pack(side=LEFT, padx=(3, 6), pady=4)
+        self.lbl_library_count.pack(side=LEFT, padx=(6, 8), pady=4)
 
         body = Frame(self.root)
         body.pack(side=TOP, fill=BOTH, expand=True)
@@ -162,7 +168,7 @@ class MainWindow:
         self.btn_device_info = Button(experimental_tab, width=20, text="Device Info")
         self.btn_device_info.pack(padx=3, pady=3, side=TOP)
 
-        # Transfer strip: action pick + execute (library lives in the top toolbar).
+        # Transfer strip: action pick + execute.
         transfer = Frame(leftframe)
         transfer.pack(padx=3, pady=6, fill=X)
 
@@ -208,18 +214,56 @@ class MainWindow:
         mode = mode or self.active_mode()
         return list(STABLE_ACTIONS if mode == "stable" else EXPERIMENTAL_ACTIONS)
 
-    def set_library_button_label(self, text: str) -> None:
-        """Set the Select Library / Scan Library button caption."""
-        self.btn_select_library.configure(text=text)
+    def set_library_menu_commands(
+        self,
+        *,
+        on_select_root,
+        on_update,
+    ) -> None:
+        """Wire Library menu entries (called once from the controller)."""
+        self.menu_library.entryconfig(MENU_SELECT_ROOT, command=on_select_root)
+        self.menu_library.entryconfig(MENU_UPDATE_LIBRARY, command=on_update)
 
-    def set_library_status(self, root_path: str, track_count: int) -> None:
+    def set_library_menu_state(self, *, update_enabled: bool) -> None:
+        """Enable Update Library only when a reachable root is available."""
+        state = NORMAL if update_enabled else DISABLED
+        self.menu_library.entryconfig(MENU_UPDATE_LIBRARY, state=state)
+
+    def set_library_status(
+        self,
+        root_path: str,
+        track_count: int,
+        *,
+        root_reachable: bool = True,
+    ) -> None:
         """Update toolbar path label and track count."""
         if root_path:
-            self.lbl_library_path.configure(text=_elide_path(root_path))
+            display = _elide_path(root_path)
+            if not root_reachable:
+                display = f"(unreachable) {display}"
+            self.lbl_library_path.configure(text=display)
         else:
             self.lbl_library_path.configure(text="No library selected")
         noun = "track" if track_count == 1 else "tracks"
         self.lbl_library_count.configure(text=f"{track_count} {noun}")
+
+    def set_tracks_usable(self, usable: bool) -> None:
+        """Enable listbox interaction, or grey out and disable when media is dead.
+
+        Call after the listbox has been populated. When *usable* is False,
+        entries stay visible but cannot be selected for transfer.
+        """
+        # Must re-enable before itemconfig when recovering from disabled.
+        self.listbox.configure(state=NORMAL)
+        size = self.listbox.size()
+        if usable:
+            for i in range(size):
+                self.listbox.itemconfig(i, fg="")
+            return
+        for i in range(size):
+            self.listbox.itemconfig(i, fg=_DEAD_TRACK_FG)
+        if size > 0:
+            self.listbox.configure(state=DISABLED)
 
     def apply_mode_actions(self) -> None:
         """Refresh combobox values for the active tab; keep selection when possible."""

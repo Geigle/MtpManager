@@ -38,7 +38,7 @@ MtpManager loads music onto picky MTP players (especially Creative ZEN Vision:M)
 | `ports/` | Protocols + shared error type | `transport.py` (`Transport`, `TransportError`), `device.py` (`DevicePort`), `tags.py`, `transcoder.py` |
 | `app/` | Use cases (orchestration only) | `transfer.py`, `scan_library.py`, `device_ops.py` |
 | `infra/` | libmtp / ffmpeg / mutagen / logging / library index | `cmd_transport.py`, `pymtp_device.py`, `pymtp_wrapper.py`, `remote_naming.py`, `ffmpeg_transcode.py`, `mutagen_tags.py`, `logging_setup.py`, `app_paths.py`, `library_index.py` |
-| `ui/` | Tk layout + event wiring | `window.py` (library toolbar, mode tabs, transfer strip), `controllers.py`, `formatting.py` |
+| `ui/` | Tk layout + event wiring | `window.py` (Library menu, status toolbar, mode tabs, transfer strip), `controllers.py`, `formatting.py` |
 
 ---
 
@@ -81,12 +81,12 @@ Stable is the recommended transfer path. Experimental is for PyMTP/libmtp tools 
 ## Data flow (high level)
 
 ```text
-[index load | library toolbar Select/Scan] → scan_library → Library[Track]
+[index load | Library menu Select/Update] → scan_library → Library[Track]
      → user action → transfer_track(s)
      → (optional) FFmpegTranscoder → Transport.send_track
 ```
 
-Chrome: full-width **library toolbar** under the title (path, count, Select/Scan, Change Library…); left panel is mode + transfer (+ Experimental device session). Details: [transfer-and-modes.md](./transfer-and-modes.md). Durable library index lives under the app data dir (`infra/app_paths.py` + `infra/library_index.py`).
+Chrome: **Library** menubar (Select root / Update); full-width **status toolbar** (path + count); left panel is mode + transfer (+ Experimental device session). Details: [transfer-and-modes.md](./transfer-and-modes.md). Durable library index lives under the app data dir (`infra/app_paths.py` + `infra/library_index.py`).
 
 Remote object naming for **both** transports is centralized in `infra/remote_naming.py` ([device-contract.md](./device-contract.md)).
 

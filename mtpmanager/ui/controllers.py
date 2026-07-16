@@ -23,10 +23,6 @@ from mtpmanager.ui.window import MainWindow
 
 logger = logging.getLogger(__name__)
 
-# Tk event state bit for Shift (same on macOS/Linux/Windows).
-# Shift-click on Select/Scan remains an alias for Change Library.
-_SHIFT_MASK = 0x0001
-
 
 class AppController:
     def __init__(self, window: MainWindow, device: PymtpDevice | None = None):
@@ -43,9 +39,10 @@ class AppController:
         w.btn_connect.configure(command=self.on_connect)
         w.btn_disconnect.configure(command=self.on_disconnect)
         w.btn_device_info.configure(command=self.on_device_info)
-        # Bind (not command=) so Shift-click can alias Change Library.
-        w.btn_select_library.bind("<ButtonRelease-1>", self.on_library_button)
-        w.btn_change_library.configure(command=self.on_change_library)
+        w.set_library_menu_commands(
+            on_select_root=self.on_select_library_root,
+            on_update=self.on_update_library,
+        )
         w.btn_action.configure(command=self.on_action)
         w.notebook.bind("<<NotebookTabChanged>>", self.on_mode_tab_changed)
 
@@ -56,7 +53,33 @@ class AppController:
         return self.device
 
 
+    def _library_root_reachable(self) -> bool:
+        root = self.library.root_path
+        return bool(root) and os.path.isdir(root)
+
+
+    def _require_usable_library(self) -> bool:
+        """True when library media can be transferred; shows a dialog otherwise."""
+        if not self.library.root_path:
+            messagebox.showinfo(
+                "Library",
+                "Select a library root first (Library → Select Library Root…).",
+            )
+            return False
+        if not self._library_root_reachable():
+            messagebox.showinfo(
+                "Library",
+                "Library root is not reachable.\n"
+                "Reconnect the volume or choose a new root "
+                "(Library → Select Library Root…).",
+            )
+            return False
+        return True
+
+
     def _selected_index(self) -> int | None:
+        if not self._require_usable_library():
+            return None
         sel = self.win.listbox.curselection()
         if not sel:
             messagebox.showinfo("Index", "You forgot to select a track.")
@@ -75,9 +98,12 @@ class AppController:
 
 
     def _populate_listbox(self, library: Library) -> None:
+        # Re-enable before mutating contents (listbox may be DISABLED when dead).
+        self.win.listbox.configure(state="normal")
         self.win.listbox.delete(0, END)
         for track in library.tracks:
             self.win.listbox.insert(END, track_summary(track))
+        self.win.set_tracks_usable(self._library_root_reachable())
 
 
     def _progress(self, done: int, total: int, path: str) -> None:
@@ -123,31 +149,52 @@ class AppController:
 
 
     def _sync_library_chrome(self) -> None:
-        """Update Select/Scan label, path, and track count on the library toolbar."""
-        label = "Scan Library" if self.library.root_path else "Select Library"
-        self.win.set_library_button_label(label)
-        self.win.set_library_status(self.library.root_path, len(self.library))
+        """Update toolbar status, menu enablement, and dead/live list appearance."""
+        reachable = self._library_root_reachable()
+        self.win.set_library_status(
+            self.library.root_path,
+            len(self.library),
+            root_reachable=reachable if self.library.root_path else True,
+        )
+        self.win.set_library_menu_state(update_enabled=reachable)
+        self.win.set_tracks_usable(reachable)
 
     def _restore_library_from_index(self) -> None:
-        """Load durable index at startup so tracks appear without a full rescan."""
-        loaded = load_library_index()
-        if loaded is None:
+        """Load durable index at startup so tracks appear without a full rescan.
+
+        If the root is unreachable, still show index entries (greyed/disabled)
+        so the user can see what was last known without wiping the list.
+        """
+        # Keep missing paths when root may be offline; filter only if root is live.
+        loaded = load_library_index(drop_missing_files=False)
+        if loaded is None or not loaded.root_path:
             self._sync_library_chrome()
             return
-        if not loaded.root_path or not os.path.isdir(loaded.root_path):
+
+        if os.path.isdir(loaded.root_path):
+            live = [t for t in loaded.tracks if os.path.isfile(t.path)]
+            dropped = len(loaded.tracks) - len(live)
+            if dropped:
+                logger.info(
+                    "Library index: dropped %d missing file(s); kept %d",
+                    dropped,
+                    len(live),
+                )
+            self.library = Library(tracks=live, root_path=loaded.root_path)
+        else:
             logger.warning(
-                "Library index root missing or not a directory: %r",
+                "Library index root not reachable: %r — showing stale index",
                 loaded.root_path,
             )
-            self._sync_library_chrome()
-            return
-        self.library = loaded
+            self.library = loaded
+
         self._populate_listbox(self.library)
         self._sync_library_chrome()
         logger.info(
-            "Restored %d tracks from index (root=%s)",
+            "Restored %d tracks from index (root=%s, reachable=%s)",
             len(self.library),
             self.library.root_path,
+            self._library_root_reachable(),
         )
 
     def _apply_scanned_library(self, path: str) -> None:
@@ -173,41 +220,32 @@ class AppController:
         )
         return path or None
 
-    def on_change_library(self) -> None:
-        """Explicitly pick a new root, rescan, and rewrite the index."""
+    def on_select_library_root(self) -> None:
+        """Pick a library root, full scan, and rewrite the durable index."""
         path = self._pick_library_directory()
         if not path:
             return
-        logger.info("Change Library → %s", path)
+        logger.info("Select Library Root → %s", path)
         self._apply_scanned_library(path)
 
-    def on_library_button(self, event=None) -> None:
-        """Select Library (first run) or Scan Library (rescan stored root).
-
-        Shift-click aliases Change Library (folder picker + replace root).
-        If the stored root is missing, falls back to Select.
-        """
-        force_select = bool(event is not None and (event.state & _SHIFT_MASK))
-        if force_select:
-            logger.info("Re-selecting library root (Shift-click)")
-            self.on_change_library()
+    def on_update_library(self) -> None:
+        """Rescan the stored root and rewrite the index (menu is disabled if unusable)."""
+        if not self._library_root_reachable():
+            messagebox.showinfo(
+                "Library",
+                "Cannot update: library root is not selected or not reachable.",
+            )
             return
-
-        root = self.library.root_path
-        has_usable_root = bool(root) and os.path.isdir(root)
-
-        if not has_usable_root:
-            path = self._pick_library_directory()
-            if not path:
-                return
-        else:
-            path = root
-
+        path = self.library.root_path
+        logger.info("Update Library → %s", path)
         self._apply_scanned_library(path)
 
-    # Back-compat alias if anything still calls the old name.
+    # Back-compat aliases for older call sites / mental models.
+    def on_change_library(self) -> None:
+        self.on_select_library_root()
+
     def on_select_library(self, event=None) -> None:
-        self.on_library_button(event)
+        self.on_select_library_root()
 
 
     def _log_transport_error(self, label: str, exc: TransportError) -> None:
@@ -352,6 +390,8 @@ class AppController:
 
 
     def action_entire_library(self) -> None:
+        if not self._require_usable_library():
+            return
         if not self.library.tracks:
             messagebox.showinfo("Library", "Load a library first.")
             return
