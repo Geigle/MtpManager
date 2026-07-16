@@ -16,13 +16,14 @@ End-to-end send path, Stable vs Experimental behavior, and where to change thing
 
 | Step | Module | Notes |
 |------|--------|--------|
-| Restore index | `ui/controllers._restore_library_from_index` | On startup: load durable JSON if present |
+| Restore index | `ui/controllers._start_index_restore` | Startup: background load of durable JSON |
 | Library menu | `ui/window` menubar **Library** | Select root / Update (see below) |
-| Library toolbar | `ui/window` (full-width under title) | Status only: path + track count |
-| Select root | `ui/controllers.on_select_library_root` | Folder picker → full scan → save index |
-| Update | `ui/controllers.on_update_library` | Re-scan stored root; disabled if root missing/unreachable |
-| Scan | `app/scan_library.scan_library` | Recursive music files → tags via mutagen |
-| Persist index | `infra/library_index` | Write after Select/Update under app data dir |
+| Library toolbar | `ui/window` (full-width under title) | Status only: path + track count (shows Scanning… / Loading index… when busy) |
+| Select root | `ui/controllers.on_select_library_root` | Folder picker → **background** full scan → save index |
+| Update | `ui/controllers.on_update_library` | **Background** re-scan of stored root; disabled if root missing/unreachable or busy |
+| Scan | `app/scan_library.scan_library` | Recursive music files → tags via mutagen (worker thread) |
+| Background jobs | `ui/bg.TkBackgroundRunner` | Thread + queue + `root.after` poll; never touch Tk from workers |
+| Persist index | `infra/library_index` | Saved in scan worker; UI updated on main thread |
 | Index (in-memory) | `domain/library.Library` | Ordered list for listbox indices |
 | Transfer strip | Left panel | Combobox + Execute Action (mode-specific options) |
 | Action | `ui/controllers` | Single / artist / album / library / convert album |
@@ -39,11 +40,13 @@ End-to-end send path, Stable vs Experimental behavior, and where to change thing
 
 | Menu command | Behavior |
 |--------------|----------|
-| **Select Library Root…** | Folder picker → full scan → save index (always available) |
-| **Update Library** | Re-scan stored root → rewrite index; **disabled** when no root is set or the root directory is not reachable |
+| **Select Library Root…** | Folder picker → background full scan → save index |
+| **Update Library** | Background re-scan of stored root → rewrite index; **disabled** when no root, root unreachable, or a library job is running |
 
-- **Startup:** load `{data_dir}/library_index.json` when present. If `root_path` is still a directory, drop missing files and show a live listbox. If the root is **unreachable**, still populate the listbox from the index, mark path as `(unreachable) …`, grey out and disable list entries, and leave **Update Library** disabled.
-- Transfers that need the library refuse to run while the root is unreachable (user is pointed at Select Library Root…).
+- **Startup:** schedule index restore after the UI is up (`after(0, …)`). Worker loads `{data_dir}/library_index.json`; main thread fills the listbox. If `root_path` is still a directory, missing files are dropped. If the root is **unreachable**, still show index entries greyed/disabled and leave **Update Library** disabled.
+- **Non-blocking:** scan and index restore run on a daemon thread (`TkBackgroundRunner`). The previous library stays until the job finishes; a newer job discards stale results. Listbox population is chunked so large libraries do not freeze the event loop.
+- While busy, Library menu actions are disabled and the toolbar count shows `Loading index…` / `Scanning…`.
+- Transfers that need the library refuse to run while busy or while the root is unreachable.
 - Left panel is **Transfer** (combo + Execute) plus Experimental **Device** (Connect / Disconnect / Device Info).
 - Data dir: macOS `~/Library/Application Support/MtpManager/`; Linux `$XDG_DATA_HOME/mtpmanager` or `~/.local/share/mtpmanager/`; override with `MTP_MANAGER_DATA_DIR`.
 
@@ -141,16 +144,16 @@ Non-fatal continues are supported by the API (`stop_on_fatal=False`) but product
 
 ---
 
-## Open limitation: Tk main thread
+## Open limitation: Tk main thread (transfers)
 
-Transfers run on the **Tk main thread** (`on_action` → `_transfer_one` / `_transfer_many`). A slow or hung libmtp/`mtp-sendtr` call freezes the window. Progress bar updates via `update_idletasks` only between tracks in batch. Worker-thread transfers are a documented follow-up, not implemented.
+Library **scan / index restore** run off the main thread (`ui/bg.py`). **Transfers** still run on the Tk main thread (`on_action` → `_transfer_one` / `_transfer_many`). A slow or hung libmtp/`mtp-sendtr` call freezes the window. Progress bar updates via `update_idletasks` only between tracks in batch. Worker-thread transfers are a documented follow-up, not implemented.
 
 ---
 
 ## Tests that lock the contract
 
 ```bash
-.venv/bin/python -m unittest tests.test_remote_naming tests.test_pymtp_filetypes -v
+.venv/bin/python -m unittest tests.test_remote_naming tests.test_pymtp_filetypes tests.test_library_index tests.test_bg -v
 ```
 
 | Test | Guards |

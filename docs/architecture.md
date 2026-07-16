@@ -38,7 +38,7 @@ MtpManager loads music onto picky MTP players (especially Creative ZEN Vision:M)
 | `ports/` | Protocols + shared error type | `transport.py` (`Transport`, `TransportError`), `device.py` (`DevicePort`), `tags.py`, `transcoder.py` |
 | `app/` | Use cases (orchestration only) | `transfer.py`, `scan_library.py`, `device_ops.py` |
 | `infra/` | libmtp / ffmpeg / mutagen / logging / library index | `cmd_transport.py`, `pymtp_device.py`, `pymtp_wrapper.py`, `remote_naming.py`, `ffmpeg_transcode.py`, `mutagen_tags.py`, `logging_setup.py`, `app_paths.py`, `library_index.py` |
-| `ui/` | Tk layout + event wiring | `window.py` (Library menu, status toolbar, mode tabs, transfer strip), `controllers.py`, `formatting.py` |
+| `ui/` | Tk layout + event wiring | `window.py` (Library menu, status toolbar, mode tabs, transfer strip), `controllers.py`, `formatting.py`, `bg.py` (worker + `after` poll) |
 
 ---
 
@@ -53,7 +53,7 @@ MtpManager loads music onto picky MTP players (especially Creative ZEN Vision:M)
 `mtpmanager/__main__.py` wires:
 
 1. `configure_logging()` / `prune_old_logs()`
-2. `MainWindow()` + `PymtpDevice()` + `AppController(window, device)`
+2. `MainWindow()` + `PymtpDevice()` + `AppController(window, device)` (index restore scheduled on a background thread; mainloop is not blocked)
 3. `window.mainloop()`
 
 `PymtpDevice` is always constructed (for Experimental Connect / device admin). Stable transfers use a **separate** `CmdTransport()` instance and do not require an open PyMTP session.
@@ -112,7 +112,7 @@ Platform defaults: macOS `~/Library/Logs/MtpManager`; Linux `~/.local/share/mtpm
 |-----|----------------------|
 | Hardcoded ZEN Music folder / storage defaults | `remote_naming.DEFAULT_*`; constructors on both transports |
 | Multi-device discovery | Not implemented; user must match device layout |
-| Transfers on Tk main thread | Controllers call `transfer_*` inline → UI freezes during send/hang |
+| Transfers on Tk main thread | Controllers call `transfer_*` inline → UI freezes during send/hang (library scan/restore already use `ui/bg.py`) |
 | Full “Delete All Tracks” | Stub lists storage ids only |
 | Upstream-maintained libmtp Python binding | Stock pymtp patched in-process via `pymtp_wrapper.py` |
 

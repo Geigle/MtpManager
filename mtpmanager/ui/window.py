@@ -224,10 +224,21 @@ class MainWindow:
         self.menu_library.entryconfig(MENU_SELECT_ROOT, command=on_select_root)
         self.menu_library.entryconfig(MENU_UPDATE_LIBRARY, command=on_update)
 
-    def set_library_menu_state(self, *, update_enabled: bool) -> None:
-        """Enable Update Library only when a reachable root is available."""
-        state = NORMAL if update_enabled else DISABLED
-        self.menu_library.entryconfig(MENU_UPDATE_LIBRARY, state=state)
+    def set_library_menu_state(
+        self,
+        *,
+        update_enabled: bool,
+        select_enabled: bool = True,
+    ) -> None:
+        """Enable/disable Library menu commands."""
+        self.menu_library.entryconfig(
+            MENU_SELECT_ROOT,
+            state=NORMAL if select_enabled else DISABLED,
+        )
+        self.menu_library.entryconfig(
+            MENU_UPDATE_LIBRARY,
+            state=NORMAL if update_enabled else DISABLED,
+        )
 
     def set_library_status(
         self,
@@ -235,8 +246,13 @@ class MainWindow:
         track_count: int,
         *,
         root_reachable: bool = True,
+        busy_message: str | None = None,
     ) -> None:
-        """Update toolbar path label and track count."""
+        """Update toolbar path label and track count.
+
+        When *busy_message* is set (e.g. during a background scan), the count
+        label shows that status instead of a numeric track total.
+        """
         if root_path:
             display = _elide_path(root_path)
             if not root_reachable:
@@ -244,6 +260,9 @@ class MainWindow:
             self.lbl_library_path.configure(text=display)
         else:
             self.lbl_library_path.configure(text="No library selected")
+        if busy_message:
+            self.lbl_library_count.configure(text=busy_message)
+            return
         noun = "track" if track_count == 1 else "tracks"
         self.lbl_library_count.configure(text=f"{track_count} {noun}")
 

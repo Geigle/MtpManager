@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
-from tkinter import END, filedialog, messagebox
+from tkinter import END, NORMAL, filedialog, messagebox
 
 from mtpmanager.app import device_ops
 from mtpmanager.app.scan_library import scan_library
@@ -18,10 +18,14 @@ from mtpmanager.infra.logging_setup import start_transfer_log, stop_transfer_log
 from mtpmanager.infra.mutagen_tags import read_metadata
 from mtpmanager.infra.pymtp_device import PymtpDevice
 from mtpmanager.ports.transport import TransportError
+from mtpmanager.ui.bg import TkBackgroundRunner
 from mtpmanager.ui.formatting import device_info_summary, folder_line, track_summary
 from mtpmanager.ui.window import MainWindow
 
 logger = logging.getLogger(__name__)
+
+# Insert this many listbox rows per idle slice to keep the UI responsive.
+_LISTBOX_CHUNK = 100
 
 
 class AppController:
@@ -30,8 +34,12 @@ class AppController:
         self.device = device or PymtpDevice()
         self.library = Library()
         self.transcoder = FFmpegTranscoder()
+        self._bg = TkBackgroundRunner(window.root)
+        self._library_busy = False
+        self._populate_after_id: str | None = None
         self._wire()
-        self._restore_library_from_index()
+        # Defer restore so mainloop can start before any index I/O.
+        self.win.root.after(0, self._start_index_restore)
 
 
     def _wire(self) -> None:
@@ -60,6 +68,12 @@ class AppController:
 
     def _require_usable_library(self) -> bool:
         """True when library media can be transferred; shows a dialog otherwise."""
+        if self._library_busy:
+            messagebox.showinfo(
+                "Library",
+                "Library is still loading or scanning. Try again in a moment.",
+            )
+            return False
         if not self.library.root_path:
             messagebox.showinfo(
                 "Library",
@@ -97,13 +111,36 @@ class AppController:
         return self.library.get(idx)
 
 
+    def _cancel_populate(self) -> None:
+        if self._populate_after_id is not None:
+            try:
+                self.win.root.after_cancel(self._populate_after_id)
+            except Exception:
+                pass
+            self._populate_after_id = None
+
     def _populate_listbox(self, library: Library) -> None:
-        # Re-enable before mutating contents (listbox may be DISABLED when dead).
-        self.win.listbox.configure(state="normal")
+        """Fill the listbox in chunks so large libraries do not freeze the UI."""
+        self._cancel_populate()
+        self.win.listbox.configure(state=NORMAL)
         self.win.listbox.delete(0, END)
-        for track in library.tracks:
-            self.win.listbox.insert(END, track_summary(track))
-        self.win.set_tracks_usable(self._library_root_reachable())
+        tracks = library.tracks
+        total = len(tracks)
+        if total == 0:
+            self.win.set_tracks_usable(self._library_root_reachable())
+            return
+
+        def chunk(start: int) -> None:
+            self._populate_after_id = None
+            end = min(start + _LISTBOX_CHUNK, total)
+            for i in range(start, end):
+                self.win.listbox.insert(END, track_summary(tracks[i]))
+            if end < total:
+                self._populate_after_id = self.win.root.after(1, lambda: chunk(end))
+            else:
+                self.win.set_tracks_usable(self._library_root_reachable())
+
+        chunk(0)
 
 
     def _progress(self, done: int, total: int, path: str) -> None:
@@ -148,29 +185,46 @@ class AppController:
             messagebox.showerror("Device Info", str(e))
 
 
+    def _set_library_busy(self, busy: bool, *, message: str | None = None) -> None:
+        self._library_busy = busy
+        if busy:
+            self.win.set_library_menu_state(
+                update_enabled=False,
+                select_enabled=False,
+            )
+            self.win.set_library_status(
+                self.library.root_path,
+                len(self.library),
+                root_reachable=self._library_root_reachable()
+                if self.library.root_path
+                else True,
+                busy_message=message or "Working…",
+            )
+        else:
+            self._sync_library_chrome()
+
     def _sync_library_chrome(self) -> None:
         """Update toolbar status, menu enablement, and dead/live list appearance."""
+        if self._library_busy:
+            return
         reachable = self._library_root_reachable()
         self.win.set_library_status(
             self.library.root_path,
             len(self.library),
             root_reachable=reachable if self.library.root_path else True,
         )
-        self.win.set_library_menu_state(update_enabled=reachable)
+        self.win.set_library_menu_state(
+            update_enabled=reachable,
+            select_enabled=True,
+        )
         self.win.set_tracks_usable(reachable)
 
-    def _restore_library_from_index(self) -> None:
-        """Load durable index at startup so tracks appear without a full rescan.
-
-        If the root is unreachable, still show index entries (greyed/disabled)
-        so the user can see what was last known without wiping the list.
-        """
-        # Keep missing paths when root may be offline; filter only if root is live.
+    @staticmethod
+    def _load_index_worker() -> Library | None:
+        """Worker: load durable index and filter missing files if root is live."""
         loaded = load_library_index(drop_missing_files=False)
         if loaded is None or not loaded.root_path:
-            self._sync_library_chrome()
-            return
-
+            return None
         if os.path.isdir(loaded.root_path):
             live = [t for t in loaded.tracks if os.path.isfile(t.path)]
             dropped = len(loaded.tracks) - len(live)
@@ -180,36 +234,96 @@ class AppController:
                     dropped,
                     len(live),
                 )
-            self.library = Library(tracks=live, root_path=loaded.root_path)
-        else:
-            logger.warning(
-                "Library index root not reachable: %r — showing stale index",
-                loaded.root_path,
-            )
-            self.library = loaded
+            return Library(tracks=live, root_path=loaded.root_path)
+        logger.warning(
+            "Library index root not reachable: %r — showing stale index",
+            loaded.root_path,
+        )
+        return loaded
 
+    @staticmethod
+    def _scan_and_save_worker(path: str) -> tuple[Library, str | None]:
+        """Worker: full tree scan + persist index (no Tk).
+
+        Returns (library, save_error_message). Scan failures raise; save failures
+        are returned so the UI can still show the scanned library.
+        """
+        library = scan_library(path)
+        try:
+            save_library_index(library)
+        except OSError as e:
+            logger.exception("Failed to save library index")
+            return library, str(e)
+        return library, None
+
+    def _on_library_job_done(self, library: Library | None, *, kind: str) -> None:
+        self._library_busy = False
+        if library is None:
+            self.library = Library()
+            self._cancel_populate()
+            self.win.listbox.configure(state=NORMAL)
+            self.win.listbox.delete(0, END)
+            self._sync_library_chrome()
+            logger.info("No library index to restore")
+            return
+
+        self.library = library
         self._populate_listbox(self.library)
         self._sync_library_chrome()
         logger.info(
-            "Restored %d tracks from index (root=%s, reachable=%s)",
+            "%s %d tracks (root=%s, reachable=%s)",
+            kind,
             len(self.library),
             self.library.root_path,
             self._library_root_reachable(),
         )
 
-    def _apply_scanned_library(self, path: str) -> None:
-        self.library = scan_library(path)
-        self._populate_listbox(self.library)
-        try:
-            save_library_index(self.library)
-        except OSError as e:
-            logger.exception("Failed to save library index")
+    def _on_scan_done(self, result: tuple[Library, str | None]) -> None:
+        library, save_err = result
+        self._on_library_job_done(library, kind="Scanned")
+        if save_err:
             messagebox.showwarning(
                 "Library Index",
-                f"Library loaded but could not save index:\n{e}",
+                f"Library loaded but could not save index:\n{save_err}",
             )
+
+    def _on_library_job_error(self, exc: BaseException, *, title: str) -> None:
+        self._library_busy = False
         self._sync_library_chrome()
-        logger.info("Loaded %d tracks from %s", len(self.library), path)
+        logger.exception("%s", title)
+        messagebox.showerror(title, str(exc))
+
+    def _start_index_restore(self) -> None:
+        """Background load of durable index (startup; non-blocking)."""
+        self._set_library_busy(True, message="Loading index…")
+        self._bg.submit(
+            self._load_index_worker,
+            on_done=lambda lib: self._on_library_job_done(lib, kind="Restored"),
+            on_error=lambda e: self._on_library_job_error(
+                e, title="Library index failed"
+            ),
+            name="library-restore",
+        )
+
+    def _start_library_scan(self, path: str) -> None:
+        """Background full scan of *path*; previous library kept until done."""
+        # Do not replace self.library until the worker succeeds (stale root safe).
+        self._library_busy = True
+        self.win.set_library_menu_state(update_enabled=False, select_enabled=False)
+        self.win.set_library_status(
+            path,
+            len(self.library),
+            root_reachable=True,
+            busy_message="Scanning…",
+        )
+        self._bg.submit(
+            lambda: self._scan_and_save_worker(path),
+            on_done=self._on_scan_done,
+            on_error=lambda e: self._on_library_job_error(
+                e, title="Library scan failed"
+            ),
+            name="library-scan",
+        )
 
     def _pick_library_directory(self) -> str | None:
         root = self.library.root_path
@@ -222,14 +336,22 @@ class AppController:
 
     def on_select_library_root(self) -> None:
         """Pick a library root, full scan, and rewrite the durable index."""
+        if self._library_busy:
+            messagebox.showinfo(
+                "Library",
+                "A library job is already running. Wait for it to finish.",
+            )
+            return
         path = self._pick_library_directory()
         if not path:
             return
         logger.info("Select Library Root → %s", path)
-        self._apply_scanned_library(path)
+        self._start_library_scan(path)
 
     def on_update_library(self) -> None:
         """Rescan the stored root and rewrite the index (menu is disabled if unusable)."""
+        if self._library_busy:
+            return
         if not self._library_root_reachable():
             messagebox.showinfo(
                 "Library",
@@ -238,7 +360,7 @@ class AppController:
             return
         path = self.library.root_path
         logger.info("Update Library → %s", path)
-        self._apply_scanned_library(path)
+        self._start_library_scan(path)
 
     # Back-compat aliases for older call sites / mental models.
     def on_change_library(self) -> None:
