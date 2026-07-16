@@ -56,8 +56,9 @@ End-to-end send path, Stable vs Experimental behavior, and where to change thing
 
 - User-facing targets: **MP3** and **WMA** (single-track actions; batch paths currently use MP3).
 - `domain/library.is_format(path, fmt)` — extension-based; if already target format, skip convert.
-- Otherwise `FFmpegTranscoder.convert` (`infra/ffmpeg_transcode.py`) writes a temp file; `transfer_track` always `cleanup`s it in `finally`.
+- Otherwise `FFmpegTranscoder.convert` writes into a **dual-buffer slot**: `TRANSCODE_0.<ext>` / `TRANSCODE_1.<ext>` (`slot` 0 or 1). Batch `transfer_tracks` prepares track *i+1* on a helper thread into the alternate slot while track *i* is sent, so ffmpeg cannot clobber a file still in flight (CMD and PyMTP share this pipeline).
 - After convert, tags are re-read and merged (prefer original tags; take stream length/bitrate from converted file when useful).
+- Temps are cleaned up after each successful send (or on abort).
 
 Supported library extensions for scan: `aac`, `alac`, `flac`, `mp3`, `ogg`, `vorbis`, `wav`, `wma` (`MUSIC_EXTENSIONS` in `library.py`).
 
@@ -144,16 +145,18 @@ Non-fatal continues are supported by the API (`stop_on_fatal=False`) but product
 
 ---
 
-## Open limitation: Tk main thread (transfers)
+## Background transfers
 
-Library **scan / index restore** run off the main thread (`ui/bg.py`). **Transfers** still run on the Tk main thread (`on_action` → `_transfer_one` / `_transfer_many`). A slow or hung libmtp/`mtp-sendtr` call freezes the window. Progress bar updates via `update_idletasks` only between tracks in batch. Worker-thread transfers are a documented follow-up, not implemented.
+Single-track and batch sends run on a **worker thread** via `ui/bg.TkBackgroundRunner` (same pattern as library scan). Progress events are queued to the main thread for the progress bar. Library menu / transfers refuse to start while the other is busy.
+
+The transfer **worker** still blocks on each `transport.send_track` (subprocess or libmtp); the dual-slot prep thread overlaps **ffmpeg convert** of the next track only.
 
 ---
 
 ## Tests that lock the contract
 
 ```bash
-.venv/bin/python -m unittest tests.test_remote_naming tests.test_pymtp_filetypes tests.test_library_index tests.test_bg -v
+.venv/bin/python -m unittest tests.test_remote_naming tests.test_pymtp_filetypes tests.test_library_index tests.test_bg tests.test_transfer_pipeline -v
 ```
 
 | Test | Guards |

@@ -112,7 +112,7 @@ Platform defaults: macOS `~/Library/Logs/MtpManager`; Linux `~/.local/share/mtpm
 |-----|----------------------|
 | Hardcoded ZEN Music folder / storage defaults | `remote_naming.DEFAULT_*`; constructors on both transports |
 | Multi-device discovery | Not implemented; user must match device layout |
-| Transfers on Tk main thread | Controllers call `transfer_*` inline → UI freezes during send/hang (library scan/restore already use `ui/bg.py`) |
+| Transfer send still blocking in worker | Convert/send pipeline + UI job are off the Tk thread; each `send_track` still blocks the transfer worker until the device finishes |
 | Full “Delete All Tracks” | Stub lists storage ids only |
 | Upstream-maintained libmtp Python binding | Stock pymtp patched in-process via `pymtp_wrapper.py` |
 

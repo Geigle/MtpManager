@@ -36,6 +36,7 @@ class AppController:
         self.transcoder = FFmpegTranscoder()
         self._bg = TkBackgroundRunner(window.root)
         self._library_busy = False
+        self._transfer_busy = False
         self._populate_after_id: str | None = None
         self._wire()
         # Defer restore so mainloop can start before any index I/O.
@@ -72,6 +73,12 @@ class AppController:
             messagebox.showinfo(
                 "Library",
                 "Library is still loading or scanning. Try again in a moment.",
+            )
+            return False
+        if self._transfer_busy:
+            messagebox.showinfo(
+                "Transfer",
+                "A transfer is already in progress. Wait for it to finish.",
             )
             return False
         if not self.library.root_path:
@@ -336,10 +343,10 @@ class AppController:
 
     def on_select_library_root(self) -> None:
         """Pick a library root, full scan, and rewrite the durable index."""
-        if self._library_busy:
+        if self._library_busy or self._transfer_busy:
             messagebox.showinfo(
                 "Library",
-                "A library job is already running. Wait for it to finish.",
+                "A background job is already running. Wait for it to finish.",
             )
             return
         path = self._pick_library_directory()
@@ -350,7 +357,7 @@ class AppController:
 
     def on_update_library(self) -> None:
         """Rescan the stored root and rewrite the index (menu is disabled if unusable)."""
-        if self._library_busy:
+        if self._library_busy or self._transfer_busy:
             return
         if not self._library_root_reachable():
             messagebox.showinfo(
@@ -435,45 +442,132 @@ class AppController:
         )
 
 
-    def _transfer_one(self, track: Track, fmt: str) -> None:
-        session_handler = None
-        try:
-            session_handler = start_transfer_log()
-        except OSError as exc:
-            logger.warning("Could not open transfer session log: %s", exc)
-        try:
-            logger.info(
-                "Single-track transfer start: path=%s target_format=%s",
-                track.path,
-                fmt,
+    def _begin_transfer_job(self) -> bool:
+        """Return False if another library/transfer job is already running."""
+        if self._library_busy:
+            messagebox.showinfo(
+                "Library",
+                "Library is still loading or scanning. Try again in a moment.",
             )
-            transfer_track(
-                track,
-                target_format=fmt,
-                transport=self._transport(),
-                transcoder=self.transcoder,
+            return False
+        if self._transfer_busy or self._bg.busy:
+            messagebox.showinfo(
+                "Transfer",
+                "A background job is already running. Wait for it to finish.",
             )
-            logger.info("Single-track transfer done: path=%s", track.path)
-        except TransportError as e:
-            self._log_transport_error("Single-track transfer failed", e)
-            self._show_transfer_error("Transfer failed", e, batch=False)
-        finally:
-            stop_transfer_log(session_handler)
+            return False
+        self._transfer_busy = True
+        try:
+            self.win.progress["value"] = 0
+        except Exception:
+            pass
+        return True
 
+    def _end_transfer_job(self) -> None:
+        self._transfer_busy = False
+
+    def _transfer_one(self, track: Track, fmt: str) -> None:
+        if not self._begin_transfer_job():
+            return
+        # Capture transport on main thread (mode tab may change later).
+        transport = self._transport()
+        transcoder = self.transcoder
+        path = track.path
+
+        def work() -> None:
+            session_handler = None
+            try:
+                session_handler = start_transfer_log()
+            except OSError as exc:
+                logger.warning("Could not open transfer session log: %s", exc)
+            try:
+                logger.info(
+                    "Single-track transfer start: path=%s target_format=%s",
+                    path,
+                    fmt,
+                )
+                transfer_track(
+                    track,
+                    target_format=fmt,
+                    transport=transport,
+                    transcoder=transcoder,
+                    slot=0,
+                )
+                logger.info("Single-track transfer done: path=%s", path)
+            finally:
+                stop_transfer_log(session_handler)
+
+        def on_done(_result: None) -> None:
+            self._end_transfer_job()
+            try:
+                self.win.progress["value"] = 100
+            except Exception:
+                pass
+
+        def on_error(exc: BaseException) -> None:
+            self._end_transfer_job()
+            if isinstance(exc, TransportError):
+                self._log_transport_error("Single-track transfer failed", exc)
+                self._show_transfer_error("Transfer failed", exc, batch=False)
+            else:
+                logger.exception("Single-track transfer failed")
+                messagebox.showerror("Transfer failed", str(exc))
+
+        self._bg.submit(
+            work,
+            on_done=on_done,
+            on_error=on_error,
+            name="transfer-one",
+        )
 
     def _transfer_many(self, tracks: list[Track], fmt: str = "mp3") -> None:
-        try:
-            transfer_tracks(
-                tracks,
+        if not tracks:
+            messagebox.showinfo("Transfer", "No tracks to transfer.")
+            return
+        if not self._begin_transfer_job():
+            return
+
+        transport = self._transport()
+        transcoder = self.transcoder
+        # Snapshot the list so library changes during transfer do not race.
+        batch = list(tracks)
+
+        def work() -> int:
+            gen = self._bg.generation
+            report = self._bg.progress_callback(gen)
+
+            def on_progress(done: int, total: int, path: str) -> None:
+                report(done, total, path)
+
+            return transfer_tracks(
+                batch,
                 target_format=fmt,
-                transport=self._transport(),
-                transcoder=self.transcoder,
-                on_progress=self._progress,
+                transport=transport,
+                transcoder=transcoder,
+                on_progress=on_progress,
             )
-        except TransportError as e:
-            self._log_transport_error("Batch transfer aborted", e)
-            title = "Transfer aborted" if e.fatal else "Transfer failed"
-            self._show_transfer_error(title, e, batch=True)
+
+        def on_done(succeeded: int) -> None:
+            self._end_transfer_job()
+            logger.info("Background batch finished: succeeded=%s", succeeded)
+
+        def on_error(exc: BaseException) -> None:
+            self._end_transfer_job()
+            if isinstance(exc, TransportError):
+                self._log_transport_error("Batch transfer aborted", exc)
+                title = "Transfer aborted" if exc.fatal else "Transfer failed"
+                self._show_transfer_error(title, exc, batch=True)
+            else:
+                logger.exception("Batch transfer failed")
+                messagebox.showerror("Transfer failed", str(exc))
+
+        self._bg.submit(
+            work,
+            on_done=on_done,
+            on_error=on_error,
+            on_progress=self._progress,
+            name="transfer-batch",
+        )
 
 
     def action_single_track(self, fmt: str = "mp3") -> None:

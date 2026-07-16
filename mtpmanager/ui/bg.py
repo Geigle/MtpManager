@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
-# Payload: (generation, "done"|"error", result_or_exc)
+# Payload: (generation, "done"|"error"|"progress", result_or_exc_or_args)
 _QueueItem = tuple[int, str, Any]
 
 
@@ -22,6 +22,9 @@ class TkBackgroundRunner:
     Workers must not touch Tk widgets. Results are applied on the main thread
     via a short ``after`` poll loop. When a newer job is submitted, results
     from older generations are discarded.
+
+    Optional *on_progress* receives args from :meth:`progress_callback` for the
+    active generation (also main-thread only).
     """
 
     def __init__(self, root, *, poll_ms: int = 50) -> None:
@@ -33,6 +36,7 @@ class TkBackgroundRunner:
         self._poll_scheduled = False
         self._on_done: Callable[[Any], None] | None = None
         self._on_error: Callable[[BaseException], None] | None = None
+        self._on_progress: Callable[..., None] | None = None
 
     @property
     def generation(self) -> int:
@@ -42,19 +46,34 @@ class TkBackgroundRunner:
     def busy(self) -> bool:
         return self._inflight > 0
 
+    def progress_callback(self, gen: int) -> Callable[..., None]:
+        """Return a thread-safe progress reporter for job *gen*."""
+
+        def report(*args: Any) -> None:
+            self._q.put((gen, "progress", args))
+            self._ensure_poll()
+
+        return report
+
     def submit(
         self,
         fn: Callable[[], T],
         *,
         on_done: Callable[[T], None],
         on_error: Callable[[BaseException], None],
+        on_progress: Callable[..., None] | None = None,
         name: str = "mtpmanager-bg",
     ) -> int:
-        """Start *fn* on a daemon thread. Returns the job generation id."""
+        """Start *fn* on a daemon thread. Returns the job generation id.
+
+        Use :meth:`progress_callback` with the returned generation from inside
+        *fn* (via closure) or capture it before starting work.
+        """
         self._generation += 1
         gen = self._generation
         self._on_done = on_done  # type: ignore[assignment]
         self._on_error = on_error
+        self._on_progress = on_progress
         self._inflight += 1
 
         def worker() -> None:
@@ -85,6 +104,14 @@ class TkBackgroundRunner:
                 gen, kind, payload = self._q.get_nowait()
             except queue.Empty:
                 break
+
+            if kind == "progress":
+                if gen == self._generation and self._on_progress is not None:
+                    try:
+                        self._on_progress(*payload)
+                    except Exception:
+                        logger.exception("Progress callback failed")
+                continue
 
             self._inflight = max(0, self._inflight - 1)
 
