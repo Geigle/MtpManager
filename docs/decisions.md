@@ -28,7 +28,7 @@ Debriefs remain the forensic narrative; this file is what we keep doing.
 
 **Rationale:** Different reliability and session models; users choose deliberately. Composition: `AppController._transport()`.
 
-**Consequences:** Two code paths must share the remote contract (D4). Experimental requires Connect before send. Action lists differ (`STABLE_ACTIONS` vs `EXPERIMENTAL_ACTIONS`).
+**Consequences:** Two code paths must share the remote contract (D4). Experimental requires Connect before send (UI gates sync/admin). Track sync is mode-agnostic (context menu); Device admin is Experimental-only.
 
 **Source:** `ui/window.py`, `ui/controllers.py`; [transfer-and-modes.md](./transfer-and-modes.md).
 

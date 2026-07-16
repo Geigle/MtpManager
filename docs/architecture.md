@@ -38,7 +38,7 @@ MtpManager loads music onto picky MTP players (especially Creative ZEN Vision:M)
 | `ports/` | Protocols + shared error type | `transport.py` (`Transport`, `TransportError`), `device.py` (`DevicePort`), `tags.py`, `transcoder.py` |
 | `app/` | Use cases (orchestration only) | `transfer.py`, `scan_library.py`, `device_ops.py` |
 | `infra/` | libmtp / ffmpeg / mutagen / logging / library index | `cmd_transport.py`, `pymtp_device.py`, `pymtp_wrapper.py`, `remote_naming.py`, `ffmpeg_transcode.py`, `mutagen_tags.py`, `logging_setup.py`, `app_paths.py`, `library_index.py` |
-| `ui/` | Tk layout + event wiring | `window.py` (Library menu, status toolbar, mode tabs, transfer strip), `controllers.py`, `formatting.py`, `bg.py` (worker + `after` poll) |
+| `ui/` | Tk layout + event wiring | `window.py` (Library/Transfer/Device menus, track context menu, format preference, status toolbar), `controllers.py`, `formatting.py`, `bg.py` (worker + `after` poll) |
 
 ---
 
@@ -69,10 +69,11 @@ MtpManager loads music onto picky MTP players (especially Creative ZEN Vision:M)
 | **Stable Mode** | `"stable"` | `CmdTransport()` — one `mtp-sendtr` process per track |
 | **Experimental Mode** | `"experimental"` | `self.device` (`PymtpDevice`) — also implements device admin |
 
-Action lists (`ui/window.py`):
+UI action surfaces (`ui/window.py`):
 
-- **Stable:** transfer-oriented actions only (`STABLE_ACTIONS`).
-- **Experimental:** transfers + Connect/Disconnect/Device Info + folder/name/admin tools (`EXPERIMENTAL_ACTIONS`).
+- **Track context menu** (both modes): Sync this track / Album / Artist.
+- **Transfer** menubar: entire library / folder sync.
+- **Device** menubar + Experimental tab buttons: Connect/Disconnect/Device Info and admin tools (Device menu enabled only in Experimental).
 
 Stable is the recommended transfer path. Experimental is for PyMTP/libmtp tools and deliberate in-process send testing. Experimental **does not** silently fall back to CMD on failure (see [decisions.md](./decisions.md) D3).
 

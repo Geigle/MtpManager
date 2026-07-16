@@ -8,6 +8,7 @@ from tkinter import (
     BOTH,
     BOTTOM,
     DISABLED,
+    END,
     LEFT,
     NORMAL,
     RIGHT,
@@ -27,44 +28,42 @@ from tkinter import (
 
 Mode = Literal["stable", "experimental"]
 
-# Transfer actions available via CMD (mtp-sendtr) — Stable Mode.
-STABLE_ACTIONS = [
-    "Single Track MP3",
-    "Single Track WMA",
-    "All from Album",
-    "All from Artist",
-    "Entire Library",
-    "Convert and Transfer Album",
-    "Send Test Track",
-]
-
-# Full action set including PyMTP device administration — Experimental Mode.
-EXPERIMENTAL_ACTIONS = [
-    "Single Track MP3",
-    "Single Track WMA",
-    "All from Album",
-    "All from Artist",
-    "Entire Library",
-    "Set Device Name",
-    "Read Folder List",
-    "Create a New Folder",
-    "Copy Track to PC",
-    "Delete All Tracks",
-    "Get File Info",
-    "Convert and Transfer Album",
-    "Send Test File",
-    "Send Test Track",
-]
-
-# Backward-compatible alias for callers that imported the old name.
-SENDTYPE_OPTIONS = EXPERIMENTAL_ACTIONS
+FORMAT_OPTIONS = ("MP3", "WMA")
 
 _PATH_DISPLAY_MAX = 72
 _DEAD_TRACK_FG = "gray50"
 
-# Menu labels (used for entryconfig by label).
+# Library menu labels (used for entryconfig by label).
 MENU_SELECT_ROOT = "Select Library Root…"
 MENU_UPDATE_LIBRARY = "Update Library"
+
+# Transfer menu
+MENU_SYNC_ENTIRE = "Sync Entire Library"
+MENU_SYNC_FOLDER = "Sync Folder…"
+
+# Device menu (Experimental)
+MENU_SET_DEVICE_NAME = "Set Device Name…"
+MENU_CREATE_FOLDER = "Create Folder…"
+MENU_LIST_FOLDERS = "List Folders"
+MENU_SEND_TEST_FILE = "Send Test File…"
+MENU_SEND_TEST_TRACK = "Send Test Track…"
+MENU_GET_FILE_INFO = "Get File Info…"
+MENU_DELETE_ALL = "Delete All Tracks…"
+
+# Track context menu
+CTX_SYNC_TRACK = "Sync this track"
+CTX_SYNC_ALBUM = "Sync Album"
+CTX_SYNC_ARTIST = "Sync all from Artist"
+
+_DEVICE_MENU_LABELS = (
+    MENU_SET_DEVICE_NAME,
+    MENU_CREATE_FOLDER,
+    MENU_LIST_FOLDERS,
+    MENU_SEND_TEST_FILE,
+    MENU_SEND_TEST_TRACK,
+    MENU_GET_FILE_INFO,
+    MENU_DELETE_ALL,
+)
 
 
 def _elide_path(path: str, max_len: int = _PATH_DISPLAY_MAX) -> str:
@@ -85,7 +84,7 @@ class MainWindow:
         self.root["borderwidth"] = 3
         self.root["relief"] = "sunken"
 
-        # Menubar — library discovery commands live here (not as toolbar buttons).
+        # Menubar: Library | Transfer | Device
         self.menubar = Menu(self.root)
         self.root.config(menu=self.menubar)
 
@@ -94,11 +93,27 @@ class MainWindow:
         self.menu_library.add_command(label=MENU_SELECT_ROOT)
         self.menu_library.add_command(label=MENU_UPDATE_LIBRARY, state=DISABLED)
 
+        self.menu_transfer = Menu(self.menubar, tearoff=0)
+        self.menubar.add_cascade(label="Transfer", menu=self.menu_transfer)
+        self.menu_transfer.add_command(label=MENU_SYNC_ENTIRE)
+        self.menu_transfer.add_command(label=MENU_SYNC_FOLDER)
+
+        self.menu_device = Menu(self.menubar, tearoff=0)
+        self.menubar.add_cascade(label="Device", menu=self.menu_device)
+        for label in _DEVICE_MENU_LABELS:
+            self.menu_device.add_command(label=label, state=DISABLED)
+
+        # Track list context menu (commands wired by controller).
+        self.menu_track_ctx = Menu(self.root, tearoff=0)
+        self.menu_track_ctx.add_command(label=CTX_SYNC_TRACK)
+        self.menu_track_ctx.add_command(label=CTX_SYNC_ALBUM)
+        self.menu_track_ctx.add_command(label=CTX_SYNC_ARTIST)
+
         header = Frame(self.root)
         header.pack(side=TOP, fill=X)
         Label(header, text="MTP Manager").pack()
 
-        # Status toolbar: path + track count only (actions are in the Library menu).
+        # Status toolbar: path + track count only.
         library_toolbar = Frame(self.root, borderwidth=3, relief="sunken")
         library_toolbar.pack(side=TOP, fill=X, padx=2, pady=2)
 
@@ -168,23 +183,28 @@ class MainWindow:
         self.btn_device_info = Button(experimental_tab, width=20, text="Device Info")
         self.btn_device_info.pack(padx=3, pady=3, side=TOP)
 
-        # Transfer strip: action pick + execute.
-        transfer = Frame(leftframe)
-        transfer.pack(padx=3, pady=6, fill=X)
-
-        Label(transfer, text="Transfer", font=("", 11, "bold")).pack(
+        # Global format preference (all Sync actions).
+        format_frame = Frame(leftframe)
+        format_frame.pack(padx=3, pady=6, fill=X)
+        Label(format_frame, text="Send as", font=("", 11, "bold")).pack(
             padx=3, pady=(0, 2), anchor="w"
         )
-
-        self.sendtype_combo = ttk.Combobox(
-            transfer, values=STABLE_ACTIONS, state="readonly"
+        self.format_combo = ttk.Combobox(
+            format_frame, values=FORMAT_OPTIONS, state="readonly", width=18
         )
-        self.sendtype_combo.set(STABLE_ACTIONS[0])
-        self.sendtype_combo.pack(padx=3, pady=3)
+        self.format_combo.set(FORMAT_OPTIONS[0])
+        self.format_combo.pack(padx=3, pady=3, anchor="w")
 
-        self.btn_action = Button(transfer, width=20, text="Execute Action")
-        self.btn_action.pack(padx=3, pady=3, side=TOP)
+        Label(
+            leftframe,
+            text="Right-click a track to sync.",
+            wraplength=180,
+            justify=LEFT,
+        ).pack(padx=6, pady=4, anchor="w")
 
+        Label(rightframe, text="Path / name (Device & test tools)").pack(
+            padx=5, pady=(5, 0), anchor="w"
+        )
         self.file_entry = Entry(rightframe, width=60)
         self.file_entry.insert(0, "")
         self.file_entry.pack(padx=5, pady=5)
@@ -210,9 +230,10 @@ class MainWindow:
             return "stable"
         return "stable" if idx == 0 else "experimental"
 
-    def actions_for_mode(self, mode: Mode | None = None) -> list[str]:
-        mode = mode or self.active_mode()
-        return list(STABLE_ACTIONS if mode == "stable" else EXPERIMENTAL_ACTIONS)
+    def target_format(self) -> str:
+        """Lowercase format extension from the global Send as control."""
+        raw = (self.format_combo.get() or "MP3").strip().lower()
+        return raw if raw in ("mp3", "wma") else "mp3"
 
     def set_library_menu_commands(
         self,
@@ -223,6 +244,45 @@ class MainWindow:
         """Wire Library menu entries (called once from the controller)."""
         self.menu_library.entryconfig(MENU_SELECT_ROOT, command=on_select_root)
         self.menu_library.entryconfig(MENU_UPDATE_LIBRARY, command=on_update)
+
+    def set_transfer_menu_commands(
+        self,
+        *,
+        on_sync_entire,
+        on_sync_folder,
+    ) -> None:
+        self.menu_transfer.entryconfig(MENU_SYNC_ENTIRE, command=on_sync_entire)
+        self.menu_transfer.entryconfig(MENU_SYNC_FOLDER, command=on_sync_folder)
+
+    def set_device_menu_commands(
+        self,
+        *,
+        on_set_name,
+        on_create_folder,
+        on_list_folders,
+        on_send_test_file,
+        on_send_test_track,
+        on_get_file_info,
+        on_delete_all,
+    ) -> None:
+        self.menu_device.entryconfig(MENU_SET_DEVICE_NAME, command=on_set_name)
+        self.menu_device.entryconfig(MENU_CREATE_FOLDER, command=on_create_folder)
+        self.menu_device.entryconfig(MENU_LIST_FOLDERS, command=on_list_folders)
+        self.menu_device.entryconfig(MENU_SEND_TEST_FILE, command=on_send_test_file)
+        self.menu_device.entryconfig(MENU_SEND_TEST_TRACK, command=on_send_test_track)
+        self.menu_device.entryconfig(MENU_GET_FILE_INFO, command=on_get_file_info)
+        self.menu_device.entryconfig(MENU_DELETE_ALL, command=on_delete_all)
+
+    def set_track_context_commands(
+        self,
+        *,
+        on_sync_track,
+        on_sync_album,
+        on_sync_artist,
+    ) -> None:
+        self.menu_track_ctx.entryconfig(CTX_SYNC_TRACK, command=on_sync_track)
+        self.menu_track_ctx.entryconfig(CTX_SYNC_ALBUM, command=on_sync_album)
+        self.menu_track_ctx.entryconfig(CTX_SYNC_ARTIST, command=on_sync_artist)
 
     def set_library_menu_state(
         self,
@@ -284,15 +344,35 @@ class MainWindow:
         if size > 0:
             self.listbox.configure(state=DISABLED)
 
+    def popup_track_context(self, event) -> str | None:
+        """Select the row under the pointer and show the track context menu."""
+        try:
+            if str(self.listbox.cget("state")) == str(DISABLED):
+                return "break"
+            idx = self.listbox.nearest(event.y)
+            if idx < 0 or idx >= self.listbox.size():
+                return "break"
+            self.listbox.selection_clear(0, END)
+            self.listbox.selection_set(idx)
+            self.listbox.activate(idx)
+            self.listbox.see(idx)
+            self.menu_track_ctx.tk_popup(event.x_root, event.y_root)
+        finally:
+            try:
+                self.menu_track_ctx.grab_release()
+            except Exception:
+                pass
+        return "break"
+
     def apply_mode_actions(self) -> None:
-        """Refresh combobox values for the active tab; keep selection when possible."""
-        options = self.actions_for_mode()
-        current = self.sendtype_combo.get()
-        self.sendtype_combo.configure(values=options)
-        if current in options:
-            self.sendtype_combo.set(current)
-        else:
-            self.sendtype_combo.set(options[0])
+        """Enable Device menu only in Experimental mode."""
+        experimental = self.active_mode() == "experimental"
+        state = NORMAL if experimental else DISABLED
+        for label in _DEVICE_MENU_LABELS:
+            try:
+                self.menu_device.entryconfig(label, state=state)
+            except Exception:
+                pass
 
     def mainloop(self) -> None:
         self.root.mainloop()

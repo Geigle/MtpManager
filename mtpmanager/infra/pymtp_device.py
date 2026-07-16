@@ -122,6 +122,13 @@ class PymtpDevice:
     def raw(self) -> pymtp.MTP:
         return self._mtp
 
+    def is_connected(self) -> bool:
+        """True when a PyMTP/libmtp session appears open."""
+        try:
+            return getattr(self._mtp, "device", None) is not None
+        except Exception:
+            return False
+
     def connect(self) -> str:
         try:
             self._mtp.connect()

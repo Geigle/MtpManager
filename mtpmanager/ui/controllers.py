@@ -52,7 +52,28 @@ class AppController:
             on_select_root=self.on_select_library_root,
             on_update=self.on_update_library,
         )
-        w.btn_action.configure(command=self.on_action)
+        w.set_transfer_menu_commands(
+            on_sync_entire=self.action_entire_library,
+            on_sync_folder=self.action_sync_folder,
+        )
+        w.set_device_menu_commands(
+            on_set_name=self.action_set_device_name,
+            on_create_folder=self.action_create_folder,
+            on_list_folders=self.action_read_folder_list,
+            on_send_test_file=self.action_send_test_file,
+            on_send_test_track=self.action_send_test_track,
+            on_get_file_info=self.action_get_file_info,
+            on_delete_all=self.action_delete_all_tracks,
+        )
+        w.set_track_context_commands(
+            on_sync_track=self.action_sync_this_track,
+            on_sync_album=self.action_all_from_album,
+            on_sync_artist=self.action_all_from_artist,
+        )
+        # Context menu: Button-3 (most platforms), Button-2, Control-click (macOS).
+        w.listbox.bind("<Button-3>", w.popup_track_context)
+        w.listbox.bind("<Button-2>", w.popup_track_context)
+        w.listbox.bind("<Control-Button-1>", w.popup_track_context)
         w.notebook.bind("<<NotebookTabChanged>>", self.on_mode_tab_changed)
 
 
@@ -61,11 +82,26 @@ class AppController:
             return CmdTransport()
         return self.device
 
+    def _target_format(self) -> str:
+        return self.win.target_format()
 
     def _library_root_reachable(self) -> bool:
         root = self.library.root_path
         return bool(root) and os.path.isdir(root)
 
+    def _require_experimental_connected(self) -> bool:
+        """In Experimental mode, require an open PyMTP session before sync."""
+        if self.win.active_mode() != "experimental":
+            return True
+        if self.device.is_connected():
+            return True
+        messagebox.showwarning(
+            "Device not connected",
+            "Experimental Mode sends via PyMTP and needs an open session.\n\n"
+            "• Click Connect on the Experimental tab, or\n"
+            "• Switch to Stable Mode (mtp-sendtr; no Connect required).",
+        )
+        return False
 
     def _require_usable_library(self) -> bool:
         """True when library media can be transferred; shows a dialog otherwise."""
@@ -97,16 +133,36 @@ class AppController:
             return False
         return True
 
+    def _require_sync_ready(self) -> bool:
+        """Library usable + Experimental connection gate."""
+        if not self._require_usable_library():
+            return False
+        return self._require_experimental_connected()
+
+    def _require_device_ready(self) -> bool:
+        """Experimental admin ops: must be on Experimental tab and connected."""
+        if self.win.active_mode() != "experimental":
+            messagebox.showinfo(
+                "Device",
+                "Device tools are available on the Experimental Mode tab.",
+            )
+            return False
+        if not self.device.is_connected():
+            messagebox.showwarning(
+                "Device not connected",
+                "Connect on the Experimental tab first.",
+            )
+            return False
+        return True
 
     def _selected_index(self) -> int | None:
-        if not self._require_usable_library():
+        if not self._require_sync_ready():
             return None
         sel = self.win.listbox.curselection()
         if not sel:
             messagebox.showinfo("Index", "You forgot to select a track.")
             return None
         return int(sel[0])
-
 
     def _selected_track(self) -> Track | None:
         idx = self._selected_index()
@@ -570,12 +626,11 @@ class AppController:
         )
 
 
-    def action_single_track(self, fmt: str = "mp3") -> None:
+    def action_sync_this_track(self) -> None:
         track = self._selected_track()
         if track is None:
             return
-        self._transfer_one(track, fmt)
-
+        self._transfer_one(track, self._target_format())
 
     def action_all_from_artist(self) -> None:
         track = self._selected_track()
@@ -588,8 +643,7 @@ class AppController:
             track.meta.artist,
             len(matches),
         )
-        self._transfer_many(matches, "mp3")
-
+        self._transfer_many(matches, self._target_format())
 
     def action_all_from_album(self) -> None:
         track = self._selected_track()
@@ -602,22 +656,56 @@ class AppController:
             track.meta.album,
             len(matches),
         )
-        self._transfer_many(matches, "mp3")
-
+        self._transfer_many(matches, self._target_format())
 
     def action_entire_library(self) -> None:
-        if not self._require_usable_library():
+        if not self._require_sync_ready():
             return
         if not self.library.tracks:
             messagebox.showinfo("Library", "Load a library first.")
             return
-        self._transfer_many(list(self.library.tracks), "mp3")
+        n = len(self.library.tracks)
+        fmt = self._target_format().upper()
+        if not messagebox.askyesno(
+            "Sync Entire Library",
+            f"Send all {n} track(s) as {fmt} using "
+            f"{'Stable (mtp-sendtr)' if self.win.active_mode() == 'stable' else 'Experimental (PyMTP)'}?\n\n"
+            "This may take a long time.",
+        ):
+            return
+        self._transfer_many(list(self.library.tracks), self._target_format())
 
+    def action_sync_folder(self) -> None:
+        """Pick a directory, scan it, transfer every track (global format)."""
+        if self._library_busy or self._transfer_busy:
+            messagebox.showinfo(
+                "Transfer",
+                "A background job is already running. Wait for it to finish.",
+            )
+            return
+        if not self._require_experimental_connected():
+            return
+        path = filedialog.askdirectory(
+            initialdir="~/",
+            title="Select Folder to Sync",
+        )
+        if not path:
+            return
+        album_lib = scan_library(path)
+        if not album_lib.tracks:
+            messagebox.showinfo("Sync Folder", "No music files found.")
+            return
+        self._transfer_many(list(album_lib.tracks), self._target_format())
 
     def action_set_device_name(self) -> None:
+        if not self._require_device_ready():
+            return
         name = self.win.file_entry.get().strip()
         if not name:
-            messagebox.showinfo("Usage", "Enter a device name in the text field.")
+            messagebox.showinfo(
+                "Usage",
+                "Enter a device name in the Path / name field.",
+            )
             return
         if not messagebox.askyesno(
             "Confirm New Device Name",
@@ -630,11 +718,15 @@ class AppController:
             logger.exception("Set device name failed")
             messagebox.showerror("Set Device Name", str(e))
 
-
     def action_create_folder(self) -> None:
+        if not self._require_device_ready():
+            return
         name = self.win.file_entry.get().strip()
         if not name:
-            messagebox.showinfo("Usage", "Enter a folder name in the text field.")
+            messagebox.showinfo(
+                "Usage",
+                "Enter a folder name in the Path / name field.",
+            )
             return
         if not messagebox.askyesno(
             "Confirm New Folder Name",
@@ -647,22 +739,31 @@ class AppController:
             logger.exception("Create folder failed")
             messagebox.showerror("Create Folder", str(e))
 
-
     def action_read_folder_list(self) -> None:
+        if not self._require_device_ready():
+            return
         try:
             folders = device_ops.list_folders(self.device)
         except Exception as e:
             logger.exception("List folders failed")
             messagebox.showerror("Folders", str(e))
             return
+        # Temporary view: does not replace the in-memory library.
+        self.win.listbox.configure(state=NORMAL)
         self.win.listbox.delete(0, END)
         for entry in folders:
             logger.debug("Folder: %s", entry.name)
             self.win.listbox.insert(END, folder_line(entry))
-
+        messagebox.showinfo(
+            "Folders",
+            f"Listed {len(folders)} folder(s) in the track list.\n"
+            "Use Library → Update Library to restore tracks.",
+        )
 
     def action_delete_all_tracks(self) -> None:
         """Stub: lists storage ids only (same as previous incomplete behavior)."""
+        if not self._require_device_ready():
+            return
         try:
             alltracks = self.device.get_tracklisting()
         except Exception as e:
@@ -676,8 +777,9 @@ class AppController:
             "Not fully implemented — listed track storage IDs to console only.",
         )
 
-
     def action_get_file_info(self) -> None:
+        if not self._require_device_ready():
+            return
         obid = 2654
         try:
             fmd = self.device.get_file_metadata(obid)
@@ -687,26 +789,15 @@ class AppController:
             logger.exception("Get file info failed")
             messagebox.showerror("File Info", str(e))
 
-
-    def action_convert_and_transfer_album(self) -> None:
-        """Pick a directory, scan it, transfer every track as MP3 via pipeline."""
-        path = filedialog.askdirectory(
-            initialdir="~/",
-            title="Select Music Album Directory",
-        )
-        if not path:
-            return
-        album_lib = scan_library(path)
-        if not album_lib.tracks:
-            messagebox.showinfo("Album", "No music files found.")
-            return
-        self._transfer_many(list(album_lib.tracks), "mp3")
-
-
     def action_send_test_file(self) -> None:
+        if not self._require_device_ready():
+            return
         path = self.win.file_entry.get().strip()
         if not path:
-            messagebox.showinfo("Usage", "Enter a local file path in the text field.")
+            messagebox.showinfo(
+                "Usage",
+                "Enter a local file path in the Path / name field.",
+            )
             return
         try:
             device_ops.send_test_file(self.device, path)
@@ -714,44 +805,16 @@ class AppController:
             logger.exception("Send test file failed")
             messagebox.showerror("Send File", str(e))
 
-
     def action_send_test_track(self) -> None:
+        if not self._require_device_ready():
+            return
         path = self.win.file_entry.get().strip()
         if not path:
-            messagebox.showinfo("Usage", "Enter a local track path in the text field.")
+            messagebox.showinfo(
+                "Usage",
+                "Enter a local track path in the Path / name field.",
+            )
             return
         meta = read_metadata(path)
         track = Track(path=path, meta=meta)
-        try:
-            self._transfer_one(track, "mp3")
-        except Exception as e:
-            logger.exception("Send test track failed")
-            messagebox.showerror("Send Track", str(e))
-
-
-    def on_action(self) -> None:
-        option = self.win.sendtype_combo.get()
-        handlers = {
-            "Single Track MP3": lambda: self.action_single_track("mp3"),
-            "Single Track WMA": lambda: self.action_single_track("wma"),
-            "All from Artist": self.action_all_from_artist,
-            "All from Album": self.action_all_from_album,
-            "Entire Library": self.action_entire_library,
-            "Set Device Name": self.action_set_device_name,
-            "Read Folder List": self.action_read_folder_list,
-            "Create a New Folder": self.action_create_folder,
-            "Delete All Tracks": self.action_delete_all_tracks,
-            "Get File Info": self.action_get_file_info,
-            "Convert and Transfer Album": self.action_convert_and_transfer_album,
-            "Send Test File": self.action_send_test_file,
-            "Send Test Track": self.action_send_test_track,
-        }
-        handler = handlers.get(option)
-        if handler is None:
-            messagebox.showinfo("Usage", "This option is not ready.")
-            return
-        try:
-            handler()
-        except Exception as e:
-            logger.exception("Action failed: %s", option)
-            messagebox.showerror("Action failed", str(e))
+        self._transfer_one(track, self._target_format())
