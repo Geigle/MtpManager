@@ -17,25 +17,33 @@ End-to-end send path, Stable vs Experimental behavior, and where to change thing
 | Step | Module | Notes |
 |------|--------|--------|
 | Restore index | `ui/controllers._restore_library_from_index` | On startup: load durable JSON if present |
+| Library toolbar | `ui/window` (full-width under title) | Path, count, Select/Scan, Change Library… |
 | Select / Scan | `ui/controllers.on_library_button` | See below |
+| Change root | `ui/controllers.on_change_library` | Folder picker → rescan → rewrite index |
 | Scan | `app/scan_library.scan_library` | Recursive music files → tags via mutagen |
 | Persist index | `infra/library_index` | Write after Select/Scan under app data dir |
 | Index (in-memory) | `domain/library.Library` | Ordered list for listbox indices |
+| Transfer strip | Left panel | Combobox + Execute Action (mode-specific options) |
 | Action | `ui/controllers` | Single / artist / album / library / convert album |
 | Pipeline | `app/transfer.transfer_track` | Transcode if needed, then send |
 | Batch | `app/transfer.transfer_tracks` | Progress callback; abort on fatal `TransportError` |
 | Transport | `CmdTransport` or `PymtpDevice` | Chosen by mode tab |
 
-### Library button and durable index
+### Library toolbar and durable index
 
-| State | Button label | Behavior |
-|-------|--------------|----------|
-| No root yet (no usable index) | **Select Library** | Folder picker → full scan → save index |
-| Root known | **Scan Library** | Re-scan stored root (no picker) → rewrite index |
+Full-width strip under the window title (host/library concerns only — not transfer or device).
 
-- **Startup:** if `{data_dir}/library_index.json` loads and its `root_path` is still a directory, the listbox is filled immediately (missing files under the root are dropped).
-- **Shift-click** the button to force the folder picker and replace the root/index.
-- If the stored root is gone, the next click falls back to Select.
+| Control | Behavior |
+|---------|----------|
+| Path + track count | Reflects current `Library`; empty → “No library selected” / `0 tracks` |
+| **Select Library** (no root) | Folder picker → full scan → save index |
+| **Scan Library** (root known) | Re-scan stored root (no picker) → rewrite index |
+| **Change Library…** | Always opens folder picker; replaces root/index |
+
+- **Startup:** if `{data_dir}/library_index.json` loads and its `root_path` is still a directory, the listbox and toolbar are filled immediately (missing files under the root are dropped).
+- **Shift-click** on Select/Scan remains an alias for Change Library.
+- If the stored root is gone, Select/Scan falls back to the folder picker.
+- Left panel is **Transfer** (combo + Execute) plus Experimental **Device** (Connect / Disconnect / Device Info). Library discovery no longer lives there.
 - Data dir: macOS `~/Library/Application Support/MtpManager/`; Linux `$XDG_DATA_HOME/mtpmanager` or `~/.local/share/mtpmanager/`; override with `MTP_MANAGER_DATA_DIR`.
 
 ---

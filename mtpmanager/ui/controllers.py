@@ -24,6 +24,7 @@ from mtpmanager.ui.window import MainWindow
 logger = logging.getLogger(__name__)
 
 # Tk event state bit for Shift (same on macOS/Linux/Windows).
+# Shift-click on Select/Scan remains an alias for Change Library.
 _SHIFT_MASK = 0x0001
 
 
@@ -42,8 +43,9 @@ class AppController:
         w.btn_connect.configure(command=self.on_connect)
         w.btn_disconnect.configure(command=self.on_disconnect)
         w.btn_device_info.configure(command=self.on_device_info)
-        # Bind (not command=) so we can detect Shift for re-selecting the root.
+        # Bind (not command=) so Shift-click can alias Change Library.
         w.btn_select_library.bind("<ButtonRelease-1>", self.on_library_button)
+        w.btn_change_library.configure(command=self.on_change_library)
         w.btn_action.configure(command=self.on_action)
         w.notebook.bind("<<NotebookTabChanged>>", self.on_mode_tab_changed)
 
@@ -120,27 +122,28 @@ class AppController:
             messagebox.showerror("Device Info", str(e))
 
 
-    def _sync_library_button(self) -> None:
-        """Select Library until a root is known; then Scan Library to refresh the index."""
+    def _sync_library_chrome(self) -> None:
+        """Update Select/Scan label, path, and track count on the library toolbar."""
         label = "Scan Library" if self.library.root_path else "Select Library"
         self.win.set_library_button_label(label)
+        self.win.set_library_status(self.library.root_path, len(self.library))
 
     def _restore_library_from_index(self) -> None:
         """Load durable index at startup so tracks appear without a full rescan."""
         loaded = load_library_index()
         if loaded is None:
-            self._sync_library_button()
+            self._sync_library_chrome()
             return
         if not loaded.root_path or not os.path.isdir(loaded.root_path):
             logger.warning(
                 "Library index root missing or not a directory: %r",
                 loaded.root_path,
             )
-            self._sync_library_button()
+            self._sync_library_chrome()
             return
         self.library = loaded
         self._populate_listbox(self.library)
-        self._sync_library_button()
+        self._sync_library_chrome()
         logger.info(
             "Restored %d tracks from index (root=%s)",
             len(self.library),
@@ -158,29 +161,45 @@ class AppController:
                 "Library Index",
                 f"Library loaded but could not save index:\n{e}",
             )
-        self._sync_library_button()
+        self._sync_library_chrome()
         logger.info("Loaded %d tracks from %s", len(self.library), path)
 
-    def on_library_button(self, event=None) -> None:
-        """Select Library (first run / Shift) or Scan Library (rescan stored root).
+    def _pick_library_directory(self) -> str | None:
+        root = self.library.root_path
+        initial = root if root else "~/Music/"
+        path = filedialog.askdirectory(
+            initialdir=initial,
+            title="Select Music Library Directory",
+        )
+        return path or None
 
-        Shift-click forces the folder picker so the user can change the root.
+    def on_change_library(self) -> None:
+        """Explicitly pick a new root, rescan, and rewrite the index."""
+        path = self._pick_library_directory()
+        if not path:
+            return
+        logger.info("Change Library → %s", path)
+        self._apply_scanned_library(path)
+
+    def on_library_button(self, event=None) -> None:
+        """Select Library (first run) or Scan Library (rescan stored root).
+
+        Shift-click aliases Change Library (folder picker + replace root).
         If the stored root is missing, falls back to Select.
         """
         force_select = bool(event is not None and (event.state & _SHIFT_MASK))
+        if force_select:
+            logger.info("Re-selecting library root (Shift-click)")
+            self.on_change_library()
+            return
+
         root = self.library.root_path
         has_usable_root = bool(root) and os.path.isdir(root)
 
-        if force_select or not has_usable_root:
-            initial = root if root else "~/Music/"
-            path = filedialog.askdirectory(
-                initialdir=initial,
-                title="Select Music Library Directory",
-            )
+        if not has_usable_root:
+            path = self._pick_library_directory()
             if not path:
                 return
-            if force_select:
-                logger.info("Re-selecting library root (Shift-click)")
         else:
             path = root
 
