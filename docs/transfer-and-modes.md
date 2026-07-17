@@ -59,9 +59,9 @@ End-to-end send path, Stable vs Experimental behavior, and where to change thing
 |-------------|---------|
 | Right-click track | **Sync this track**, **Sync Album**, **Sync all from Artist** (global format + active mode transport) |
 | **Transfer** menu | **Sync Entire Library** (confirm); **Sync Folder…** (picker + scan + batch) |
-| **Device** menu | Device Info, set name, create/list folders, test file/track, get file info, delete-all stub — Experimental only; require Connect |
+| **Device** menu | Device Info (only place to edit device name — applied on close if changed), Create Folder…, List Folders, Get File Info…, Delete All Tracks… stub — Experimental only; require Connect |
 
-Copy Track to PC is not exposed (no handler).
+Device admin prompts use dialogs (`ui/dialogs.py`); there is no main-window path/name entry.
 
 ---
 

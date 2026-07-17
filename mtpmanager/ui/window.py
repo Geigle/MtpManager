@@ -16,7 +16,6 @@ from tkinter import (
     X,
     Y,
     Button,
-    Entry,
     Frame,
     Label,
     Listbox,
@@ -49,11 +48,8 @@ MENU_SYNC_FOLDER = "Sync Folder…"
 
 # Device menu (Experimental)
 MENU_DEVICE_INFO = "Device Info"
-MENU_SET_DEVICE_NAME = "Set Device Name…"
 MENU_CREATE_FOLDER = "Create Folder…"
 MENU_LIST_FOLDERS = "List Folders"
-MENU_SEND_TEST_FILE = "Send Test File…"
-MENU_SEND_TEST_TRACK = "Send Test Track…"
 MENU_GET_FILE_INFO = "Get File Info…"
 MENU_DELETE_ALL = "Delete All Tracks…"
 
@@ -64,11 +60,8 @@ CTX_SYNC_ARTIST = "Sync all from Artist"
 
 _DEVICE_MENU_LABELS = (
     MENU_DEVICE_INFO,
-    MENU_SET_DEVICE_NAME,
     MENU_CREATE_FOLDER,
     MENU_LIST_FOLDERS,
-    MENU_SEND_TEST_FILE,
-    MENU_SEND_TEST_TRACK,
     MENU_GET_FILE_INFO,
     MENU_DELETE_ALL,
 )
@@ -117,11 +110,7 @@ class MainWindow:
         self.menu_track_ctx.add_command(label=CTX_SYNC_ALBUM)
         self.menu_track_ctx.add_command(label=CTX_SYNC_ARTIST)
 
-        header = Frame(self.root)
-        header.pack(side=TOP, fill=X)
-        Label(header, text="MTP Manager").pack()
-
-        # Status toolbar: path + track count only.
+        # Status toolbar: path + track count only (no duplicate title header).
         library_toolbar = Frame(self.root, borderwidth=3, relief="sunken")
         library_toolbar.pack(side=TOP, fill=X, padx=2, pady=2)
 
@@ -207,13 +196,6 @@ class MainWindow:
             justify=LEFT,
         ).pack(padx=6, pady=4, anchor="w")
 
-        Label(rightframe, text="Path / name (Device & test tools)").pack(
-            padx=5, pady=(5, 0), anchor="w"
-        )
-        self.file_entry = Entry(rightframe, width=60)
-        self.file_entry.insert(0, "")
-        self.file_entry.pack(padx=5, pady=5)
-
         Label(rightframe, text="Tracks").pack()
         tscroll = Scrollbar(rightframe)
         tscroll.pack(side=RIGHT, fill=Y)
@@ -263,20 +245,14 @@ class MainWindow:
         self,
         *,
         on_device_info,
-        on_set_name,
         on_create_folder,
         on_list_folders,
-        on_send_test_file,
-        on_send_test_track,
         on_get_file_info,
         on_delete_all,
     ) -> None:
         self.menu_device.entryconfig(MENU_DEVICE_INFO, command=on_device_info)
-        self.menu_device.entryconfig(MENU_SET_DEVICE_NAME, command=on_set_name)
         self.menu_device.entryconfig(MENU_CREATE_FOLDER, command=on_create_folder)
         self.menu_device.entryconfig(MENU_LIST_FOLDERS, command=on_list_folders)
-        self.menu_device.entryconfig(MENU_SEND_TEST_FILE, command=on_send_test_file)
-        self.menu_device.entryconfig(MENU_SEND_TEST_TRACK, command=on_send_test_track)
         self.menu_device.entryconfig(MENU_GET_FILE_INFO, command=on_get_file_info)
         self.menu_device.entryconfig(MENU_DELETE_ALL, command=on_delete_all)
 

@@ -38,7 +38,7 @@ MtpManager loads music onto picky MTP players (especially Creative ZEN Vision:M)
 | `ports/` | Protocols + shared error type | `transport.py` (`Transport`, `TransportError`), `device.py` (`DevicePort`), `tags.py`, `transcoder.py` |
 | `app/` | Use cases (orchestration only) | `transfer.py`, `scan_library.py`, `device_ops.py` |
 | `infra/` | libmtp / ffmpeg / mutagen / logging / library index | `cmd_transport.py`, `pymtp_device.py`, `pymtp_wrapper.py`, `remote_naming.py`, `ffmpeg_transcode.py`, `mutagen_tags.py`, `logging_setup.py`, `app_paths.py`, `library_index.py` |
-| `ui/` | Tk layout + event wiring | `window.py` (Library/Transfer/Device menus, track context menu, format preference, status toolbar), `controllers.py`, `formatting.py`, `bg.py` (worker + `after` poll) |
+| `ui/` | Tk layout + event wiring | `window.py` (menus, track context, format, status toolbar), `controllers.py`, `dialogs.py`, `formatting.py`, `bg.py` |
 
 ---
 

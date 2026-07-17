@@ -15,11 +15,11 @@ from mtpmanager.infra.cmd_transport import CmdTransport
 from mtpmanager.infra.ffmpeg_transcode import FFmpegTranscoder
 from mtpmanager.infra.library_index import load_library_index, save_library_index
 from mtpmanager.infra.logging_setup import start_transfer_log, stop_transfer_log
-from mtpmanager.infra.mutagen_tags import read_metadata
 from mtpmanager.infra.pymtp_device import PymtpDevice
 from mtpmanager.ports.transport import TransportError
 from mtpmanager.ui.bg import TkBackgroundRunner
-from mtpmanager.ui.formatting import device_info_summary, folder_line, track_summary
+from mtpmanager.ui.dialogs import ask_text, show_device_info_dialog
+from mtpmanager.ui.formatting import folder_line, track_summary
 from mtpmanager.ui.window import MainWindow
 
 logger = logging.getLogger(__name__)
@@ -57,11 +57,8 @@ class AppController:
         )
         w.set_device_menu_commands(
             on_device_info=self.on_device_info,
-            on_set_name=self.action_set_device_name,
             on_create_folder=self.action_create_folder,
             on_list_folders=self.action_read_folder_list,
-            on_send_test_file=self.action_send_test_file,
-            on_send_test_track=self.action_send_test_track,
             on_get_file_info=self.action_get_file_info,
             on_delete_all=self.action_delete_all_tracks,
         )
@@ -271,10 +268,20 @@ class AppController:
             return
         try:
             info = device_ops.get_device_info(self.device)
-            messagebox.showinfo("Device Info", device_info_summary(info))
         except Exception as e:
             logger.exception("Device info failed")
             messagebox.showerror("Device Info", str(e))
+            return
+
+        def apply_name(new_name: str) -> None:
+            device_ops.set_device_name(self.device, new_name)
+            logger.info("Device renamed to %r", new_name)
+
+        show_device_info_dialog(
+            self.win.root,
+            info,
+            apply_name=apply_name,
+        )
 
 
     def _set_library_busy(self, busy: bool, *, message: str | None = None) -> None:
@@ -742,36 +749,15 @@ class AppController:
             return
         self._transfer_many(list(album_lib.tracks), self._target_format())
 
-    def action_set_device_name(self) -> None:
-        if not self._require_device_ready():
-            return
-        name = self.win.file_entry.get().strip()
-        if not name:
-            messagebox.showinfo(
-                "Usage",
-                "Enter a device name in the Path / name field.",
-            )
-            return
-        if not messagebox.askyesno(
-            "Confirm New Device Name",
-            f"Device will be renamed to {name}.\nProceed?",
-        ):
-            return
-        try:
-            device_ops.set_device_name(self.device, name)
-        except Exception as e:
-            logger.exception("Set device name failed")
-            messagebox.showerror("Set Device Name", str(e))
-
     def action_create_folder(self) -> None:
         if not self._require_device_ready():
             return
-        name = self.win.file_entry.get().strip()
+        name = ask_text(
+            self.win.root,
+            title="Create Folder",
+            prompt="Folder name:",
+        )
         if not name:
-            messagebox.showinfo(
-                "Usage",
-                "Enter a folder name in the Path / name field.",
-            )
             return
         if not messagebox.askyesno(
             "Confirm New Folder Name",
@@ -833,33 +819,3 @@ class AppController:
         except Exception as e:
             logger.exception("Get file info failed")
             messagebox.showerror("File Info", str(e))
-
-    def action_send_test_file(self) -> None:
-        if not self._require_device_ready():
-            return
-        path = self.win.file_entry.get().strip()
-        if not path:
-            messagebox.showinfo(
-                "Usage",
-                "Enter a local file path in the Path / name field.",
-            )
-            return
-        try:
-            device_ops.send_test_file(self.device, path)
-        except Exception as e:
-            logger.exception("Send test file failed")
-            messagebox.showerror("Send File", str(e))
-
-    def action_send_test_track(self) -> None:
-        if not self._require_device_ready():
-            return
-        path = self.win.file_entry.get().strip()
-        if not path:
-            messagebox.showinfo(
-                "Usage",
-                "Enter a local track path in the Path / name field.",
-            )
-            return
-        meta = read_metadata(path)
-        track = Track(path=path, meta=meta)
-        self._transfer_one(track, self._target_format())
