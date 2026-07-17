@@ -129,6 +129,23 @@ class PymtpDevice:
         except Exception:
             return False
 
+    def session_alive(self) -> bool:
+        """True if the open session still answers a lightweight query.
+
+        After unplug, libmtp may leave a non-NULL device pointer so
+        :meth:`is_connected` stays True. Call this to detect a dead session
+        and force reconnect logic.
+        """
+        if not self.is_connected():
+            return False
+        try:
+            # Any simple property read that hits the device; failures mean gone.
+            _ = self._mtp.get_modelname()
+            return True
+        except Exception:
+            logger.debug("MTP session probe failed (device likely removed)", exc_info=True)
+            return False
+
     def connect(self) -> str:
         try:
             self._mtp.connect()

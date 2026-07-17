@@ -297,7 +297,11 @@ class AppController:
         )
 
     def _experimental_device_tick(self, gen: int) -> None:
-        """Quiet auto-connect attempt while Experimental is active."""
+        """Quiet auto-connect / liveness check while Experimental is active.
+
+        When a session looks open, probe the device so sudden unplug is
+        detected; then clear state and keep retrying connect every interval.
+        """
         if gen != self._device_poll_gen:
             return
         if self.win.active_mode() != "experimental":
@@ -308,40 +312,58 @@ class AppController:
             self._schedule_device_poll(gen)
             return
 
-        if self.device.is_connected():
-            if self._active_profile is None:
-                self._refresh_connected_profile()
-            self._schedule_device_poll(gen)
-            return
-
-        # Not connected: try in background (silent on failure).
         self._device_connect_inflight = True
         local_gen = gen
 
-        def work() -> DeviceInfo | None:
+        def work() -> tuple[str, DeviceInfo | None]:
+            """Return (status, info). status: ok | gone | absent."""
+            if self.device.is_connected():
+                if self.device.session_alive():
+                    try:
+                        return ("ok", device_ops.get_device_info(self.device))
+                    except Exception:
+                        # Probe passed earlier but info failed — treat as gone.
+                        pass
+                # Stale or dead session after unplug: tear down so connect can retry.
+                try:
+                    device_ops.disconnect(self.device)
+                except Exception:
+                    pass
+                return ("gone", None)
+
             try:
                 device_ops.connect(self.device)
-                return device_ops.get_device_info(self.device)
+                return ("ok", device_ops.get_device_info(self.device))
             except Exception:
-                return None
+                return ("absent", None)
 
-        def on_done(info: DeviceInfo | None) -> None:
+        def on_done(result: tuple[str, DeviceInfo | None]) -> None:
             self._device_connect_inflight = False
             stale = (
                 local_gen != self._device_poll_gen
                 or self.win.active_mode() != "experimental"
             )
             if stale:
-                # Drop a session opened after the user left Experimental / cancelled.
                 if self.win.active_mode() != "experimental" and self.device.is_connected():
                     try:
                         device_ops.disconnect(self.device)
                     except Exception:
                         pass
                 return
-            if info is not None:
+
+            status, info = result
+            if status == "ok" and info is not None:
                 self._logged_no_device = False
-                self._apply_device_profile(info)
+                # Only re-apply art/log when profile missing or first connect.
+                if self._active_profile is None:
+                    self._apply_device_profile(info)
+                else:
+                    # Keep caption/graphic; optionally refresh on model change later.
+                    pass
+            elif status == "gone":
+                logger.info("Experimental auto-connect: device disconnected")
+                self._logged_no_device = False  # allow one "no device" log on next fails
+                self._clear_device_profile()
             else:
                 self._note_no_device()
                 self._clear_device_profile()
@@ -373,14 +395,6 @@ class AppController:
         if not self._logged_no_device:
             logger.info("Experimental auto-connect: no MTP device available")
             self._logged_no_device = True
-
-    def _refresh_connected_profile(self) -> None:
-        try:
-            info = device_ops.get_device_info(self.device)
-        except Exception:
-            self._clear_device_profile()
-            return
-        self._apply_device_profile(info)
 
     def _apply_device_profile(self, info: DeviceInfo) -> None:
         profile = match_device_profile(info, BUILTIN_PROFILES)

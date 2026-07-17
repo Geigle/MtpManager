@@ -50,7 +50,7 @@ End-to-end send path, Stable vs Experimental behavior, and where to change thing
 - While busy, Library menu actions are disabled and the toolbar count shows `Loading index…` / `Scanning…`.
 - Transfers that need the library refuse to run while busy or while the root is unreachable.
 - Left panel: mode tabs, **Send as** format, Experimental **Connect / Disconnect** + auto device graphic. Track sync is via **context menu**. **Device Info** is under the **Device** menu.
-- **Experimental auto-connect:** while the Experimental tab is active, a ~3s poll quietly tries PyMTP connect. Success profiles the device and shows art (ZEN Vision:M vs generic). Absence is logged once per unplug streak (no dialogs). Switching to **Stable disconnects** PyMTP so `mtp-sendtr` is not blocked by an open session.
+- **Experimental auto-connect:** while the Experimental tab is active, a ~3s poll quietly maintains the PyMTP session: connect when absent, **probe liveness** when a session looks open (stale pointers after unplug), disconnect + clear art + retry when the device is gone. Absence is logged once per unplug streak (no dialogs). Switching to **Stable disconnects** PyMTP so `mtp-sendtr` is not blocked by an open session.
 - **Experimental sync** requires `PymtpDevice.is_connected()`; otherwise a warning points the user to Connect or Stable Mode.
 - Data dir: macOS `~/Library/Application Support/MtpManager/`; Linux `$XDG_DATA_HOME/mtpmanager` or `~/.local/share/mtpmanager/`; override with `MTP_MANAGER_DATA_DIR`.
 
