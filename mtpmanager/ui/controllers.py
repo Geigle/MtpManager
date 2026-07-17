@@ -70,6 +70,9 @@ class AppController:
         self._sort_reverse = False
         self._track_by_iid: dict[str, Track] = {}
         self._iid_by_path: dict[str, str] = {}
+        # Group header iid → seed Track for filter_by_artist / filter_by_album.
+        self._group_seed_by_iid: dict[str, Track] = {}
+        self._context_group_seed: Track | None = None
         self._wire()
         # Defer restore so mainloop can start before any index I/O.
         self.win.root.after(0, self._start_index_restore)
@@ -99,7 +102,10 @@ class AppController:
             on_sync_track=self.action_sync_this_track,
             on_sync_album=self.action_all_from_album,
             on_sync_artist=self.action_all_from_artist,
+            on_sync_artist_group=self.action_sync_artist_group,
+            on_sync_album_group=self.action_sync_album_group,
         )
+        w.set_prepare_context_menu(self._prepare_context_menu)
         w.set_sort_heading_handler(self.on_sort_heading)
         # Context menu: Button-3 (most platforms), Button-2, Control-click (macOS).
         w.tree.bind("<Button-3>", w.popup_track_context)
@@ -216,6 +222,52 @@ class AppController:
             return None
         return track
 
+    def _prepare_context_menu(self, row_iid: str, tags) -> None:
+        """Update group menu labels and remember seed track for header actions."""
+        tagset = set(tags)
+        seed = self._group_seed_by_iid.get(row_iid)
+        self._context_group_seed = seed
+        if seed is None:
+            return
+        if "group_artist" in tagset:
+            artist = seed.meta.artist or "Unknown Artist"
+            self.win.menu_artist_ctx.entryconfig(
+                0, label=f"Sync all from {artist}"
+            )
+        elif "group_album" in tagset:
+            album = seed.meta.album or "Unknown Album"
+            self.win.menu_album_ctx.entryconfig(
+                0, label=f"Sync album {album}"
+            )
+
+    def _sync_from_seed(self, seed: Track | None, *, kind: str) -> None:
+        """Run filter_by_artist / filter_by_album from a seed track."""
+        if not self._require_sync_ready():
+            return
+        if seed is None:
+            messagebox.showinfo("Sync", "No tracks found for this group.")
+            return
+        if kind == "artist":
+            matches = self.library.filter_by_artist(seed)
+            matches.sort(key=lambda t: t.path)
+            logger.info(
+                "Artist %s: %d tracks",
+                seed.meta.artist,
+                len(matches),
+            )
+        else:
+            matches = self.library.filter_by_album(seed)
+            matches.sort(key=lambda t: t.path)
+            logger.info(
+                "Album %s: %d tracks",
+                seed.meta.album,
+                len(matches),
+            )
+        if not matches:
+            messagebox.showinfo("Sync", "No matching tracks found.")
+            return
+        self._transfer_many(matches, self._target_format())
+
     def on_sort_heading(self, col: str) -> None:
         """Column heading click: set primary sort (toggle reverse if same)."""
         mapping = {
@@ -274,6 +326,8 @@ class AppController:
         self.win.clear_track_tree()
         self._track_by_iid.clear()
         self._iid_by_path.clear()
+        self._group_seed_by_iid.clear()
+        self._context_group_seed = None
         tracks = list(self.library.tracks)
         if not tracks:
             self.win.set_tracks_usable(self._library_root_reachable())
@@ -282,7 +336,9 @@ class AppController:
         primary = self._sort_primary
         reverse = self._sort_reverse
 
-        # Build insert plan as list of callables for chunked UI work.
+        # Build insert plan as list of ops for chunked UI work.
+        # group op: ("group", parent, iid, label, tags, seed_track|None)
+        # track op: ("track", parent, track)
         ops: list = []
 
         if primary == SortPrimary.ARTIST:
@@ -291,6 +347,12 @@ class AppController:
                 groups = list(reversed(groups))
             for ag in groups:
                 artist_iid = ag.key
+                # Seed: first track under first album (for filter_by_artist).
+                artist_seed = None
+                for album in ag.children:
+                    if album.tracks:
+                        artist_seed = album.tracks[0]
+                        break
                 ops.append(
                     (
                         "group",
@@ -298,19 +360,22 @@ class AppController:
                         artist_iid,
                         ag.label,
                         ("group", "group_artist"),
+                        artist_seed,
                     )
                 )
                 children = list(ag.children)
                 if reverse:
                     children = list(reversed(children))
                 for album in children:
+                    album_seed = album.tracks[0] if album.tracks else None
                     ops.append(
                         (
                             "group",
                             artist_iid,
                             album.key,
                             album.label,
-                            ("group",),
+                            ("group", "group_album"),
+                            album_seed,
                         )
                     )
                     album_tracks = list(album.tracks)
@@ -323,7 +388,10 @@ class AppController:
             if reverse:
                 groups = list(reversed(groups))
             for g in groups:
-                ops.append(("group", "", g.key, g.label, ("group",)))
+                seed = g.tracks[0] if g.tracks else None
+                ops.append(
+                    ("group", "", g.key, g.label, ("group", "group_album"), seed)
+                )
                 gtracks = list(g.tracks)
                 if reverse:
                     gtracks = list(reversed(gtracks))
@@ -334,7 +402,10 @@ class AppController:
             if reverse:
                 groups = list(reversed(groups))
             for g in groups:
-                ops.append(("group", "", g.key, g.label, ("group", "group_artist")))
+                # Year headers: no sync context menu (group without artist/album tag).
+                ops.append(
+                    ("group", "", g.key, g.label, ("group", "group_year"), None)
+                )
                 gtracks = list(g.tracks)
                 if reverse:
                     gtracks = list(reversed(gtracks))
@@ -358,7 +429,7 @@ class AppController:
             for i in range(start, end):
                 op = ops[i]
                 if op[0] == "group":
-                    _, parent, iid, label, tags = op
+                    _, parent, iid, label, tags, seed = op
                     if not tree.exists(iid):
                         # Treeview cannot colspan; put the full group label in the
                         # wide Title column so it is not clipped by the narrow # column.
@@ -372,6 +443,8 @@ class AppController:
                             tags=tags,
                             open=True,
                         )
+                        if seed is not None:
+                            self._group_seed_by_iid[iid] = seed
                 else:
                     _, parent, track = op
                     self._insert_track_row(parent, track)
@@ -734,6 +807,8 @@ class AppController:
             self.win.clear_track_tree()
             self._track_by_iid.clear()
             self._iid_by_path.clear()
+            self._group_seed_by_iid.clear()
+            self._context_group_seed = None
             self._sync_library_chrome()
             logger.info("No library index to restore")
             return
@@ -1060,27 +1135,29 @@ class AppController:
         track = self._selected_track()
         if track is None:
             return
-        matches = self.library.filter_by_artist(track)
-        matches.sort(key=lambda t: t.path)
-        logger.info(
-            "Artist %s: %d tracks",
-            track.meta.artist,
-            len(matches),
-        )
-        self._transfer_many(matches, self._target_format())
+        self._sync_from_seed(track, kind="artist")
 
     def action_all_from_album(self) -> None:
         track = self._selected_track()
         if track is None:
             return
-        matches = self.library.filter_by_album(track)
-        matches.sort(key=lambda t: t.path)
-        logger.info(
-            "Album %s: %d tracks",
-            track.meta.album,
-            len(matches),
-        )
-        self._transfer_many(matches, self._target_format())
+        self._sync_from_seed(track, kind="album")
+
+    def action_sync_artist_group(self) -> None:
+        """Context menu on an artist header row."""
+        seed = self._context_group_seed
+        if seed is None:
+            iid = self.win.selected_tree_iid()
+            seed = self._group_seed_by_iid.get(iid or "")
+        self._sync_from_seed(seed, kind="artist")
+
+    def action_sync_album_group(self) -> None:
+        """Context menu on an album header row."""
+        seed = self._context_group_seed
+        if seed is None:
+            iid = self.win.selected_tree_iid()
+            seed = self._group_seed_by_iid.get(iid or "")
+        self._sync_from_seed(seed, kind="album")
 
     def action_entire_library(self) -> None:
         if not self._require_sync_ready():

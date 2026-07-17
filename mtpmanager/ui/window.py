@@ -64,6 +64,10 @@ CTX_SYNC_TRACK = "Sync this track"
 CTX_SYNC_ALBUM = "Sync Album"
 CTX_SYNC_ARTIST = "Sync all from Artist"
 
+# Group header context menus (labels updated dynamically before popup)
+CTX_SYNC_ARTIST_GROUP = "Sync all from Artist"
+CTX_SYNC_ALBUM_GROUP = "Sync album"
+
 _DEVICE_MENU_LABELS = (
     MENU_CONNECT,
     MENU_DISCONNECT,
@@ -116,11 +120,17 @@ class MainWindow:
         self.menubar.add_cascade(label="Config", menu=self.menu_config)
         self.menu_config.add_command(label=MENU_CONFIG)
 
-        # Track list context menu (commands wired by controller).
+        # Track / group context menus (commands wired by controller).
         self.menu_track_ctx = Menu(self.root, tearoff=0)
         self.menu_track_ctx.add_command(label=CTX_SYNC_TRACK)
         self.menu_track_ctx.add_command(label=CTX_SYNC_ALBUM)
         self.menu_track_ctx.add_command(label=CTX_SYNC_ARTIST)
+
+        self.menu_artist_ctx = Menu(self.root, tearoff=0)
+        self.menu_artist_ctx.add_command(label=CTX_SYNC_ARTIST_GROUP)
+
+        self.menu_album_ctx = Menu(self.root, tearoff=0)
+        self.menu_album_ctx.add_command(label=CTX_SYNC_ALBUM_GROUP)
 
         # Status toolbar: path + track count only (no duplicate title header).
         library_toolbar = Frame(self.root, borderwidth=3, relief="sunken")
@@ -243,8 +253,9 @@ class MainWindow:
             "xfer_transferring", background=BG_TRANSFER_TRANSFERRING
         )
 
-        # Callbacks set by controller for column-header sort.
+        # Callbacks set by controller for column-header sort / context menus.
         self._on_sort_heading = None
+        self._prepare_context_menu = None
         self._tracks_interactive = True
 
         self.progress = ttk.Progressbar(bottomframe)
@@ -308,10 +319,14 @@ class MainWindow:
         on_sync_track,
         on_sync_album,
         on_sync_artist,
+        on_sync_artist_group,
+        on_sync_album_group,
     ) -> None:
         self.menu_track_ctx.entryconfig(CTX_SYNC_TRACK, command=on_sync_track)
         self.menu_track_ctx.entryconfig(CTX_SYNC_ALBUM, command=on_sync_album)
         self.menu_track_ctx.entryconfig(CTX_SYNC_ARTIST, command=on_sync_artist)
+        self.menu_artist_ctx.entryconfig(0, command=on_sync_artist_group)
+        self.menu_album_ctx.entryconfig(0, command=on_sync_album_group)
 
     def set_library_menu_state(
         self,
@@ -433,27 +448,48 @@ class MainWindow:
             self.tree.item(iid, tags=tags)
 
     def popup_track_context(self, event) -> str | None:
-        """Select the row under the pointer and show the track context menu."""
+        """Select the row under the pointer and show the appropriate context menu.
+
+        Track rows get the full sync menu. Artist/album group headers get a
+        single “Sync all from …” / “Sync album …” item. Year groups have none.
+        """
+        menu = None
         try:
             if not self._tracks_interactive:
                 return "break"
             row = self.tree.identify_row(event.y)
             if not row:
                 return "break"
-            # Only tracks (not group headers) get a sync menu.
-            tags = self.tree.item(row, "tags")
-            if "track" not in tags:
-                return "break"
+            tags = set(self.tree.item(row, "tags"))
             self.tree.selection_set(row)
             self.tree.focus(row)
             self.tree.see(row)
-            self.menu_track_ctx.tk_popup(event.x_root, event.y_root)
+
+            if "track" in tags:
+                menu = self.menu_track_ctx
+            elif "group_artist" in tags:
+                menu = self.menu_artist_ctx
+            elif "group_album" in tags:
+                menu = self.menu_album_ctx
+            else:
+                return "break"
+
+            # Controller may refresh dynamic labels via this hook.
+            if self._prepare_context_menu is not None:
+                self._prepare_context_menu(row, tags)
+
+            menu.tk_popup(event.x_root, event.y_root)
         finally:
-            try:
-                self.menu_track_ctx.grab_release()
-            except Exception:
-                pass
+            if menu is not None:
+                try:
+                    menu.grab_release()
+                except Exception:
+                    pass
         return "break"
+
+    def set_prepare_context_menu(self, handler) -> None:
+        """Optional hook(row_iid, tags) called before a context menu is shown."""
+        self._prepare_context_menu = handler
 
     def selected_tree_iid(self) -> str | None:
         sel = self.tree.selection()
