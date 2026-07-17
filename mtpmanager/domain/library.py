@@ -64,6 +64,21 @@ def _artist_meaningful(artist: str) -> bool:
     return bool(artist) and artist != _UNKNOWN_ARTIST
 
 
+def primary_artist(track: Track) -> str:
+    """Artist key for library grouping: prefer albumartist, else track artist.
+
+    Keeps a whole CD under one heading when track-level ARTIST tags differ
+    (features, classical performers, “Various Artists” compilations with a
+    real albumartist, etc.). Falls back to the track artist when albumartist
+    is missing or the unknown placeholder.
+    """
+    aa = (track.meta.albumartist or "").strip()
+    if _albumartist_meaningful(aa):
+        return aa
+    ar = (track.meta.artist or "").strip()
+    return ar if ar else _UNKNOWN_ARTIST
+
+
 def _path_has_component(path: str, name: str) -> bool:
     """True if any path component casefold-equals *name*."""
     if not _artist_meaningful(name):
@@ -122,19 +137,21 @@ class Library:
         return self.tracks[index]
 
     def filter_by_artist(self, seed: Track) -> list[Track]:
-        """Tracks by the same artist as *seed*.
+        """Tracks by the same library artist as *seed*.
 
-        Primary identity is seed.meta.artist. Includes tracks with a matching
-        artist tag, albums credited to that artist via albumartist, or paths
-        that contain the artist name as a folder component. Logs when a track
-        is included despite a different artist tag (questionable membership).
+        Identity is :func:`primary_artist` (albumartist when set, else track
+        artist). Also includes tracks whose track artist or albumartist tag
+        equals that key, or whose path has that name as a folder component.
+        Logs when a track is included despite a different track-artist tag.
         """
-        artist = seed.meta.artist
+        artist = primary_artist(seed)
         artist_ok = _artist_meaningful(artist)
 
         matches: list[Track] = []
         for t in self.tracks:
             reasons: list[str] = []
+            if primary_artist(t) == artist:
+                reasons.append("same_primary_artist")
             if t.meta.artist == artist:
                 reasons.append("same_artist")
             if artist_ok and t.meta.albumartist == artist:
@@ -145,7 +162,7 @@ class Library:
             if not reasons:
                 continue
 
-            if "same_artist" not in reasons:
+            if "same_artist" not in reasons and "same_primary_artist" not in reasons:
                 logger.debug(
                     "Artist match (questionable): %r by %r — reasons: %s; artist=%r",
                     t.meta.title,

@@ -12,7 +12,7 @@ from mtpmanager.app.scan_library import scan_library
 from mtpmanager.app.transfer import transfer_track, transfer_tracks
 from mtpmanager.domain.device_profile import DeviceProfile, match_device_profile
 from mtpmanager.domain.device_profiles import BUILTIN_PROFILES
-from mtpmanager.domain.library import Library
+from mtpmanager.domain.library import Library, primary_artist
 from mtpmanager.domain.library_sort import (
     SortPrimary,
     group_by_album,
@@ -237,7 +237,7 @@ class AppController:
         if seed is None:
             return
         if "group_artist" in tagset:
-            artist = seed.meta.artist or "Unknown Artist"
+            artist = primary_artist(seed)
             self.win.menu_artist_ctx.entryconfig(
                 0, label=f"Sync all from {artist}"
             )
@@ -259,7 +259,7 @@ class AppController:
             matches.sort(key=lambda t: t.path)
             logger.info(
                 "Artist %s: %d tracks",
-                seed.meta.artist,
+                primary_artist(seed),
                 len(matches),
             )
         else:

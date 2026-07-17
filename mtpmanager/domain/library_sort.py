@@ -5,9 +5,9 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass
 from enum import Enum
-from typing import Iterable, Sequence
+from typing import Sequence
 
-from mtpmanager.domain.library import year_from_date
+from mtpmanager.domain.library import primary_artist, year_from_date
 from mtpmanager.domain.models import Track
 
 UNKNOWN_YEAR = "Unknown year"
@@ -15,10 +15,10 @@ UNKNOWN_YEAR = "Unknown year"
 
 class SortPrimary(str, Enum):
     TITLE = "title"
-    ARTIST = "artist"  # hierarchy: artist → album → tracks
+    ARTIST = "artist"  # hierarchy: albumartist → album → tracks
     ALBUM = "album"  # hierarchy: album → tracks
-    YEAR = "year"  # hierarchy: year → tracks (by artist, album, #)
-    ARTIST_ALBUM = "artist_album"  # flat sort by artist, album, #
+    YEAR = "year"  # hierarchy: year → tracks (by albumartist, album, #)
+    ARTIST_ALBUM = "artist_album"  # flat sort by albumartist, album, #
 
 
 @dataclass(frozen=True)
@@ -39,6 +39,11 @@ def _casefold(s: str) -> str:
     return (s or "").casefold()
 
 
+def _artist_key(track: Track) -> str:
+    """Casefold library artist key (albumartist preferred)."""
+    return _casefold(primary_artist(track)) or "unknown artist"
+
+
 def sort_tracks_flat(
     tracks: Sequence[Track],
     primary: SortPrimary,
@@ -51,7 +56,7 @@ def sort_tracks_flat(
         m = t.meta
         return (
             _casefold(m.title),
-            _casefold(m.artist),
+            _artist_key(t),
             _casefold(m.album),
             track_number_key(t),
             t.path,
@@ -60,7 +65,7 @@ def sort_tracks_flat(
     def key_artist_album(t: Track) -> tuple:
         m = t.meta
         return (
-            _casefold(m.artist),
+            _artist_key(t),
             _casefold(m.album),
             track_number_key(t),
             _casefold(m.title),
@@ -71,7 +76,7 @@ def sort_tracks_flat(
         m = t.meta
         return (
             _casefold(m.album),
-            _casefold(m.artist),
+            _artist_key(t),
             track_number_key(t),
             _casefold(m.title),
             t.path,
@@ -84,7 +89,7 @@ def sort_tracks_flat(
         y_key = y if y else "\uffff"
         return (
             y_key,
-            _casefold(m.artist),
+            _artist_key(t),
             _casefold(m.album),
             track_number_key(t),
             _casefold(m.title),
@@ -104,14 +109,18 @@ def sort_tracks_flat(
 
 
 def group_by_artist_album(tracks: Sequence[Track]) -> list[GroupNode]:
-    """Artist groups → album subgroups → tracks (by track #)."""
+    """Albumartist groups → album subgroups → tracks (by track #).
+
+    Top-level identity is :func:`~mtpmanager.domain.library.primary_artist`
+    so a CD stays together even when individual track ARTIST tags differ.
+    """
     ordered = sort_tracks_flat(tracks, SortPrimary.ARTIST_ALBUM)
     by_artist: dict[str, list[Track]] = defaultdict(list)
     artist_labels: dict[str, str] = {}
     for t in ordered:
-        key = _casefold(t.meta.artist) or "unknown artist"
+        key = _artist_key(t)
         by_artist[key].append(t)
-        artist_labels.setdefault(key, t.meta.artist or "Unknown Artist")
+        artist_labels.setdefault(key, primary_artist(t))
 
     artists: list[GroupNode] = []
     for akey in sorted(by_artist.keys()):
@@ -147,24 +156,34 @@ def group_by_artist_album(tracks: Sequence[Track]) -> list[GroupNode]:
 
 
 def group_by_album(tracks: Sequence[Track]) -> list[GroupNode]:
-    """Album groups → tracks (by track #). Label includes artist when useful."""
+    """Album groups (scoped by albumartist) → tracks (by track #).
+
+    Same album title under different albumartists stays separate so two
+    different CDs named "Greatest Hits" do not merge.
+    """
     ordered = sort_tracks_flat(tracks, SortPrimary.ALBUM)
     by_album: dict[str, list[Track]] = defaultdict(list)
     labels: dict[str, str] = {}
     for t in ordered:
+        akey = _artist_key(t)
         alkey = _casefold(t.meta.album) or "unknown album"
-        by_album[alkey].append(t)
-        if alkey not in labels:
-            artist = t.meta.artist or "Unknown Artist"
+        composite = f"{akey}\0{alkey}"
+        by_album[composite].append(t)
+        if composite not in labels:
+            artist = primary_artist(t)
             album = t.meta.album or "Unknown Album"
-            labels[alkey] = f"{album} — {artist}"
+            labels[composite] = f"{album} — {artist}"
+
+    def album_group_sort_key(composite: str) -> tuple[str, str]:
+        # Prefer album title order, then albumartist (matches key_album).
+        akey, alkey = composite.split("\0", 1)
+        return (alkey, akey)
 
     groups: list[GroupNode] = []
-    for alkey in sorted(by_album.keys()):
+    for composite in sorted(by_album.keys(), key=album_group_sort_key):
         album_tracks = sorted(
-            by_album[alkey],
+            by_album[composite],
             key=lambda t: (
-                _casefold(t.meta.artist),
                 track_number_key(t),
                 _casefold(t.meta.title),
                 t.path,
@@ -172,8 +191,8 @@ def group_by_album(tracks: Sequence[Track]) -> list[GroupNode]:
         )
         groups.append(
             GroupNode(
-                key=f"album:{alkey}",
-                label=labels[alkey],
+                key=f"album:{composite}",
+                label=labels[composite],
                 tracks=tuple(album_tracks),
             )
         )
@@ -181,7 +200,7 @@ def group_by_album(tracks: Sequence[Track]) -> list[GroupNode]:
 
 
 def group_by_year(tracks: Sequence[Track]) -> list[GroupNode]:
-    """Year groups (newest first) → tracks by artist, album, #."""
+    """Year groups (newest first) → tracks by albumartist, album, #."""
     by_year: dict[str, list[Track]] = defaultdict(list)
     for t in tracks:
         y = year_from_date(t.meta.date) or UNKNOWN_YEAR
@@ -213,7 +232,11 @@ def group_by_year(tracks: Sequence[Track]) -> list[GroupNode]:
 
 
 def iter_track_cells(track: Track) -> tuple[str, str, str, str, str]:
-    """Values for tree columns: #0 text, title, artist, album, year."""
+    """Values for tree columns: #0 text, title, artist, album, year.
+
+    The Artist column still shows the track-level ARTIST tag (features, guests);
+    hierarchy grouping uses albumartist via :func:`primary_artist`.
+    """
     m = track.meta
     num = str(m.tracknumber or "")
     year = year_from_date(m.date) or ""
