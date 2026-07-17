@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
-from tkinter import END, NORMAL, filedialog, messagebox
+from tkinter import filedialog, messagebox
 
 from mtpmanager.app import device_ops
 from mtpmanager.app.scan_library import scan_library
@@ -13,6 +13,14 @@ from mtpmanager.app.transfer import transfer_track, transfer_tracks
 from mtpmanager.domain.device_profile import DeviceProfile, match_device_profile
 from mtpmanager.domain.device_profiles import BUILTIN_PROFILES
 from mtpmanager.domain.library import Library
+from mtpmanager.domain.library_sort import (
+    SortPrimary,
+    group_by_album,
+    group_by_artist_album,
+    group_by_year,
+    iter_track_cells,
+    sort_tracks_flat,
+)
 from mtpmanager.domain.models import DeviceInfo, Track
 from mtpmanager.infra.cmd_transport import CmdTransport
 from mtpmanager.infra.device_assets import device_graphic_path
@@ -22,14 +30,13 @@ from mtpmanager.infra.logging_setup import start_transfer_log, stop_transfer_log
 from mtpmanager.infra.pymtp_device import PymtpDevice
 from mtpmanager.ports.transport import TransportError
 from mtpmanager.ui.bg import TkBackgroundRunner
-from mtpmanager.ui.dialogs import ask_text, show_device_info_dialog
-from mtpmanager.ui.formatting import folder_line, track_summary
+from mtpmanager.ui.dialogs import ask_text, show_device_info_dialog, show_folder_list_dialog
 from mtpmanager.ui.window import MainWindow
 
 logger = logging.getLogger(__name__)
 
-# Insert this many listbox rows per idle slice to keep the UI responsive.
-_LISTBOX_CHUNK = 100
+# Insert this many tree rows per idle slice to keep the UI responsive.
+_TREE_CHUNK = 80
 
 # Experimental auto-connect poll interval (ms).
 _DEVICE_POLL_MS = 3000
@@ -52,6 +59,10 @@ class AppController:
         # When False, experimental poll is stopped until Device → Connect.
         self._device_auto_reconnect = True
         self._active_profile: DeviceProfile | None = None
+        self._sort_primary = SortPrimary.ARTIST
+        self._sort_reverse = False
+        self._track_by_iid: dict[str, Track] = {}
+        self._iid_by_path: dict[str, str] = {}
         self._wire()
         # Defer restore so mainloop can start before any index I/O.
         self.win.root.after(0, self._start_index_restore)
@@ -81,10 +92,11 @@ class AppController:
             on_sync_album=self.action_all_from_album,
             on_sync_artist=self.action_all_from_artist,
         )
+        w.set_sort_heading_handler(self.on_sort_heading)
         # Context menu: Button-3 (most platforms), Button-2, Control-click (macOS).
-        w.listbox.bind("<Button-3>", w.popup_track_context)
-        w.listbox.bind("<Button-2>", w.popup_track_context)
-        w.listbox.bind("<Control-Button-1>", w.popup_track_context)
+        w.tree.bind("<Button-3>", w.popup_track_context)
+        w.tree.bind("<Button-2>", w.popup_track_context)
+        w.tree.bind("<Control-Button-1>", w.popup_track_context)
         w.notebook.bind("<<NotebookTabChanged>>", self.on_mode_tab_changed)
 
 
@@ -166,24 +178,40 @@ class AppController:
             return False
         return True
 
-    def _selected_index(self) -> int | None:
+    def _selected_track(self) -> Track | None:
         if not self._require_sync_ready():
             return None
-        sel = self.win.listbox.curselection()
-        if not sel:
+        iid = self.win.selected_tree_iid()
+        if not iid:
             messagebox.showinfo("Index", "You forgot to select a track.")
             return None
-        return int(sel[0])
-
-    def _selected_track(self) -> Track | None:
-        idx = self._selected_index()
-        if idx is None:
+        track = self._track_by_iid.get(iid)
+        if track is None:
+            messagebox.showinfo("Index", "Select a track (not a group heading).")
             return None
-        if idx < 0 or idx >= len(self.library):
-            messagebox.showinfo("Index", "Selection is out of range.")
-            return None
-        return self.library.get(idx)
+        return track
 
+    def on_sort_heading(self, col: str) -> None:
+        """Column heading click: set primary sort (toggle reverse if same)."""
+        mapping = {
+            "#0": SortPrimary.TITLE,  # track # column → title-like flat order
+            "title": SortPrimary.TITLE,
+            "artist": SortPrimary.ARTIST,
+            "album": SortPrimary.ALBUM,
+            "year": SortPrimary.YEAR,
+        }
+        primary = mapping.get(col, SortPrimary.ARTIST)
+        if primary == self._sort_primary:
+            self._sort_reverse = not self._sort_reverse
+        else:
+            self._sort_primary = primary
+            self._sort_reverse = False
+        logger.info(
+            "Library sort primary=%s reverse=%s",
+            self._sort_primary.value,
+            self._sort_reverse,
+        )
+        self._rebuild_track_tree()
 
     def _cancel_populate(self) -> None:
         if self._populate_after_id is not None:
@@ -193,29 +221,145 @@ class AppController:
                 pass
             self._populate_after_id = None
 
-    def _populate_listbox(self, library: Library) -> None:
-        """Fill the listbox in chunks so large libraries do not freeze the UI."""
+    def _track_iid(self, track: Track) -> str:
+        # Paths are unique; avoid characters Treeview rejects in iids.
+        return "t:" + track.path.replace("\\", "/")
+
+    def _insert_track_row(self, parent: str, track: Track) -> None:
+        num, title, artist, album, year = iter_track_cells(track)
+        iid = self._track_iid(track)
+        # Avoid duplicate iids if path appears twice
+        if self.win.tree.exists(iid):
+            iid = f"{iid}#{id(track)}"
+        self.win.tree.insert(
+            parent,
+            "end",
+            iid=iid,
+            text=num,
+            values=(title, artist, album, year),
+            tags=("track",),
+            open=False,
+        )
+        self._track_by_iid[iid] = track
+        self._iid_by_path[track.path] = iid
+
+    def _rebuild_track_tree(self) -> None:
+        """Rebuild Treeview from library using current sort primary."""
         self._cancel_populate()
-        self.win.listbox.configure(state=NORMAL)
-        self.win.listbox.delete(0, END)
-        tracks = library.tracks
-        total = len(tracks)
-        if total == 0:
+        self.win.clear_track_tree()
+        self._track_by_iid.clear()
+        self._iid_by_path.clear()
+        tracks = list(self.library.tracks)
+        if not tracks:
             self.win.set_tracks_usable(self._library_root_reachable())
             return
 
-        def chunk(start: int) -> None:
+        primary = self._sort_primary
+        reverse = self._sort_reverse
+
+        # Build insert plan as list of callables for chunked UI work.
+        ops: list = []
+
+        if primary == SortPrimary.ARTIST:
+            groups = group_by_artist_album(tracks)
+            if reverse:
+                groups = list(reversed(groups))
+            for ag in groups:
+                artist_iid = ag.key
+                ops.append(
+                    (
+                        "group",
+                        "",
+                        artist_iid,
+                        ag.label,
+                        ("group", "group_artist"),
+                    )
+                )
+                children = list(ag.children)
+                if reverse:
+                    children = list(reversed(children))
+                for album in children:
+                    ops.append(
+                        (
+                            "group",
+                            artist_iid,
+                            album.key,
+                            album.label,
+                            ("group",),
+                        )
+                    )
+                    album_tracks = list(album.tracks)
+                    if reverse:
+                        album_tracks = list(reversed(album_tracks))
+                    for t in album_tracks:
+                        ops.append(("track", album.key, t))
+        elif primary == SortPrimary.ALBUM:
+            groups = group_by_album(tracks)
+            if reverse:
+                groups = list(reversed(groups))
+            for g in groups:
+                ops.append(("group", "", g.key, g.label, ("group",)))
+                gtracks = list(g.tracks)
+                if reverse:
+                    gtracks = list(reversed(gtracks))
+                for t in gtracks:
+                    ops.append(("track", g.key, t))
+        elif primary == SortPrimary.YEAR:
+            groups = group_by_year(tracks)
+            if reverse:
+                groups = list(reversed(groups))
+            for g in groups:
+                ops.append(("group", "", g.key, g.label, ("group", "group_artist")))
+                gtracks = list(g.tracks)
+                if reverse:
+                    gtracks = list(reversed(gtracks))
+                for t in gtracks:
+                    ops.append(("track", g.key, t))
+        else:
+            # TITLE or ARTIST_ALBUM flat
+            flat_primary = (
+                SortPrimary.ARTIST_ALBUM
+                if primary == SortPrimary.ARTIST_ALBUM
+                else SortPrimary.TITLE
+            )
+            ordered = sort_tracks_flat(tracks, flat_primary, reverse=reverse)
+            for t in ordered:
+                ops.append(("track", "", t))
+
+        def run_chunk(start: int) -> None:
             self._populate_after_id = None
-            end = min(start + _LISTBOX_CHUNK, total)
+            end = min(start + _TREE_CHUNK, len(ops))
+            tree = self.win.tree
             for i in range(start, end):
-                self.win.listbox.insert(END, track_summary(tracks[i]))
-            if end < total:
-                self._populate_after_id = self.win.root.after(1, lambda: chunk(end))
+                op = ops[i]
+                if op[0] == "group":
+                    _, parent, iid, label, tags = op
+                    if not tree.exists(iid):
+                        tree.insert(
+                            parent,
+                            "end",
+                            iid=iid,
+                            text=label,
+                            values=("", "", "", ""),
+                            tags=tags,
+                            open=True,
+                        )
+                else:
+                    _, parent, track = op
+                    self._insert_track_row(parent, track)
+            if end < len(ops):
+                self._populate_after_id = self.win.root.after(
+                    1, lambda: run_chunk(end)
+                )
             else:
                 self.win.set_tracks_usable(self._library_root_reachable())
 
-        chunk(0)
+        run_chunk(0)
 
+    def _populate_listbox(self, library: Library) -> None:
+        """Rebuild the track tree (name kept for call-site compatibility)."""
+        self.library = library
+        self._rebuild_track_tree()
 
     def _progress(self, done: int, total: int, path: str) -> None:
         if total <= 0:
@@ -227,13 +371,11 @@ class AppController:
         except Exception:
             pass
 
-    def _indices_for_path(self, path: str) -> list[int]:
-        return [i for i, t in enumerate(self.library.tracks) if t.path == path]
-
     def _apply_track_status(self, source_path: str, status: str) -> None:
-        """Update listbox row tint for a source path (main thread only)."""
-        for idx in self._indices_for_path(source_path):
-            self.win.set_track_transfer_style(idx, status)
+        """Update tree row tint for a source path (main thread only)."""
+        iid = self._iid_by_path.get(source_path)
+        if iid:
+            self.win.set_track_transfer_style(iid, status)
 
     def _mark_batch_queued(self, tracks: list[Track]) -> None:
         """Highlight every track in a bulk operation as queued (green)."""
@@ -561,8 +703,9 @@ class AppController:
         if library is None:
             self.library = Library()
             self._cancel_populate()
-            self.win.listbox.configure(state=NORMAL)
-            self.win.listbox.delete(0, END)
+            self.win.clear_track_tree()
+            self._track_by_iid.clear()
+            self._iid_by_path.clear()
             self._sync_library_chrome()
             logger.info("No library index to restore")
             return
@@ -980,17 +1123,9 @@ class AppController:
             logger.exception("List folders failed")
             messagebox.showerror("Folders", str(e))
             return
-        # Temporary view: does not replace the in-memory library.
-        self.win.listbox.configure(state=NORMAL)
-        self.win.listbox.delete(0, END)
         for entry in folders:
             logger.debug("Folder: %s", entry.name)
-            self.win.listbox.insert(END, folder_line(entry))
-        messagebox.showinfo(
-            "Folders",
-            f"Listed {len(folders)} folder(s) in the track list.\n"
-            "Use Library → Update Library to restore tracks.",
-        )
+        show_folder_list_dialog(self.win.root, folders)
 
     def action_delete_all_tracks(self) -> None:
         """Stub: lists storage ids only (same as previous incomplete behavior)."""

@@ -44,12 +44,16 @@ def is_music_file(path: str, exclude_formats: Iterable[str] | None = None) -> bo
     return False
 
 
-def _year_from_date(date: str) -> str | None:
+def year_from_date(date: str) -> str | None:
     """Extract a 19xx/20xx year from a date tag, if present."""
     if not date:
         return None
     m = _YEAR_RE.search(str(date).strip())
     return m.group(1) if m else None
+
+
+# Back-compat alias for internal call sites.
+_year_from_date = year_from_date
 
 
 def _albumartist_meaningful(albumartist: str) -> bool:

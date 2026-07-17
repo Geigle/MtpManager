@@ -17,6 +17,7 @@ from tkinter import (
 )
 
 from mtpmanager.domain.models import DeviceInfo
+from mtpmanager.ui.formatting import folder_line
 
 
 def ask_text(
@@ -111,4 +112,32 @@ def show_device_info_dialog(
         dlg.geometry(f"+{px}+{py}")
     except Exception:
         pass
+    parent.wait_window(dlg)
+
+
+def show_folder_list_dialog(parent, folders: list) -> None:
+    """Modal scrollable list of device folders (does not touch the library tree)."""
+    from tkinter import BOTH, END, LEFT, RIGHT, Y, Listbox, Scrollbar
+
+    dlg = Toplevel(parent)
+    dlg.title("Device Folders")
+    dlg.transient(parent)
+    dlg.geometry("420x360")
+
+    body = Frame(dlg, padx=10, pady=10)
+    body.pack(fill=BOTH, expand=True)
+    Label(body, text=f"{len(folders)} folder(s)").pack(anchor="w")
+
+    list_frame = Frame(body)
+    list_frame.pack(fill=BOTH, expand=True, pady=(6, 8))
+    scroll = Scrollbar(list_frame)
+    scroll.pack(side=RIGHT, fill=Y)
+    lb = Listbox(list_frame, yscrollcommand=scroll.set)
+    lb.pack(side=LEFT, fill=BOTH, expand=True)
+    scroll.config(command=lb.yview)
+    for entry in folders:
+        lb.insert(END, folder_line(entry))
+
+    Button(body, text="Close", command=dlg.destroy).pack(anchor="e")
+    dlg.grab_set()
     parent.wait_window(dlg)

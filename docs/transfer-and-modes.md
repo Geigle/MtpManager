@@ -24,7 +24,8 @@ End-to-end send path, Stable vs Experimental behavior, and where to change thing
 | Scan | `app/scan_library.scan_library` | Recursive music files → tags via mutagen (worker thread) |
 | Background jobs | `ui/bg.TkBackgroundRunner` | Thread + queue + `root.after` poll; never touch Tk from workers |
 | Persist index | `infra/library_index` | Saved in scan worker; UI updated on main thread |
-| Index (in-memory) | `domain/library.Library` | Ordered list for listbox indices |
+| Index (in-memory) | `domain/library.Library` | Source of truth; Treeview is a sorted view |
+| Library tree | `ttk.Treeview` + `domain/library_sort` | Columns Title/Artist/Album/Year; heading click sorts; Artist/Year hierarchy |
 | Format preference | Left panel **Send as** MP3/WMA | Global; all Sync actions use `target_format()` |
 | Track context menu | Right-click listbox row | Sync this track / Sync Album / Sync all from Artist |
 | Transfer menu | Menubar | Sync Entire Library; Sync Folder… |

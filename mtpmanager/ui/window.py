@@ -19,7 +19,6 @@ from tkinter import (
     Y,
     Frame,
     Label,
-    Listbox,
     Menu,
     PhotoImage,
     Scrollbar,
@@ -34,11 +33,13 @@ FORMAT_OPTIONS = ("MP3", "WMA")
 _PATH_DISPLAY_MAX = 72
 _DEAD_TRACK_FG = "gray50"
 
-# Desaturated transfer-state backgrounds (listbox itemconfig).
-# Selection highlight (blue) remains for the active selection; these tint the row.
+# Desaturated transfer-state tags (Treeview tag_configure).
 BG_TRANSFER_QUEUED = "#b8cbb8"  # desaturated green — in batch, waiting
 BG_TRANSFER_TRANSCODING = "#8faf8f"  # desaturated green — converting
 BG_TRANSFER_TRANSFERRING = "#bf8f8f"  # desaturated red — sending to device
+
+# Tree column ids (values order).
+TREE_COLS = ("title", "artist", "album", "year")
 
 # Library menu labels (used for entryconfig by label).
 MENU_SELECT_ROOT = "Select Library Root…"
@@ -206,11 +207,51 @@ class MainWindow:
         ).pack(padx=6, pady=4, anchor="w")
 
         Label(rightframe, text="Tracks").pack()
-        tscroll = Scrollbar(rightframe)
-        tscroll.pack(side=RIGHT, fill=Y)
-        self.listbox = Listbox(rightframe, yscrollcommand=tscroll.set)
-        self.listbox.pack(fill=BOTH, expand=True)
-        tscroll.config(command=self.listbox.yview)
+        tree_frame = Frame(rightframe)
+        tree_frame.pack(fill=BOTH, expand=True)
+
+        yscroll = Scrollbar(tree_frame)
+        yscroll.pack(side=RIGHT, fill=Y)
+        xscroll = Scrollbar(tree_frame, orient="horizontal")
+        xscroll.pack(side=BOTTOM, fill=X)
+
+        self.tree = ttk.Treeview(
+            tree_frame,
+            columns=TREE_COLS,
+            show="tree headings",
+            selectmode="browse",
+            yscrollcommand=yscroll.set,
+            xscrollcommand=xscroll.set,
+        )
+        self.tree.pack(side=LEFT, fill=BOTH, expand=True)
+        yscroll.config(command=self.tree.yview)
+        xscroll.config(command=self.tree.xview)
+
+        self.tree.heading("#0", text="#", anchor="w")
+        self.tree.heading("title", text="Title", anchor="w")
+        self.tree.heading("artist", text="Artist", anchor="w")
+        self.tree.heading("album", text="Album", anchor="w")
+        self.tree.heading("year", text="Year", anchor="w")
+
+        self.tree.column("#0", width=48, minwidth=36, stretch=False)
+        self.tree.column("title", width=200, minwidth=80)
+        self.tree.column("artist", width=140, minwidth=60)
+        self.tree.column("album", width=140, minwidth=60)
+        self.tree.column("year", width=56, minwidth=40, stretch=False)
+
+        # Group headers bold; transfer tags tint backgrounds.
+        self.tree.tag_configure("group", font=("", 11, "bold"))
+        self.tree.tag_configure("group_artist", font=("", 12, "bold"))
+        self.tree.tag_configure("dead", foreground=_DEAD_TRACK_FG)
+        self.tree.tag_configure("xfer_queued", background=BG_TRANSFER_QUEUED)
+        self.tree.tag_configure("xfer_transcoding", background=BG_TRANSFER_TRANSCODING)
+        self.tree.tag_configure(
+            "xfer_transferring", background=BG_TRANSFER_TRANSFERRING
+        )
+
+        # Callbacks set by controller for column-header sort.
+        self._on_sort_heading = None
+        self._tracks_interactive = True
 
         self.progress = ttk.Progressbar(bottomframe)
         self.progress.pack(side=BOTTOM, fill=X)
@@ -322,69 +363,98 @@ class MainWindow:
         noun = "track" if track_count == 1 else "tracks"
         self.lbl_library_count.configure(text=f"{track_count} {noun}")
 
+    def set_sort_heading_handler(self, handler) -> None:
+        """Wire column heading clicks: handler(column_id) where column_id is
+        'title'|'artist'|'album'|'year'|'#0'."""
+        self._on_sort_heading = handler
+
+        def bind_heading(col: str) -> None:
+            self.tree.heading(col, command=lambda c=col: self._fire_sort_heading(c))
+
+        bind_heading("#0")
+        for col in TREE_COLS:
+            bind_heading(col)
+
+    def _fire_sort_heading(self, col: str) -> None:
+        if self._on_sort_heading is not None:
+            self._on_sort_heading(col)
+
+    def clear_track_tree(self) -> None:
+        self.tree.delete(*self.tree.get_children())
+
     def set_tracks_usable(self, usable: bool) -> None:
-        """Enable listbox interaction, or grey out and disable when media is dead.
-
-        Call after the listbox has been populated. When *usable* is False,
-        entries stay visible but cannot be selected for transfer.
-        """
-        # Must re-enable before itemconfig when recovering from disabled.
-        self.listbox.configure(state=NORMAL)
-        size = self.listbox.size()
+        """Allow interaction, or mark the tree as dead/unreachable."""
+        self._tracks_interactive = usable
         if usable:
-            for i in range(size):
-                self.listbox.itemconfig(i, fg="")
+            self.tree.configure(selectmode="browse")
+            # Drop dead tag from all items
+            for iid in self._all_iids():
+                tags = [t for t in self.tree.item(iid, "tags") if t != "dead"]
+                self.tree.item(iid, tags=tags)
             return
-        for i in range(size):
-            self.listbox.itemconfig(i, fg=_DEAD_TRACK_FG)
-        if size > 0:
-            self.listbox.configure(state=DISABLED)
+        self.tree.configure(selectmode="none")
+        for iid in self._all_iids():
+            tags = list(self.tree.item(iid, "tags"))
+            if "dead" not in tags:
+                tags.append("dead")
+            self.tree.item(iid, tags=tags)
 
-    def set_track_transfer_style(self, index: int, status: str | None) -> None:
-        """Tint a listbox row for transfer state; *status* None/done/failed clears.
+    def _all_iids(self) -> list[str]:
+        out: list[str] = []
 
-        Status values: ``queued``, ``transcoding``, ``transferring``,
-        ``done``, ``failed``, or None to clear.
-        """
-        size = self.listbox.size()
-        if index < 0 or index >= size:
+        def walk(parent: str) -> None:
+            for child in self.tree.get_children(parent):
+                out.append(child)
+                walk(child)
+
+        walk("")
+        return out
+
+    def set_track_transfer_style(self, iid: str, status: str | None) -> None:
+        """Tint a track row for transfer state via tags."""
+        if not self.tree.exists(iid):
             return
-        # itemconfig requires a normal-state listbox
-        was_disabled = str(self.listbox.cget("state")) == str(DISABLED)
-        if was_disabled:
-            return
+        tags = [
+            t
+            for t in self.tree.item(iid, "tags")
+            if not str(t).startswith("xfer_")
+        ]
         if status in (None, "done", "failed", ""):
-            self.listbox.itemconfig(index, bg="", selectbackground="")
+            self.tree.item(iid, tags=tags)
             return
         if status == "transferring":
-            color = BG_TRANSFER_TRANSFERRING
+            tags.append("xfer_transferring")
         elif status == "transcoding":
-            color = BG_TRANSFER_TRANSCODING
+            tags.append("xfer_transcoding")
         else:
-            # queued / unknown → desaturated green
-            color = BG_TRANSFER_QUEUED
-        self.listbox.itemconfig(index, bg=color, selectbackground=color)
+            tags.append("xfer_queued")
+        self.tree.item(iid, tags=tags)
 
     def clear_transfer_styles(self) -> None:
-        """Clear all transfer tinting from listbox rows."""
-        was_disabled = str(self.listbox.cget("state")) == str(DISABLED)
-        if was_disabled:
-            return
-        for i in range(self.listbox.size()):
-            self.listbox.itemconfig(i, bg="", selectbackground="")
+        """Clear all transfer tint tags from the tree."""
+        for iid in self._all_iids():
+            tags = [
+                t
+                for t in self.tree.item(iid, "tags")
+                if not str(t).startswith("xfer_")
+            ]
+            self.tree.item(iid, tags=tags)
 
     def popup_track_context(self, event) -> str | None:
         """Select the row under the pointer and show the track context menu."""
         try:
-            if str(self.listbox.cget("state")) == str(DISABLED):
+            if not self._tracks_interactive:
                 return "break"
-            idx = self.listbox.nearest(event.y)
-            if idx < 0 or idx >= self.listbox.size():
+            row = self.tree.identify_row(event.y)
+            if not row:
                 return "break"
-            self.listbox.selection_clear(0, END)
-            self.listbox.selection_set(idx)
-            self.listbox.activate(idx)
-            self.listbox.see(idx)
+            # Only tracks (not group headers) get a sync menu.
+            tags = self.tree.item(row, "tags")
+            if "track" not in tags:
+                return "break"
+            self.tree.selection_set(row)
+            self.tree.focus(row)
+            self.tree.see(row)
             self.menu_track_ctx.tk_popup(event.x_root, event.y_root)
         finally:
             try:
@@ -392,6 +462,12 @@ class MainWindow:
             except Exception:
                 pass
         return "break"
+
+    def selected_tree_iid(self) -> str | None:
+        sel = self.tree.selection()
+        if not sel:
+            return None
+        return sel[0]
 
     def apply_mode_actions(self) -> None:
         """Enable Device menu only in Experimental mode."""
