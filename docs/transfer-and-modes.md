@@ -49,7 +49,7 @@ End-to-end send path, Stable vs Experimental behavior, and where to change thing
 - **Non-blocking:** scan and index restore run on a daemon thread (`TkBackgroundRunner`). The previous library stays until the job finishes; a newer job discards stale results. Listbox population is chunked so large libraries do not freeze the event loop.
 - While busy, Library menu actions are disabled and the toolbar count shows `Loading index…` / `Scanning…`.
 - Transfers that need the library refuse to run while busy or while the root is unreachable.
-- Left panel: mode tabs, **Send as** format, Experimental **Device** buttons (Connect / Disconnect / Device Info). Track sync is via **context menu**, not a combobox.
+- Left panel: mode tabs, **Send as** format, Experimental **Connect / Disconnect**. Track sync is via **context menu**, not a combobox. **Device Info** is under the **Device** menu.
 - **Experimental sync** requires `PymtpDevice.is_connected()`; otherwise a warning points the user to Connect or Stable Mode.
 - Data dir: macOS `~/Library/Application Support/MtpManager/`; Linux `$XDG_DATA_HOME/mtpmanager` or `~/.local/share/mtpmanager/`; override with `MTP_MANAGER_DATA_DIR`.
 
@@ -59,7 +59,7 @@ End-to-end send path, Stable vs Experimental behavior, and where to change thing
 |-------------|---------|
 | Right-click track | **Sync this track**, **Sync Album**, **Sync all from Artist** (global format + active mode transport) |
 | **Transfer** menu | **Sync Entire Library** (confirm); **Sync Folder…** (picker + scan + batch) |
-| **Device** menu | Set name, create/list folders, test file/track, get file info, delete-all stub — Experimental only; require Connect |
+| **Device** menu | Device Info, set name, create/list folders, test file/track, get file info, delete-all stub — Experimental only; require Connect |
 
 Copy Track to PC is not exposed (no handler).
 

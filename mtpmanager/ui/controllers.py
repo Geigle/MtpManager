@@ -47,7 +47,6 @@ class AppController:
         w = self.win
         w.btn_connect.configure(command=self.on_connect)
         w.btn_disconnect.configure(command=self.on_disconnect)
-        w.btn_device_info.configure(command=self.on_device_info)
         w.set_library_menu_commands(
             on_select_root=self.on_select_library_root,
             on_update=self.on_update_library,
@@ -57,6 +56,7 @@ class AppController:
             on_sync_folder=self.action_sync_folder,
         )
         w.set_device_menu_commands(
+            on_device_info=self.on_device_info,
             on_set_name=self.action_set_device_name,
             on_create_folder=self.action_create_folder,
             on_list_folders=self.action_read_folder_list,
@@ -267,6 +267,8 @@ class AppController:
 
 
     def on_device_info(self) -> None:
+        if not self._require_device_ready():
+            return
         try:
             info = device_ops.get_device_info(self.device)
             messagebox.showinfo("Device Info", device_info_summary(info))

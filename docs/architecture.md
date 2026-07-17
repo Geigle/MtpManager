@@ -73,7 +73,7 @@ UI action surfaces (`ui/window.py`):
 
 - **Track context menu** (both modes): Sync this track / Album / Artist.
 - **Transfer** menubar: entire library / folder sync.
-- **Device** menubar + Experimental tab buttons: Connect/Disconnect/Device Info and admin tools (Device menu enabled only in Experimental).
+- **Device** menubar (Device Info + admin tools; enabled only in Experimental) + Experimental tab **Connect/Disconnect** buttons.
 
 Stable is the recommended transfer path. Experimental is for PyMTP/libmtp tools and deliberate in-process send testing. Experimental **does not** silently fall back to CMD on failure (see [decisions.md](./decisions.md) D3).
 

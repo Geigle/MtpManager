@@ -48,6 +48,7 @@ MENU_SYNC_ENTIRE = "Sync Entire Library"
 MENU_SYNC_FOLDER = "Sync Folder…"
 
 # Device menu (Experimental)
+MENU_DEVICE_INFO = "Device Info"
 MENU_SET_DEVICE_NAME = "Set Device Name…"
 MENU_CREATE_FOLDER = "Create Folder…"
 MENU_LIST_FOLDERS = "List Folders"
@@ -62,6 +63,7 @@ CTX_SYNC_ALBUM = "Sync Album"
 CTX_SYNC_ARTIST = "Sync all from Artist"
 
 _DEVICE_MENU_LABELS = (
+    MENU_DEVICE_INFO,
     MENU_SET_DEVICE_NAME,
     MENU_CREATE_FOLDER,
     MENU_LIST_FOLDERS,
@@ -186,9 +188,6 @@ class MainWindow:
         self.btn_disconnect = Button(experimental_tab, width=20, text="Disconnect")
         self.btn_disconnect.pack(padx=3, pady=3, side=TOP)
 
-        self.btn_device_info = Button(experimental_tab, width=20, text="Device Info")
-        self.btn_device_info.pack(padx=3, pady=3, side=TOP)
-
         # Global format preference (all Sync actions).
         format_frame = Frame(leftframe)
         format_frame.pack(padx=3, pady=6, fill=X)
@@ -263,6 +262,7 @@ class MainWindow:
     def set_device_menu_commands(
         self,
         *,
+        on_device_info,
         on_set_name,
         on_create_folder,
         on_list_folders,
@@ -271,6 +271,7 @@ class MainWindow:
         on_get_file_info,
         on_delete_all,
     ) -> None:
+        self.menu_device.entryconfig(MENU_DEVICE_INFO, command=on_device_info)
         self.menu_device.entryconfig(MENU_SET_DEVICE_NAME, command=on_set_name)
         self.menu_device.entryconfig(MENU_CREATE_FOLDER, command=on_create_folder)
         self.menu_device.entryconfig(MENU_LIST_FOLDERS, command=on_list_folders)
