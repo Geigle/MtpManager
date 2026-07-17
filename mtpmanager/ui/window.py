@@ -28,8 +28,6 @@ from tkinter import (
 
 Mode = Literal["stable", "experimental"]
 
-FORMAT_OPTIONS = ("MP3", "WMA")
-
 _PATH_DISPLAY_MAX = 72
 _DEAD_TRACK_FG = "gray50"
 
@@ -48,6 +46,9 @@ MENU_UPDATE_LIBRARY = "Update Library"
 # Transfer menu
 MENU_SYNC_ENTIRE = "Sync Entire Library"
 MENU_SYNC_FOLDER = "Sync Folder…"
+
+# Config menu
+MENU_CONFIG = "Config…"
 
 # Device menu (Experimental)
 MENU_CONNECT = "Connect"
@@ -92,7 +93,7 @@ class MainWindow:
         self.root["borderwidth"] = 3
         self.root["relief"] = "sunken"
 
-        # Menubar: Library | Transfer | Device
+        # Menubar: Library | Transfer | Device | Config
         self.menubar = Menu(self.root)
         self.root.config(menu=self.menubar)
 
@@ -110,6 +111,10 @@ class MainWindow:
         self.menubar.add_cascade(label="Device", menu=self.menu_device)
         for label in _DEVICE_MENU_LABELS:
             self.menu_device.add_command(label=label, state=DISABLED)
+
+        self.menu_config = Menu(self.menubar, tearoff=0)
+        self.menubar.add_cascade(label="Config", menu=self.menu_config)
+        self.menu_config.add_command(label=MENU_CONFIG)
 
         # Track list context menu (commands wired by controller).
         self.menu_track_ctx = Menu(self.root, tearoff=0)
@@ -187,21 +192,9 @@ class MainWindow:
         self._device_photo: PhotoImage | None = None
         self._device_photo_cache: dict[str, PhotoImage] = {}
 
-        # Global format preference (all Sync actions).
-        format_frame = Frame(leftframe)
-        format_frame.pack(padx=3, pady=6, fill=X)
-        Label(format_frame, text="Send as", font=("", 11, "bold")).pack(
-            padx=3, pady=(0, 2), anchor="w"
-        )
-        self.format_combo = ttk.Combobox(
-            format_frame, values=FORMAT_OPTIONS, state="readonly", width=18
-        )
-        self.format_combo.set(FORMAT_OPTIONS[0])
-        self.format_combo.pack(padx=3, pady=3, anchor="w")
-
         Label(
             leftframe,
-            text="Right-click a track to sync.",
+            text="Right-click a track to sync.\nOutput format: Config menu.",
             wraplength=180,
             justify=LEFT,
         ).pack(padx=6, pady=4, anchor="w")
@@ -268,11 +261,6 @@ class MainWindow:
             return "stable"
         return "stable" if idx == 0 else "experimental"
 
-    def target_format(self) -> str:
-        """Lowercase format extension from the global Send as control."""
-        raw = (self.format_combo.get() or "MP3").strip().lower()
-        return raw if raw in ("mp3", "wma") else "mp3"
-
     def set_library_menu_commands(
         self,
         *,
@@ -291,6 +279,9 @@ class MainWindow:
     ) -> None:
         self.menu_transfer.entryconfig(MENU_SYNC_ENTIRE, command=on_sync_entire)
         self.menu_transfer.entryconfig(MENU_SYNC_FOLDER, command=on_sync_folder)
+
+    def set_config_menu_commands(self, *, on_config) -> None:
+        self.menu_config.entryconfig(MENU_CONFIG, command=on_config)
 
     def set_device_menu_commands(
         self,

@@ -52,6 +52,7 @@ Do **not**:
 | Scan / tags | `app/scan_library.py`, `infra/mutagen_tags.py` |
 | Library index (persist/restore) | `infra/library_index.py`, `infra/app_paths.py` |
 | Device profiles / graphics | `domain/device_profile.py`, `domain/device_profiles.py`, `assets/devices/` |
+| App config (send format, …) | `infra/app_config.py` (`config.json` under data dir) |
 
 ---
 

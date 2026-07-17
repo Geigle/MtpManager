@@ -26,7 +26,7 @@ End-to-end send path, Stable vs Experimental behavior, and where to change thing
 | Persist index | `infra/library_index` | Saved in scan worker; UI updated on main thread |
 | Index (in-memory) | `domain/library.Library` | Source of truth; Treeview is a sorted view |
 | Library tree | `ttk.Treeview` + `domain/library_sort` | Columns Title/Artist/Album/Year; heading click sorts; Artist/Year hierarchy. Group rows put the full header text in Title (Treeview has no colspan). |
-| Format preference | Left panel **Send as** MP3/WMA | Global; all Sync actions use `target_format()` |
+| Format preference | **Config → Config…** → `{data_dir}/config.json` | Durable `send_format` (`mp3`/`wma`); all Sync actions use it |
 | Track context menu | Right-click listbox row | Sync this track / Sync Album / Sync all from Artist |
 | Transfer menu | Menubar | Sync Entire Library; Sync Folder… |
 | Device menu | Menubar (Experimental) | Admin / test tools; disabled in Stable |
@@ -50,7 +50,7 @@ End-to-end send path, Stable vs Experimental behavior, and where to change thing
 - **Non-blocking:** scan and index restore run on a daemon thread (`TkBackgroundRunner`). The previous library stays until the job finishes; a newer job discards stale results. Listbox population is chunked so large libraries do not freeze the event loop.
 - While busy, Library menu actions are disabled and the toolbar count shows `Loading index…` / `Scanning…`.
 - Transfers that need the library refuse to run while busy or while the root is unreachable.
-- Left panel: mode tabs, **Send as** format, Experimental auto device graphic. Track sync is via **context menu**. **Connect / Disconnect / Device Info** live under the **Device** menu (Experimental-only).
+- Left panel: mode tabs, Experimental auto device graphic. Track sync is via **context menu**. **Connect / Disconnect / Device Info** live under the **Device** menu (Experimental-only). Output format is **Config → Config…** (persisted in app data `config.json`).
 - **Experimental auto-connect:** while the Experimental tab is active (and auto-reconnect is enabled), a ~3s poll quietly maintains the PyMTP session: connect when absent, **probe liveness** when a session looks open (stale pointers after unplug), disconnect + clear art + retry when the device is gone. Absence is logged once per unplug streak (no dialogs). **Device → Disconnect** stops auto-reconnect until **Device → Connect** (or re-entering Experimental). Switching to **Stable** disconnects PyMTP so `mtp-sendtr` is not blocked by an open session.
 - **Experimental sync** requires `PymtpDevice.is_connected()`; otherwise a warning points the user to Connect or Stable Mode.
 - Data dir: macOS `~/Library/Application Support/MtpManager/`; Linux `$XDG_DATA_HOME/mtpmanager` or `~/.local/share/mtpmanager/`; override with `MTP_MANAGER_DATA_DIR`.

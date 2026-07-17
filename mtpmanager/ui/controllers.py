@@ -22,6 +22,7 @@ from mtpmanager.domain.library_sort import (
     sort_tracks_flat,
 )
 from mtpmanager.domain.models import DeviceInfo, Track
+from mtpmanager.infra.app_config import AppConfig, load_app_config, save_app_config
 from mtpmanager.infra.cmd_transport import CmdTransport
 from mtpmanager.infra.device_assets import device_graphic_path
 from mtpmanager.infra.ffmpeg_transcode import FFmpegTranscoder
@@ -30,7 +31,12 @@ from mtpmanager.infra.logging_setup import start_transfer_log, stop_transfer_log
 from mtpmanager.infra.pymtp_device import PymtpDevice
 from mtpmanager.ports.transport import TransportError
 from mtpmanager.ui.bg import TkBackgroundRunner
-from mtpmanager.ui.dialogs import ask_text, show_device_info_dialog, show_folder_list_dialog
+from mtpmanager.ui.dialogs import (
+    ask_text,
+    show_config_dialog,
+    show_device_info_dialog,
+    show_folder_list_dialog,
+)
 from mtpmanager.ui.window import MainWindow
 
 logger = logging.getLogger(__name__)
@@ -48,6 +54,7 @@ class AppController:
         self.device = device or PymtpDevice()
         self.library = Library()
         self.transcoder = FFmpegTranscoder()
+        self._config: AppConfig = load_app_config()
         self._bg = TkBackgroundRunner(window.root)
         self._library_busy = False
         self._transfer_busy = False
@@ -78,6 +85,7 @@ class AppController:
             on_sync_entire=self.action_entire_library,
             on_sync_folder=self.action_sync_folder,
         )
+        w.set_config_menu_commands(on_config=self.on_config)
         w.set_device_menu_commands(
             on_connect=self.on_connect,
             on_disconnect=self.on_disconnect,
@@ -106,7 +114,24 @@ class AppController:
         return self.device
 
     def _target_format(self) -> str:
-        return self.win.target_format()
+        return self._config.normalized_send_format()
+
+    def on_config(self) -> None:
+        """Open Config dialog; persist send format on Save."""
+        new_fmt = show_config_dialog(
+            self.win.root,
+            send_format=self._config.normalized_send_format(),
+        )
+        if new_fmt is None:
+            return
+        self._config.send_format = new_fmt
+        try:
+            save_app_config(self._config)
+        except OSError as e:
+            logger.exception("Failed to save config")
+            messagebox.showerror("Config", f"Could not save settings:\n{e}")
+            return
+        logger.info("Config send_format=%s", new_fmt)
 
     def _library_root_reachable(self) -> bool:
         root = self.library.root_path

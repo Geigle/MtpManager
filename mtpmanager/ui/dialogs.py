@@ -11,12 +11,14 @@ from tkinter import (
     Entry,
     Frame,
     Label,
+    StringVar,
     Toplevel,
     messagebox,
     simpledialog,
 )
 
 from mtpmanager.domain.models import DeviceInfo
+from mtpmanager.infra.app_config import VALID_SEND_FORMATS
 from mtpmanager.ui.formatting import folder_line
 
 
@@ -113,6 +115,64 @@ def show_device_info_dialog(
     except Exception:
         pass
     parent.wait_window(dlg)
+
+
+def show_config_dialog(parent, *, send_format: str) -> str | None:
+    """Edit app preferences. Returns new send_format on Save, or None if cancelled."""
+    from tkinter import ttk
+
+    initial = (send_format or "mp3").lower().lstrip(".")
+    if initial not in VALID_SEND_FORMATS:
+        initial = "mp3"
+
+    dlg = Toplevel(parent)
+    dlg.title("Config")
+    dlg.transient(parent)
+    dlg.resizable(False, False)
+
+    body = Frame(dlg, padx=14, pady=12)
+    body.pack(fill=BOTH, expand=True)
+
+    Label(body, text="Output format for sync / transfer:").pack(anchor="w")
+    fmt_var = StringVar(value=initial.upper())
+    combo = ttk.Combobox(
+        body,
+        textvariable=fmt_var,
+        values=("MP3", "WMA"),
+        state="readonly",
+        width=12,
+    )
+    combo.pack(anchor="w", pady=(6, 12))
+
+    result: list[str | None] = [None]
+
+    def on_save() -> None:
+        raw = (fmt_var.get() or "MP3").strip().lower()
+        if raw not in VALID_SEND_FORMATS:
+            messagebox.showerror("Config", f"Invalid format: {raw}", parent=dlg)
+            return
+        result[0] = raw
+        dlg.destroy()
+
+    def on_cancel() -> None:
+        result[0] = None
+        dlg.destroy()
+
+    btn_row = Frame(body)
+    btn_row.pack(fill="x")
+    Button(btn_row, text="Cancel", width=10, command=on_cancel).pack(side=RIGHT, padx=(6, 0))
+    Button(btn_row, text="Save", width=10, command=on_save).pack(side=RIGHT)
+
+    dlg.protocol("WM_DELETE_WINDOW", on_cancel)
+    dlg.grab_set()
+    try:
+        px = parent.winfo_rootx() + max(0, (parent.winfo_width() - 280) // 2)
+        py = parent.winfo_rooty() + max(0, (parent.winfo_height() - 140) // 3)
+        dlg.geometry(f"+{px}+{py}")
+    except Exception:
+        pass
+    parent.wait_window(dlg)
+    return result[0]
 
 
 def show_folder_list_dialog(parent, folders: list) -> None:
