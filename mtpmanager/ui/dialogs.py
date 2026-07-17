@@ -118,7 +118,10 @@ def show_device_info_dialog(
 
 
 def show_config_dialog(parent, *, send_format: str) -> str | None:
-    """Edit app preferences. Returns new send_format on Save, or None if cancelled."""
+    """Edit app preferences. Returns new send_format on Save, or None if cancelled.
+
+    Transfer mode (Stable vs PyMTP) is a separate Config menu checkbutton.
+    """
     from tkinter import ttk
 
     initial = (send_format or "mp3").lower().lstrip(".")
@@ -142,7 +145,18 @@ def show_config_dialog(parent, *, send_format: str) -> str | None:
         state="readonly",
         width=12,
     )
-    combo.pack(anchor="w", pady=(6, 12))
+    combo.pack(anchor="w", pady=(6, 8))
+
+    Label(
+        body,
+        text=(
+            "Transfer engine is under Config → Stable Mode:\n"
+            "off = PyMTP (default, Device menu + auto-connect);\n"
+            "on = mtp-sendtr subprocess per track."
+        ),
+        justify=LEFT,
+        wraplength=320,
+    ).pack(anchor="w", pady=(0, 12))
 
     result: list[str | None] = [None]
 
@@ -166,8 +180,8 @@ def show_config_dialog(parent, *, send_format: str) -> str | None:
     dlg.protocol("WM_DELETE_WINDOW", on_cancel)
     dlg.grab_set()
     try:
-        px = parent.winfo_rootx() + max(0, (parent.winfo_width() - 280) // 2)
-        py = parent.winfo_rooty() + max(0, (parent.winfo_height() - 140) // 3)
+        px = parent.winfo_rootx() + max(0, (parent.winfo_width() - 340) // 2)
+        py = parent.winfo_rooty() + max(0, (parent.winfo_height() - 200) // 3)
         dlg.geometry(f"+{px}+{py}")
     except Exception:
         pass

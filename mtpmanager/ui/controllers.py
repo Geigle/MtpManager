@@ -95,7 +95,10 @@ class AppController:
             on_sync_entire=self.action_entire_library,
             on_sync_folder=self.action_sync_folder,
         )
-        w.set_config_menu_commands(on_config=self.on_config)
+        w.set_config_menu_commands(
+            on_config=self.on_config,
+            on_stable_mode_toggle=self.on_stable_mode_toggle,
+        )
         w.set_device_menu_commands(
             on_connect=self.on_connect,
             on_disconnect=self.on_disconnect,
@@ -118,7 +121,12 @@ class AppController:
         w.tree.bind("<Button-3>", w.popup_track_context)
         w.tree.bind("<Button-2>", w.popup_track_context)
         w.tree.bind("<Control-Button-1>", w.popup_track_context)
-        w.notebook.bind("<<NotebookTabChanged>>", self.on_mode_tab_changed)
+        # Apply persisted mode (PyMTP default; Stable only if config says so).
+        self._apply_transfer_mode(
+            self._config.active_mode(),
+            persist=False,
+            reason="startup",
+        )
 
 
     def _transport(self):
@@ -146,21 +154,63 @@ class AppController:
             return
         logger.info("Config send_format=%s", new_fmt)
 
+    def on_stable_mode_toggle(self) -> None:
+        """Config → Stable Mode checkbutton: switch transport and persist."""
+        stable = bool(self.win.var_stable_mode.get())
+        mode = "stable" if stable else "experimental"
+        self._apply_transfer_mode(mode, persist=True, reason="config_menu")
+
+    def _apply_transfer_mode(
+        self,
+        mode: str,
+        *,
+        persist: bool,
+        reason: str,
+    ) -> None:
+        """Switch Stable (mtp-sendtr) vs Experimental (PyMTP) and update UI."""
+        if mode not in ("stable", "experimental"):
+            mode = "experimental"
+        prev = self.win.active_mode()
+        self._config.stable_mode = mode == "stable"
+        self.win.apply_mode_ui(mode)  # type: ignore[arg-type]
+        if persist:
+            try:
+                save_app_config(self._config)
+            except OSError as e:
+                logger.exception("Failed to save stable_mode")
+                messagebox.showerror("Config", f"Could not save settings:\n{e}")
+        if mode == prev and reason != "startup":
+            return
+        logger.info(
+            "Mode now %s (%s) [%s]",
+            mode,
+            "CMD" if mode == "stable" else "PyMTP",
+            reason,
+        )
+        if mode == "experimental":
+            # Allow auto-reconnect unless user later chooses Device → Disconnect.
+            self._device_auto_reconnect = True
+            self._start_device_poll()
+        else:
+            # Stable (mtp-sendtr) fails if a PyMTP session is already open.
+            self._stop_device_poll()
+            self._disconnect_for_stable()
+
     def _library_root_reachable(self) -> bool:
         root = self.library.root_path
         return bool(root) and os.path.isdir(root)
 
     def _require_experimental_connected(self) -> bool:
-        """In Experimental mode, require an open PyMTP session before sync."""
+        """In PyMTP mode, require an open session before sync."""
         if self.win.active_mode() != "experimental":
             return True
         if self.device.is_connected():
             return True
         messagebox.showwarning(
             "Device not connected",
-            "Experimental Mode sends via PyMTP and needs an open session.\n\n"
-            "• Use Device → Connect (Experimental Mode), or\n"
-            "• Switch to Stable Mode (mtp-sendtr; no Connect required).",
+            "PyMTP send needs an open session with the player.\n\n"
+            "• Use Device → Connect, or wait for auto-connect, or\n"
+            "• Enable Config → Stable Mode (mtp-sendtr; no Connect required).",
         )
         return False
 
@@ -195,23 +245,23 @@ class AppController:
         return True
 
     def _require_sync_ready(self) -> bool:
-        """Library usable + Experimental connection gate."""
+        """Library usable + PyMTP connection gate when not in Stable Mode."""
         if not self._require_usable_library():
             return False
         return self._require_experimental_connected()
 
     def _require_device_ready(self) -> bool:
-        """Experimental admin ops: must be on Experimental tab and connected."""
+        """Device admin ops: require PyMTP mode (Stable Mode off) and a session."""
         if self.win.active_mode() != "experimental":
             messagebox.showinfo(
                 "Device",
-                "Device tools are available on the Experimental Mode tab.",
+                "Device tools need PyMTP. Uncheck Config → Stable Mode first.",
             )
             return False
         if not self.device.is_connected():
             messagebox.showwarning(
                 "Device not connected",
-                "Use Device → Connect first (Experimental Mode).",
+                "Use Device → Connect first (or wait for auto-connect).",
             )
             return False
         return True
@@ -577,24 +627,6 @@ class AppController:
                 self._progress(int(rest[0]), int(rest[1]), str(rest[2]))
             return
 
-
-    def on_mode_tab_changed(self, _event=None) -> None:
-        mode = self.win.active_mode()
-        self.win.apply_mode_actions()
-        logger.info(
-            "Mode now %s (%s)",
-            mode,
-            "CMD" if mode == "stable" else "PyMTP",
-        )
-        if mode == "experimental":
-            # Fresh Experimental session: allow auto-reconnect unless user
-            # later chooses Device → Disconnect.
-            self._device_auto_reconnect = True
-            self._start_device_poll()
-        else:
-            # Stable (mtp-sendtr) fails if a PyMTP session is already open.
-            self._stop_device_poll()
-            self._disconnect_for_stable()
 
     def _start_device_poll(self) -> None:
         """Begin Experimental auto-connect polling (immediate + every 3s)."""
@@ -1039,15 +1071,15 @@ class AppController:
         """User-facing next steps after a failed transfer (mode-aware)."""
         if self.win.active_mode() == "experimental":
             lines = [
-                "Experimental (PyMTP) send failed and was not retried automatically.",
+                "PyMTP send failed and was not retried automatically.",
                 "",
                 "Recommended recovery:",
                 "1. Device → Disconnect "
                 "(unplug/replug the player if Disconnect errors).",
-                "2. Switch to the Stable Mode tab.",
-                "3. Retry the transfer there (uses mtp-sendtr).",
+                "2. Enable Config → Stable Mode.",
+                "3. Retry the transfer (uses mtp-sendtr).",
                 "",
-                "Stay on Experimental only if you are debugging PyMTP/libmtp; "
+                "Leave Stable Mode off only if you are debugging PyMTP/libmtp; "
                 "check ~/Library/Logs/MtpManager for the full error stack.",
             ]
             if batch:
@@ -1277,7 +1309,7 @@ class AppController:
         if not messagebox.askyesno(
             "Sync Entire Library",
             f"Send all {n} track(s) as {fmt} using "
-            f"{'Stable (mtp-sendtr)' if self.win.active_mode() == 'stable' else 'Experimental (PyMTP)'}?\n\n"
+            f"{'Stable (mtp-sendtr)' if self.win.active_mode() == 'stable' else 'PyMTP'}?\n\n"
             "This may take a long time.",
         ):
             return

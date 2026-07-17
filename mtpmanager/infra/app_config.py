@@ -23,6 +23,8 @@ class AppConfig:
     """User preferences loaded from disk."""
 
     send_format: str = DEFAULT_SEND_FORMAT
+    # When True, transfers use mtp-sendtr (Stable). Default is PyMTP (Experimental).
+    stable_mode: bool = False
     version: int = CONFIG_VERSION
 
     def normalized_send_format(self) -> str:
@@ -31,10 +33,24 @@ class AppConfig:
             return DEFAULT_SEND_FORMAT
         return fmt
 
+    def active_mode(self) -> str:
+        """Return ``\"stable\"`` or ``\"experimental\"``."""
+        return "stable" if self.stable_mode else "experimental"
+
 
 def config_path(*, data_dir: Path | None = None) -> Path:
     base = data_dir if data_dir is not None else default_data_dir()
     return base / CONFIG_FILENAME
+
+
+def _as_bool(value: object, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return default
 
 
 def load_app_config(*, path: Path | None = None) -> AppConfig:
@@ -54,6 +70,7 @@ def load_app_config(*, path: Path | None = None) -> AppConfig:
         fmt = DEFAULT_SEND_FORMAT
     cfg = AppConfig(
         send_format=fmt,
+        stable_mode=_as_bool(raw.get("stable_mode"), False),
         version=int(raw.get("version", CONFIG_VERSION) or CONFIG_VERSION),
     )
     cfg.send_format = cfg.normalized_send_format()
@@ -67,6 +84,7 @@ def save_app_config(config: AppConfig, *, path: Path | None = None) -> Path:
     payload = {
         "version": CONFIG_VERSION,
         "send_format": config.normalized_send_format(),
+        "stable_mode": bool(config.stable_mode),
     }
     text = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
     tmp = dest.with_suffix(dest.suffix + ".tmp")

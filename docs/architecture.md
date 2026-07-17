@@ -66,16 +66,16 @@ MtpManager loads music onto picky MTP players (especially Creative ZEN Vision:M)
 
 | UI tab | Mode id | Transport |
 |--------|---------|-----------|
-| **Stable Mode** | `"stable"` | `CmdTransport()` — one `mtp-sendtr` process per track |
-| **Experimental Mode** | `"experimental"` | `self.device` (`PymtpDevice`) — also implements device admin |
+| **PyMTP (default)** | `"experimental"` | `self.device` (`PymtpDevice`) — also implements device admin |
+| **Stable Mode** | `"stable"` | `CmdTransport()` — one `mtp-sendtr` process per track; Config menu toggle |
 
 UI action surfaces (`ui/window.py`):
 
 - **Track context menu** (both modes): Sync this track / Album / Artist.
 - **Transfer** menubar: entire library / folder sync.
-- **Device** menubar (Connect / Disconnect / Device Info + admin tools; enabled only in Experimental) + Experimental tab auto-detect graphic (`domain/device_profile` + `assets/devices/`).
+- **Device** menubar (Connect / Disconnect / Device Info + admin tools; enabled when Stable Mode is off) + left-panel device graphic (`domain/device_profile` + `assets/devices/`).
 
-Stable is the recommended transfer path. Experimental is for PyMTP/libmtp tools and deliberate in-process send testing. Experimental **does not** silently fall back to CMD on failure (see [decisions.md](./decisions.md) D3).
+PyMTP is the default (aspirational) path. Stable Mode is an opt-in Config toggle for the proven `mtp-sendtr` subprocess path. PyMTP **does not** silently fall back to CMD on failure (see [decisions.md](./decisions.md) D3).
 
 ---
 
@@ -87,7 +87,7 @@ Stable is the recommended transfer path. Experimental is for PyMTP/libmtp tools 
      → (optional) FFmpegTranscoder → Transport.send_track
 ```
 
-Chrome: **Library** menubar (Select root / Update); full-width **status toolbar** (path + count); left panel is mode + transfer (+ Experimental device session). Details: [transfer-and-modes.md](./transfer-and-modes.md). Durable library index lives under the app data dir (`infra/app_paths.py` + `infra/library_index.py`).
+Chrome: **Library** menubar (Select root / Update); full-width **status toolbar** (path + count); left panel is PyMTP device session (or Stable Mode help when that toggle is on). Details: [transfer-and-modes.md](./transfer-and-modes.md). Durable library index and `config.json` live under the app data dir (`infra/app_paths.py` + `infra/library_index.py` + `infra/app_config.py`).
 
 Remote object naming for **both** transports is centralized in `infra/remote_naming.py` ([device-contract.md](./device-contract.md)).
 

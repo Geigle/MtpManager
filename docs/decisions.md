@@ -20,17 +20,17 @@ Debriefs remain the forensic narrative; this file is what we keep doing.
 
 ---
 
-## D2 — Dual modes: Stable (`mtp-sendtr`) vs Experimental (PyMTP)
+## D2 — Dual modes: PyMTP (default) vs Stable (`mtp-sendtr`)
 
-**Context:** libmtp’s `mtp-sendtr` is battle-tested for one-shot sends. In-process PyMTP enables device admin (folders, name, listing) and experiments, but stock bindings are fragile.
+**Context:** libmtp’s `mtp-sendtr` is battle-tested for one-shot sends. In-process PyMTP enables device admin (folders, name, listing) and is the aspirational path, but stock bindings are fragile.
 
-**Decision:** Two UI tabs. Stable uses `CmdTransport` (subprocess per track). Experimental uses `PymtpDevice` (long-lived session) for admin + experimental send. Stable is recommended for loading music.
+**Decision:** PyMTP is the default UI (left-panel device session, Device menu, auto-connect). Stable Mode is a **Config → Stable Mode** checkbutton that switches transfers to `CmdTransport` (`mtp-sendtr` per track) and disables Device admin. Preference is persisted as `stable_mode` in `config.json`. Composition: `AppController._transport()`.
 
-**Rationale:** Different reliability and session models; users choose deliberately. Composition: `AppController._transport()`.
+**Rationale:** Present the aspirational in-process path front-and-center; keep the proven subprocess path one menu toggle away with clear left-panel copy. Users choose deliberately.
 
-**Consequences:** Two code paths must share the remote contract (D4). Experimental requires Connect before send (UI gates sync/admin). Track sync is mode-agnostic (context menu); Device admin is Experimental-only.
+**Consequences:** Two code paths must share the remote contract (D4). PyMTP requires Connect/auto-connect before send (UI gates sync/admin). Track sync is mode-agnostic (context menu); Device admin is PyMTP-only. Enabling Stable Mode disconnects any open PyMTP session so `mtp-sendtr` can claim the device.
 
-**Source:** `ui/window.py`, `ui/controllers.py`; [transfer-and-modes.md](./transfer-and-modes.md).
+**Source:** `ui/window.py`, `ui/controllers.py`, `infra/app_config.py`; [transfer-and-modes.md](./transfer-and-modes.md).
 
 ---
 
@@ -38,11 +38,11 @@ Debriefs remain the forensic narrative; this file is what we keep doing.
 
 **Context:** After layered PyMTP bugs, it was tempting to auto-retry via `mtp-sendtr` so “tracks still land.”
 
-**Decision:** Experimental `send_track` is pure libmtp/PyMTP only. On failure, raise `TransportError` and show recovery steps pointing the user to **Stable Mode**. Never call CMD from Experimental send without an explicit user mode switch.
+**Decision:** PyMTP `send_track` is pure libmtp/PyMTP only. On failure, raise `TransportError` and show recovery steps pointing the user to **Config → Stable Mode**. Never call CMD from PyMTP send without an explicit user mode switch.
 
-**Rationale:** Silent fallback hides regressions, mixes transports, and makes debugging impossible. Honest UX preserves the Experimental surface as a real binding under test.
+**Rationale:** Silent fallback hides regressions, mixes transports, and makes debugging impossible. Honest UX preserves PyMTP as a real binding under test.
 
-**Consequences:** Users must Disconnect (and often replug) then switch tabs. Logs are the source of truth for pure PyMTP failures.
+**Consequences:** Users must Disconnect (and often replug) then enable Stable Mode. Logs are the source of truth for pure PyMTP failures.
 
 **Source:** [debrief-pymtp-transfer-failure.md](./debrief-pymtp-transfer-failure.md); `pymtp_device.py` docstring; `controllers._transfer_recovery_hint`.
 

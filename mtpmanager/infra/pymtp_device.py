@@ -279,8 +279,8 @@ class PymtpDevice:
         except pymtp.NotConnected as exc:
             raise TransportError(
                 "PyMTP send failed: device not connected. "
-                "Use Device → Connect (Experimental Mode) first, or switch to "
-                "Stable Mode for mtp-sendtr transfers.",
+                "Use Device → Connect first, or enable Config → Stable Mode "
+                "for mtp-sendtr transfers.",
                 fatal=True,
                 path=path,
             ) from exc

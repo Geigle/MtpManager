@@ -9,6 +9,7 @@ from pathlib import Path
 from tkinter import (
     BOTH,
     BOTTOM,
+    BooleanVar,
     DISABLED,
     END,
     LEFT,
@@ -27,6 +28,25 @@ from tkinter import (
 )
 
 Mode = Literal["stable", "experimental"]
+
+# Shown in the left panel when Config → Stable Mode is checked.
+STABLE_MODE_HELP = (
+    "Stable Mode is on.\n\n"
+    "Transfers use mtp-sendtr (one subprocess per track) "
+    "instead of in-process PyMTP.\n\n"
+    "• No Device → Connect required\n"
+    "• Device menu tools and auto-connect are off\n"
+    "• PyMTP session is closed so mtp-sendtr can claim the player\n\n"
+    "Uncheck Config → Stable Mode to return to PyMTP "
+    "(device graphic, Connect, and in-process send)."
+)
+
+EXPERIMENTAL_HINT = (
+    "PyMTP is the default: auto-connect when a player is present, "
+    "Device menu tools, and in-process send.\n\n"
+    "Right-click a track to sync. Output format: Config → Config…\n\n"
+    "If send fails, try Config → Stable Mode (mtp-sendtr)."
+)
 
 _PATH_DISPLAY_MAX = 72
 _DEAD_TRACK_FG = "gray50"
@@ -48,9 +68,10 @@ MENU_SYNC_ENTIRE = "Sync Entire Library"
 MENU_SYNC_FOLDER = "Sync Folder…"
 
 # Config menu
+MENU_STABLE_MODE = "Stable Mode"
 MENU_CONFIG = "Config…"
 
-# Device menu (Experimental)
+# Device menu (PyMTP / default)
 MENU_CONNECT = "Connect"
 MENU_DISCONNECT = "Disconnect"
 MENU_DEVICE_INFO = "Device Info"
@@ -116,8 +137,16 @@ class MainWindow:
         for label in _DEVICE_MENU_LABELS:
             self.menu_device.add_command(label=label, state=DISABLED)
 
+        self.var_stable_mode = BooleanVar(value=False)
         self.menu_config = Menu(self.menubar, tearoff=0)
         self.menubar.add_cascade(label="Config", menu=self.menu_config)
+        self.menu_config.add_checkbutton(
+            label=MENU_STABLE_MODE,
+            variable=self.var_stable_mode,
+            onvalue=True,
+            offvalue=False,
+        )
+        self.menu_config.add_separator()
         self.menu_config.add_command(label=MENU_CONFIG)
 
         # Track / group context menus (commands wired by controller).
@@ -166,50 +195,34 @@ class MainWindow:
         bottomframe["relief"] = "sunken"
         bottomframe.pack(side=BOTTOM, fill=X)
 
-        # Mode tabs: Stable (CMD) first, Experimental (PyMTP) second.
-        self.notebook = ttk.Notebook(leftframe)
-        self.notebook.pack(padx=3, pady=3, fill=X)
-
-        stable_tab = Frame(self.notebook)
-        experimental_tab = Frame(self.notebook)
-        self.notebook.add(stable_tab, text="Stable Mode")
-        self.notebook.add(experimental_tab, text="Experimental Mode")
-
-        Label(
-            stable_tab,
-            text="Transfers via mtp-sendtr (recommended).",
-            wraplength=180,
-            justify=LEFT,
-        ).pack(padx=6, pady=6, anchor="w")
-
-        Label(
-            experimental_tab,
-            text="PyMTP / libmtp device tools and experimental send.",
-            wraplength=180,
-            justify=LEFT,
-        ).pack(padx=6, pady=6, anchor="w")
-
-        # Device session status + auto-detect graphic (connect/disconnect via Device menu).
-        Label(experimental_tab, text="Device", font=("", 11, "bold")).pack(
-            padx=6, pady=(4, 0), anchor="w"
+        # Left panel: PyMTP device session is front-and-center; Stable Mode
+        # replaces this with help text (toggle under Config).
+        self.lbl_mode_title = Label(
+            leftframe, text="Device", font=("", 11, "bold")
         )
+        self.lbl_mode_title.pack(padx=6, pady=(8, 0), anchor="w")
+
+        self.lbl_mode_help = Label(
+            leftframe,
+            text=EXPERIMENTAL_HINT,
+            wraplength=200,
+            justify=LEFT,
+        )
+        self.lbl_mode_help.pack(padx=6, pady=(6, 4), anchor="w")
+
+        self.device_panel = Frame(leftframe)
+        self.device_panel.pack(padx=3, pady=3, fill=X)
+
         self.lbl_device_caption = Label(
-            experimental_tab, text="", wraplength=180, justify=LEFT
+            self.device_panel, text="", wraplength=200, justify=LEFT
         )
-        self.lbl_device_caption.pack(padx=6, pady=(6, 0), anchor="w")
-        self.lbl_device_graphic = Label(experimental_tab)
+        self.lbl_device_caption.pack(padx=6, pady=(4, 0), anchor="w")
+        self.lbl_device_graphic = Label(self.device_panel)
         self.lbl_device_graphic.pack(padx=6, pady=6)
         self._device_photo: PhotoImage | None = None
         self._device_photo_cache: dict[str, PhotoImage] = {}
         # Album art thumbs for group rows (must keep refs for Tk).
         self._album_art_cache: dict[str, PhotoImage] = {}
-
-        Label(
-            leftframe,
-            text="Right-click a track to sync.\nOutput format: Config menu.",
-            wraplength=180,
-            justify=LEFT,
-        ).pack(padx=6, pady=4, anchor="w")
 
         Label(rightframe, text="Tracks").pack()
         tree_frame = Frame(rightframe)
@@ -278,20 +291,31 @@ class MainWindow:
         self._on_sort_heading = None
         self._prepare_context_menu = None
         self._tracks_interactive = True
+        self._mode: Mode = "experimental"
 
         self.progress = ttk.Progressbar(bottomframe)
         self.progress.pack(side=BOTTOM, fill=X)
 
-        # Ensure Stable Mode is the first-run selection.
-        self.notebook.select(0)
-        self.apply_mode_actions()
+        self.apply_mode_ui("experimental")
 
     def active_mode(self) -> Mode:
-        try:
-            idx = self.notebook.index(self.notebook.select())
-        except Exception:
-            return "stable"
-        return "stable" if idx == 0 else "experimental"
+        return self._mode
+
+    def apply_mode_ui(self, mode: Mode) -> None:
+        """Refresh left-panel copy and Device menu for the active transfer mode."""
+        self._mode = mode
+        stable = mode == "stable"
+        self.var_stable_mode.set(stable)
+        if stable:
+            self.lbl_mode_title.configure(text="Stable Mode")
+            self.lbl_mode_help.configure(text=STABLE_MODE_HELP)
+            self.device_panel.pack_forget()
+        else:
+            self.lbl_mode_title.configure(text="Device")
+            self.lbl_mode_help.configure(text=EXPERIMENTAL_HINT)
+            if not self.device_panel.winfo_ismapped():
+                self.device_panel.pack(padx=3, pady=3, fill=X)
+        self.apply_mode_actions()
 
     def set_library_menu_commands(
         self,
@@ -312,8 +336,17 @@ class MainWindow:
         self.menu_transfer.entryconfig(MENU_SYNC_ENTIRE, command=on_sync_entire)
         self.menu_transfer.entryconfig(MENU_SYNC_FOLDER, command=on_sync_folder)
 
-    def set_config_menu_commands(self, *, on_config) -> None:
+    def set_config_menu_commands(
+        self,
+        *,
+        on_config,
+        on_stable_mode_toggle=None,
+    ) -> None:
         self.menu_config.entryconfig(MENU_CONFIG, command=on_config)
+        if on_stable_mode_toggle is not None:
+            self.menu_config.entryconfig(
+                MENU_STABLE_MODE, command=on_stable_mode_toggle
+            )
 
     def set_device_menu_commands(
         self,
@@ -573,7 +606,7 @@ class MainWindow:
         return sel[0]
 
     def apply_mode_actions(self) -> None:
-        """Enable Device menu only in Experimental mode."""
+        """Enable Device menu only when PyMTP (non-Stable) is active."""
         experimental = self.active_mode() == "experimental"
         state = NORMAL if experimental else DISABLED
         for label in _DEVICE_MENU_LABELS:
@@ -589,7 +622,7 @@ class MainWindow:
         caption: str = "",
         max_width: int = 180,
     ) -> None:
-        """Show device art on the Experimental tab, or clear when *image_path* is None."""
+        """Show device art in the left panel, or clear when *image_path* is None."""
         if image_path is None:
             self._device_photo = None
             self.lbl_device_graphic.configure(image="")
