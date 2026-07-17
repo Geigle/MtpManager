@@ -7,7 +7,7 @@ from mtpmanager.domain.models import DeviceInfo, FolderEntry, Track
 
 def track_summary(track: Track) -> str:
     m = track.meta
-    return f"{m.title[:20]}, {m.artist[:10]}, {m.album[:8]}, ({m.tracknumber})"
+    return f"{m.title[:30]}, {m.artist[:30]}, {m.album[:30]}, ({m.tracknumber})"
 
 
 def device_info_summary(info: DeviceInfo) -> str:
