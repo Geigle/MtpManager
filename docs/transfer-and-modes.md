@@ -25,7 +25,7 @@ End-to-end send path, Stable vs Experimental behavior, and where to change thing
 | Background jobs | `ui/bg.TkBackgroundRunner` | Thread + queue + `root.after` poll; never touch Tk from workers |
 | Persist index | `infra/library_index` | Saved in scan worker; UI updated on main thread |
 | Index (in-memory) | `domain/library.Library` | Source of truth; Treeview is a sorted view |
-| Library tree | `ttk.Treeview` + `domain/library_sort` | Columns Title/Artist/Album/Year; heading click sorts; Artist/Year hierarchy |
+| Library tree | `ttk.Treeview` + `domain/library_sort` | Columns Title/Artist/Album/Year; heading click sorts; Artist/Year hierarchy. Group rows put the full header text in Title (Treeview has no colspan). |
 | Format preference | Left panel **Send as** MP3/WMA | Global; all Sync actions use `target_format()` |
 | Track context menu | Right-click listbox row | Sync this track / Sync Album / Sync all from Artist |
 | Transfer menu | Menubar | Sync Entire Library; Sync Folder… |

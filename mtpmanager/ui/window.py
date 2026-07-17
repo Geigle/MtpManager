@@ -233,13 +233,14 @@ class MainWindow:
         self.tree.heading("album", text="Album", anchor="w")
         self.tree.heading("year", text="Year", anchor="w")
 
-        self.tree.column("#0", width=48, minwidth=36, stretch=False)
-        self.tree.column("title", width=200, minwidth=80)
+        self.tree.column("#0", width=40, minwidth=32, stretch=False)
+        # Title is the stretch column — group header text is shown here (full name).
+        self.tree.column("title", width=280, minwidth=120, stretch=True)
         self.tree.column("artist", width=140, minwidth=60)
         self.tree.column("album", width=140, minwidth=60)
         self.tree.column("year", width=56, minwidth=40, stretch=False)
 
-        # Group headers bold; transfer tags tint backgrounds.
+        # Group headers bold (label lives in Title values[0]); transfer tags tint rows.
         self.tree.tag_configure("group", font=("", 11, "bold"))
         self.tree.tag_configure("group_artist", font=("", 12, "bold"))
         self.tree.tag_configure("dead", foreground=_DEAD_TRACK_FG)

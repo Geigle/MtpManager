@@ -335,12 +335,15 @@ class AppController:
                 if op[0] == "group":
                     _, parent, iid, label, tags = op
                     if not tree.exists(iid):
+                        # Treeview cannot colspan; put the full group label in the
+                        # wide Title column so it is not clipped by the narrow # column.
+                        # #0 stays empty aside from the expand/collapse control.
                         tree.insert(
                             parent,
                             "end",
                             iid=iid,
-                            text=label,
-                            values=("", "", "", ""),
+                            text="",
+                            values=(label, "", "", ""),
                             tags=tags,
                             open=True,
                         )
