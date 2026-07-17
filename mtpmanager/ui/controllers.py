@@ -216,6 +216,33 @@ class AppController:
         except Exception:
             pass
 
+    def _indices_for_path(self, path: str) -> list[int]:
+        return [i for i, t in enumerate(self.library.tracks) if t.path == path]
+
+    def _apply_track_status(self, source_path: str, status: str) -> None:
+        """Update listbox row tint for a source path (main thread only)."""
+        for idx in self._indices_for_path(source_path):
+            self.win.set_track_transfer_style(idx, status)
+
+    def _mark_batch_queued(self, tracks: list[Track]) -> None:
+        """Highlight every track in a bulk operation as queued (green)."""
+        for t in tracks:
+            self._apply_track_status(t.path, "queued")
+
+    def _clear_transfer_highlights(self) -> None:
+        self.win.clear_transfer_styles()
+
+    def _on_transfer_ui_event(self, kind: str, *rest) -> None:
+        """Handle progress / track-status events from the transfer worker."""
+        if kind == "track_status":
+            if len(rest) >= 2:
+                self._apply_track_status(str(rest[0]), str(rest[1]))
+            return
+        if kind == "progress":
+            if len(rest) >= 3:
+                self._progress(int(rest[0]), int(rest[1]), str(rest[2]))
+            return
+
 
     def on_mode_tab_changed(self, _event=None) -> None:
         mode = self.win.active_mode()
@@ -513,6 +540,7 @@ class AppController:
             )
             return False
         self._transfer_busy = True
+        self._clear_transfer_highlights()
         try:
             self.win.progress["value"] = 0
         except Exception:
@@ -521,6 +549,7 @@ class AppController:
 
     def _end_transfer_job(self) -> None:
         self._transfer_busy = False
+        self._clear_transfer_highlights()
 
     def _transfer_one(self, track: Track, fmt: str) -> None:
         if not self._begin_transfer_job():
@@ -529,6 +558,7 @@ class AppController:
         transport = self._transport()
         transcoder = self.transcoder
         path = track.path
+        self._mark_batch_queued([track])
 
         def work() -> None:
             session_handler = None
@@ -537,6 +567,12 @@ class AppController:
             except OSError as exc:
                 logger.warning("Could not open transfer session log: %s", exc)
             try:
+                gen = self._bg.generation
+                report = self._bg.progress_callback(gen)
+
+                def on_track_status(src: str, status: str) -> None:
+                    report("track_status", src, status)
+
                 logger.info(
                     "Single-track transfer start: path=%s target_format=%s",
                     path,
@@ -548,6 +584,7 @@ class AppController:
                     transport=transport,
                     transcoder=transcoder,
                     slot=0,
+                    on_track_status=on_track_status,
                 )
                 logger.info("Single-track transfer done: path=%s", path)
             finally:
@@ -573,6 +610,7 @@ class AppController:
             work,
             on_done=on_done,
             on_error=on_error,
+            on_progress=self._on_transfer_ui_event,
             name="transfer-one",
         )
 
@@ -587,13 +625,17 @@ class AppController:
         transcoder = self.transcoder
         # Snapshot the list so library changes during transfer do not race.
         batch = list(tracks)
+        self._mark_batch_queued(batch)
 
         def work() -> int:
             gen = self._bg.generation
             report = self._bg.progress_callback(gen)
 
             def on_progress(done: int, total: int, path: str) -> None:
-                report(done, total, path)
+                report("progress", done, total, path)
+
+            def on_track_status(src: str, status: str) -> None:
+                report("track_status", src, status)
 
             return transfer_tracks(
                 batch,
@@ -601,6 +643,7 @@ class AppController:
                 transport=transport,
                 transcoder=transcoder,
                 on_progress=on_progress,
+                on_track_status=on_track_status,
             )
 
         def on_done(succeeded: int) -> None:
@@ -621,7 +664,7 @@ class AppController:
             work,
             on_done=on_done,
             on_error=on_error,
-            on_progress=self._progress,
+            on_progress=self._on_transfer_ui_event,
             name="transfer-batch",
         )
 

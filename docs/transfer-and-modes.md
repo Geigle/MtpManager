@@ -164,6 +164,19 @@ Single-track and batch sends run on a **worker thread** via `ui/bg.TkBackgroundR
 
 The transfer **worker** still blocks on each `transport.send_track` (subprocess or libmtp); the dual-slot prep thread overlaps **ffmpeg convert** of the next track only.
 
+### Listbox transfer highlighting
+
+`on_track_status` reports per source path; the UI tints listbox rows (selection blue is unchanged):
+
+| Status | Color |
+|--------|--------|
+| Queued (whole batch at start) | Desaturated green |
+| Transcoding | Stronger desaturated green |
+| Transferring | Desaturated red |
+| Done / failed / job end | Clear |
+
+Bulk Sync Album / Artist / Entire Library marks every matching library row queued first; each row clears when that track finishes (or the whole job ends).
+
 ---
 
 ## Tests that lock the contract

@@ -33,6 +33,12 @@ FORMAT_OPTIONS = ("MP3", "WMA")
 _PATH_DISPLAY_MAX = 72
 _DEAD_TRACK_FG = "gray50"
 
+# Desaturated transfer-state backgrounds (listbox itemconfig).
+# Selection highlight (blue) remains for the active selection; these tint the row.
+BG_TRANSFER_QUEUED = "#b8cbb8"  # desaturated green — in batch, waiting
+BG_TRANSFER_TRANSCODING = "#8faf8f"  # desaturated green — converting
+BG_TRANSFER_TRANSFERRING = "#bf8f8f"  # desaturated red — sending to device
+
 # Library menu labels (used for entryconfig by label).
 MENU_SELECT_ROOT = "Select Library Root…"
 MENU_UPDATE_LIBRARY = "Update Library"
@@ -343,6 +349,39 @@ class MainWindow:
             self.listbox.itemconfig(i, fg=_DEAD_TRACK_FG)
         if size > 0:
             self.listbox.configure(state=DISABLED)
+
+    def set_track_transfer_style(self, index: int, status: str | None) -> None:
+        """Tint a listbox row for transfer state; *status* None/done/failed clears.
+
+        Status values: ``queued``, ``transcoding``, ``transferring``,
+        ``done``, ``failed``, or None to clear.
+        """
+        size = self.listbox.size()
+        if index < 0 or index >= size:
+            return
+        # itemconfig requires a normal-state listbox
+        was_disabled = str(self.listbox.cget("state")) == str(DISABLED)
+        if was_disabled:
+            return
+        if status in (None, "done", "failed", ""):
+            self.listbox.itemconfig(index, bg="", selectbackground="")
+            return
+        if status == "transferring":
+            color = BG_TRANSFER_TRANSFERRING
+        elif status == "transcoding":
+            color = BG_TRANSFER_TRANSCODING
+        else:
+            # queued / unknown → desaturated green
+            color = BG_TRANSFER_QUEUED
+        self.listbox.itemconfig(index, bg=color, selectbackground=color)
+
+    def clear_transfer_styles(self) -> None:
+        """Clear all transfer tinting from listbox rows."""
+        was_disabled = str(self.listbox.cget("state")) == str(DISABLED)
+        if was_disabled:
+            return
+        for i in range(self.listbox.size()):
+            self.listbox.itemconfig(i, bg="", selectbackground="")
 
     def popup_track_context(self, event) -> str | None:
         """Select the row under the pointer and show the track context menu."""

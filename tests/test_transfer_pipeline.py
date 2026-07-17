@@ -152,6 +152,42 @@ class DualSlotPipelineTests(unittest.TestCase):
                 )
             self.assertEqual(len(transport.sent), 2)
 
+    def test_track_status_lifecycle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = []
+            for name in ("a.flac", "b.flac"):
+                p = os.path.join(tmp, name)
+                Path(p).write_bytes(b"x")
+                paths.append(p)
+            tracks = [_track(paths[0], "One"), _track(paths[1], "Two")]
+            tr = _FakeTranscoder(tmp)
+            transport = _RecordingTransport()
+            events: list[tuple[str, str]] = []
+
+            def on_status(path: str, status: str) -> None:
+                events.append((os.path.basename(path), status))
+
+            n = transfer_tracks(
+                tracks,
+                target_format="mp3",
+                transport=transport,
+                transcoder=tr,
+                on_track_status=on_status,
+                session_log=False,
+            )
+            self.assertEqual(n, 2)
+            # Each flac: transcoding → transferring → done
+            self.assertIn(("a.flac", "transcoding"), events)
+            self.assertIn(("a.flac", "transferring"), events)
+            self.assertIn(("a.flac", "done"), events)
+            self.assertIn(("b.flac", "transcoding"), events)
+            self.assertIn(("b.flac", "transferring"), events)
+            self.assertIn(("b.flac", "done"), events)
+            # transferring before done for first track
+            i_xfer = events.index(("a.flac", "transferring"))
+            i_done = events.index(("a.flac", "done"))
+            self.assertLess(i_xfer, i_done)
+
 
 if __name__ == "__main__":
     unittest.main()

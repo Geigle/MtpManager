@@ -22,6 +22,8 @@ from mtpmanager.ports.transport import Transport, TransportError
 logger = logging.getLogger(__name__)
 
 ProgressCallback = Callable[[int, int, str], None]
+# source_path, status: "transcoding" | "transferring" | "done" | "failed"
+TrackStatusCallback = Callable[[str, str], None]
 
 
 @dataclass(frozen=True)
@@ -55,6 +57,19 @@ def _merge_meta_after_convert(
     )
 
 
+def _notify_status(
+    on_track_status: TrackStatusCallback | None,
+    source_path: str,
+    status: str,
+) -> None:
+    if on_track_status is None:
+        return
+    try:
+        on_track_status(source_path, status)
+    except Exception:
+        logger.debug("on_track_status failed", exc_info=True)
+
+
 def prepare_track(
     track: Track,
     *,
@@ -62,6 +77,7 @@ def prepare_track(
     transcoder: Transcoder,
     slot: int = 0,
     reread_tags_after_convert: bool = True,
+    on_track_status: TrackStatusCallback | None = None,
 ) -> PreparedTrack:
     """Transcode into *slot* if needed; return path/meta for send (no send yet)."""
     target_format = target_format.lower().lstrip(".")
@@ -70,6 +86,7 @@ def prepare_track(
     cleanup_path: str | None = None
 
     if not is_format(src, target_format):
+        _notify_status(on_track_status, track.path, "transcoding")
         src = transcoder.convert(src, target_format, slot=slot)
         cleanup_path = src
         if reread_tags_after_convert:
@@ -92,6 +109,7 @@ def transfer_track(
     transcoder: Transcoder,
     reread_tags_after_convert: bool = True,
     slot: int = 0,
+    on_track_status: TrackStatusCallback | None = None,
 ) -> None:
     """
     Ensure track is in target_format (transcode if needed), then send via transport.
@@ -103,9 +121,15 @@ def transfer_track(
         transcoder=transcoder,
         slot=slot,
         reread_tags_after_convert=reread_tags_after_convert,
+        on_track_status=on_track_status,
     )
     try:
+        _notify_status(on_track_status, track.path, "transferring")
         transport.send_track(prepared.send_path, prepared.meta)
+        _notify_status(on_track_status, track.path, "done")
+    except Exception:
+        _notify_status(on_track_status, track.path, "failed")
+        raise
     finally:
         if prepared.cleanup_path is not None:
             transcoder.cleanup(prepared.cleanup_path)
@@ -118,6 +142,7 @@ def transfer_tracks(
     transport: Transport,
     transcoder: Transcoder,
     on_progress: ProgressCallback | None = None,
+    on_track_status: TrackStatusCallback | None = None,
     stop_on_fatal: bool = True,
     session_log: bool = True,
 ) -> int:
@@ -127,12 +152,8 @@ def transfer_tracks(
     helper thread into the alternate temp slot (``i % 2`` vs ``(i+1) % 2``).
     Returns number of successful sends.
 
-    On a fatal TransportError (dead USB/MTP session, timeout, storage unusable),
-    aborts the rest of the batch when *stop_on_fatal* is True (default) and
-    re-raises so the UI can report it.
-
-    When *session_log* is True, attaches a per-batch ``transfer-*.log`` handler
-    for the duration of the batch.
+    *on_track_status* receives ``(source_path, status)`` where status is one of
+    ``transcoding``, ``transferring``, ``done``, or ``failed``.
     """
     total = len(tracks)
     succeeded = 0
@@ -163,10 +184,21 @@ def transfer_tracks(
         next_future.cancel()
         try:
             if next_future.done() and not next_future.cancelled():
-                _cleanup(next_future.result())
+                nxt = next_future.result()
+                _cleanup(nxt)
+                _notify_status(on_track_status, nxt.source_path, "failed")
         except Exception:
             pass
         next_future = None
+
+    def _prepare(track: Track, slot: int) -> PreparedTrack:
+        return prepare_track(
+            track,
+            target_format=target_format,
+            transcoder=transcoder,
+            slot=slot,
+            on_track_status=on_track_status,
+        )
 
     try:
         if total == 0:
@@ -175,35 +207,24 @@ def transfer_tracks(
         with ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="mtpmanager-prep"
         ) as pool:
-            # Prepare first track on the batch thread (no prior send to overlap).
-            prepared = prepare_track(
-                tracks[0],
-                target_format=target_format,
-                transcoder=transcoder,
-                slot=0,
-            )
+            prepared = _prepare(tracks[0], 0)
 
             for i, track in enumerate(tracks):
                 if on_progress:
                     on_progress(i, total, track.path)
                 logger.info("%d/%d - %s", i + 1, total, track.path)
 
-                # Kick off prepare for the next track into the other slot while we send.
                 if i + 1 < total:
                     next_slot = (i + 1) % 2
                     next_track = tracks[i + 1]
-                    next_future = pool.submit(
-                        prepare_track,
-                        next_track,
-                        target_format=target_format,
-                        transcoder=transcoder,
-                        slot=next_slot,
-                    )
+                    next_future = pool.submit(_prepare, next_track, next_slot)
 
                 assert prepared is not None
                 try:
+                    _notify_status(on_track_status, track.path, "transferring")
                     transport.send_track(prepared.send_path, prepared.meta)
                     succeeded += 1
+                    _notify_status(on_track_status, track.path, "done")
                 except TransportError as exc:
                     remaining = total - i - 1
                     logger.error(
@@ -217,6 +238,7 @@ def transfer_tracks(
                     )
                     if exc.stderr:
                         logger.error("Transport stderr:\n%s", exc.stderr)
+                    _notify_status(on_track_status, track.path, "failed")
                     _cleanup(prepared)
                     prepared = None
                     if exc.fatal and stop_on_fatal:
@@ -235,7 +257,6 @@ def transfer_tracks(
                         "Continuing after non-fatal failure (%d left).",
                         remaining,
                     )
-                    # Fall through to fetch next prepared track if any.
                 else:
                     _cleanup(prepared)
                     prepared = None
