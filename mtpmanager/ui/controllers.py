@@ -49,6 +49,8 @@ class AppController:
         self._device_poll_gen = 0
         self._device_connect_inflight = False
         self._logged_no_device = False
+        # When False, experimental poll is stopped until Device → Connect.
+        self._device_auto_reconnect = True
         self._active_profile: DeviceProfile | None = None
         self._wire()
         # Defer restore so mainloop can start before any index I/O.
@@ -57,8 +59,6 @@ class AppController:
 
     def _wire(self) -> None:
         w = self.win
-        w.btn_connect.configure(command=self.on_connect)
-        w.btn_disconnect.configure(command=self.on_disconnect)
         w.set_library_menu_commands(
             on_select_root=self.on_select_library_root,
             on_update=self.on_update_library,
@@ -68,6 +68,8 @@ class AppController:
             on_sync_folder=self.action_sync_folder,
         )
         w.set_device_menu_commands(
+            on_connect=self.on_connect,
+            on_disconnect=self.on_disconnect,
             on_device_info=self.on_device_info,
             on_create_folder=self.action_create_folder,
             on_list_folders=self.action_read_folder_list,
@@ -107,7 +109,7 @@ class AppController:
         messagebox.showwarning(
             "Device not connected",
             "Experimental Mode sends via PyMTP and needs an open session.\n\n"
-            "• Click Connect on the Experimental tab, or\n"
+            "• Use Device → Connect (Experimental Mode), or\n"
             "• Switch to Stable Mode (mtp-sendtr; no Connect required).",
         )
         return False
@@ -159,7 +161,7 @@ class AppController:
         if not self.device.is_connected():
             messagebox.showwarning(
                 "Device not connected",
-                "Connect on the Experimental tab first.",
+                "Use Device → Connect first (Experimental Mode).",
             )
             return False
         return True
@@ -262,6 +264,9 @@ class AppController:
             "CMD" if mode == "stable" else "PyMTP",
         )
         if mode == "experimental":
+            # Fresh Experimental session: allow auto-reconnect unless user
+            # later chooses Device → Disconnect.
+            self._device_auto_reconnect = True
             self._start_device_poll()
         else:
             # Stable (mtp-sendtr) fails if a PyMTP session is already open.
@@ -270,6 +275,8 @@ class AppController:
 
     def _start_device_poll(self) -> None:
         """Begin Experimental auto-connect polling (immediate + every 3s)."""
+        if not self._device_auto_reconnect:
+            return
         self._stop_device_poll(cancel_only=True)
         self._device_poll_gen += 1
         self._experimental_device_tick(self._device_poll_gen)
@@ -291,6 +298,8 @@ class AppController:
             return
         if self.win.active_mode() != "experimental":
             return
+        if not self._device_auto_reconnect:
+            return
         self._device_poll_after_id = self.win.root.after(
             _DEVICE_POLL_MS,
             lambda: self._experimental_device_tick(gen),
@@ -300,11 +309,14 @@ class AppController:
         """Quiet auto-connect / liveness check while Experimental is active.
 
         When a session looks open, probe the device so sudden unplug is
-        detected; then clear state and keep retrying connect every interval.
+        detected; then clear state and keep retrying connect every interval
+        (unless the user disabled auto-reconnect via Device → Disconnect).
         """
         if gen != self._device_poll_gen:
             return
         if self.win.active_mode() != "experimental":
+            return
+        if not self._device_auto_reconnect:
             return
 
         # Avoid racing libmtp during library/transfer work.
@@ -350,6 +362,8 @@ class AppController:
                     except Exception:
                         pass
                 return
+            if not self._device_auto_reconnect:
+                return
 
             status, info = result
             if status == "ok" and info is not None:
@@ -357,9 +371,6 @@ class AppController:
                 # Only re-apply art/log when profile missing or first connect.
                 if self._active_profile is None:
                     self._apply_device_profile(info)
-                else:
-                    # Keep caption/graphic; optionally refresh on model change later.
-                    pass
             elif status == "gone":
                 logger.info("Experimental auto-connect: device disconnected")
                 self._logged_no_device = False  # allow one "no device" log on next fails
@@ -374,6 +385,7 @@ class AppController:
             if (
                 local_gen != self._device_poll_gen
                 or self.win.active_mode() != "experimental"
+                or not self._device_auto_reconnect
             ):
                 return
             self._note_no_device()
@@ -425,19 +437,31 @@ class AppController:
             logger.exception("Disconnect for Stable Mode failed")
 
     def on_connect(self) -> None:
+        """Manual connect; re-enables auto-reconnect polling on Experimental."""
+        self._device_auto_reconnect = True
         try:
             device_ops.connect(self.device)
             self._logged_no_device = False
-            self._refresh_connected_profile()
+            try:
+                info = device_ops.get_device_info(self.device)
+                self._apply_device_profile(info)
+            except Exception:
+                logger.exception("Connected but could not load device info")
         except Exception as e:
             logger.exception("Connect failed")
             messagebox.showerror("Connect", str(e))
+        # Resume monitoring (liveness + reconnect after unplug).
+        if self.win.active_mode() == "experimental":
+            self._start_device_poll()
 
     def on_disconnect(self) -> None:
+        """Manual disconnect; stop auto-reconnect until Device → Connect."""
+        self._device_auto_reconnect = False
+        self._stop_device_poll()
         device_ops.disconnect(self.device)
         self._clear_device_profile()
-        # Allow one log line if auto-connect fails again after unplug.
         self._logged_no_device = False
+        logger.info("Device → Disconnect: auto-reconnect paused")
 
 
     def on_device_info(self) -> None:
@@ -665,7 +689,7 @@ class AppController:
                 "Experimental (PyMTP) send failed and was not retried automatically.",
                 "",
                 "Recommended recovery:",
-                "1. Click Disconnect on the Experimental tab "
+                "1. Device → Disconnect "
                 "(unplug/replug the player if Disconnect errors).",
                 "2. Switch to the Stable Mode tab.",
                 "3. Retry the transfer there (uses mtp-sendtr).",

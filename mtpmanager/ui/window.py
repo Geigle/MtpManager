@@ -17,7 +17,6 @@ from tkinter import (
     TOP,
     X,
     Y,
-    Button,
     Frame,
     Label,
     Listbox,
@@ -50,6 +49,8 @@ MENU_SYNC_ENTIRE = "Sync Entire Library"
 MENU_SYNC_FOLDER = "Sync Folder…"
 
 # Device menu (Experimental)
+MENU_CONNECT = "Connect"
+MENU_DISCONNECT = "Disconnect"
 MENU_DEVICE_INFO = "Device Info"
 MENU_CREATE_FOLDER = "Create Folder…"
 MENU_LIST_FOLDERS = "List Folders"
@@ -62,6 +63,8 @@ CTX_SYNC_ALBUM = "Sync Album"
 CTX_SYNC_ARTIST = "Sync all from Artist"
 
 _DEVICE_MENU_LABELS = (
+    MENU_CONNECT,
+    MENU_DISCONNECT,
     MENU_DEVICE_INFO,
     MENU_CREATE_FOLDER,
     MENU_LIST_FOLDERS,
@@ -170,17 +173,10 @@ class MainWindow:
             justify=LEFT,
         ).pack(padx=6, pady=6, anchor="w")
 
-        # Device session controls — Experimental only.
+        # Device session status + auto-detect graphic (connect/disconnect via Device menu).
         Label(experimental_tab, text="Device", font=("", 11, "bold")).pack(
             padx=6, pady=(4, 0), anchor="w"
         )
-        self.btn_connect = Button(experimental_tab, width=20, text="Connect")
-        self.btn_connect.pack(padx=3, pady=3, side=TOP)
-
-        self.btn_disconnect = Button(experimental_tab, width=20, text="Disconnect")
-        self.btn_disconnect.pack(padx=3, pady=3, side=TOP)
-
-        # Auto-detect graphic (profile-specific art when connected).
         self.lbl_device_caption = Label(
             experimental_tab, text="", wraplength=180, justify=LEFT
         )
@@ -257,12 +253,16 @@ class MainWindow:
     def set_device_menu_commands(
         self,
         *,
+        on_connect,
+        on_disconnect,
         on_device_info,
         on_create_folder,
         on_list_folders,
         on_get_file_info,
         on_delete_all,
     ) -> None:
+        self.menu_device.entryconfig(MENU_CONNECT, command=on_connect)
+        self.menu_device.entryconfig(MENU_DISCONNECT, command=on_disconnect)
         self.menu_device.entryconfig(MENU_DEVICE_INFO, command=on_device_info)
         self.menu_device.entryconfig(MENU_CREATE_FOLDER, command=on_create_folder)
         self.menu_device.entryconfig(MENU_LIST_FOLDERS, command=on_list_folders)
