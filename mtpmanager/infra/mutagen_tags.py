@@ -157,22 +157,79 @@ def _from_ogg(path: str) -> TrackMetadata:
     return _from_vorbis_audio(OggVorbis(path))
 
 
-def _asf_get(tag_dict: dict, tag_id: str) -> str:
-    """Read ASF tags; keys may be mixed-case depending on mutagen version."""
-    # Try common key variants
-    candidates = [tag_id, tag_id.upper(), tag_id.lower(), tag_id.capitalize()]
-    for key in candidates:
-        if key in tag_dict:
-            val = tag_dict[key]
-            raw = val[0] if isinstance(val, (list, tuple)) else val
-            raw = str(raw)
-            if tag_id.lower() in ("tracknumber", "track") and "/" in raw:
-                raw = raw.split("/")[0]
-            if tag_id.lower() in ("tracknumber", "track"):
-                return _pad_tracknum(raw)
-            return raw
+# Windows Media / ASF content descriptors (WMA). Mutagen exposes the standard
+# names (Title, Author, WM/…) — not the generic EasyID3-style keys.
+_ASF_KEY_ALIASES: dict[str, tuple[str, ...]] = {
+    "title": ("Title", "WM/Title", "title", "TITLE"),
+    # Performer is almost always "Author" on WMA, not "Artist".
+    "artist": ("Author", "WM/AlbumArtist", "Artist", "artist", "ARTIST"),
+    "albumartist": ("WM/AlbumArtist", "Author", "AlbumArtist", "albumartist"),
+    "album": ("WM/AlbumTitle", "Album", "album", "ALBUM"),
+    "genre": ("WM/Genre", "Genre", "genre", "GENRE"),
+    "composer": ("WM/Composer", "Composer", "composer"),
+    "tracknumber": (
+        "WM/TrackNumber",
+        "WM/Track",
+        "TrackNumber",
+        "Track",
+        "tracknumber",
+    ),
+    "date": ("WM/Year", "Year", "date", "DATE", "WM/OriginalReleaseTime"),
+    "year": ("WM/Year", "Year", "year"),
+    "discnumber": ("WM/PartOfSet", "WM/DiscNumber", "discnumber"),
+}
 
+
+def _asf_value_text(val: Any) -> str:
+    """Normalize mutagen ASF attribute / plain value to a stripped string."""
+    if val is None:
+        return ""
+    if isinstance(val, (list, tuple)):
+        if not val:
+            return ""
+        val = val[0]
+    if hasattr(val, "value"):
+        val = val.value
+    return str(val).strip()
+
+
+def _asf_lookup(tag_dict: dict | None, *keys: str) -> str | None:
+    if not tag_dict:
+        return None
+    # Exact keys first (as_dict uses canonical WM names).
+    for key in keys:
+        if key in tag_dict:
+            text = _asf_value_text(tag_dict[key])
+            if text:
+                return text
+    # Case-insensitive fallback for odd taggers / plain mocks.
+    lower_map = {str(k).lower(): v for k, v in tag_dict.items()}
+    for key in keys:
+        if key.lower() in lower_map:
+            text = _asf_value_text(lower_map[key.lower()])
+            if text:
+                return text
+    return None
+
+
+def _asf_get(tag_dict: dict | None, tag_id: str) -> str:
+    """Read ASF/WMA tags using Windows Media key names and common aliases."""
     lower = tag_id.lower()
+    aliases = _ASF_KEY_ALIASES.get(lower, (tag_id, tag_id.capitalize(), tag_id.upper()))
+    raw = _asf_lookup(tag_dict, *aliases)
+
+    if raw is not None:
+        if lower in ("tracknumber", "track", "discnumber"):
+            if "/" in raw:
+                raw = raw.split("/")[0]
+            # Some writers store zero-based WM/Track; TrackNumber is preferred
+            # via alias order. Pad digits only when purely numeric.
+            digits = raw.strip()
+            if digits.isdigit():
+                return _pad_tracknum(digits)
+            return raw
+        return raw
+
     if lower in ("tracknumber", "discnumber", "track"):
         return "01"
     if lower in ("albumartist", "composer"):
@@ -189,6 +246,7 @@ def _asf_get(tag_dict: dict, tag_id: str) -> str:
 
 
 def _from_asf(path: str) -> TrackMetadata:
+    """WMA / ASF — tags use Title/Author/WM/* content descriptors."""
     trk = ASF(path)
     tags = trk.tags.as_dict() if trk.tags is not None else {}
     info = trk.info
