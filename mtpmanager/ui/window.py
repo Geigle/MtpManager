@@ -201,6 +201,8 @@ class MainWindow:
         self.lbl_device_graphic.pack(padx=6, pady=6)
         self._device_photo: PhotoImage | None = None
         self._device_photo_cache: dict[str, PhotoImage] = {}
+        # Album art thumbs for group rows (must keep refs for Tk).
+        self._album_art_cache: dict[str, PhotoImage] = {}
 
         Label(
             leftframe,
@@ -236,7 +238,26 @@ class MainWindow:
         self.tree.heading("album", text="Album", anchor="w")
         self.tree.heading("year", text="Year", anchor="w")
 
-        self.tree.column("#0", width=40, minwidth=32, stretch=False)
+        # Album thumbs live in #0 (only Treeview column that supports images).
+        # Width + rowheight leave room so thumbs are not cropped and Title text
+        # is not drawn under the image.
+        from mtpmanager.infra.album_art import DEFAULT_THUMB_SIZE
+
+        self._thumb_size = DEFAULT_THUMB_SIZE
+        self._tree_rowheight = max(DEFAULT_THUMB_SIZE + 8, 52)
+        style = ttk.Style(self.root)
+        try:
+            style.configure("Treeview", rowheight=self._tree_rowheight)
+        except Exception:
+            pass
+
+        # Expander + thumbnail padding; pushes Title column to the right.
+        self.tree.column(
+            "#0",
+            width=self._thumb_size + 28,
+            minwidth=self._thumb_size + 20,
+            stretch=False,
+        )
         # Title is the stretch column — group header text is shown here (full name).
         self.tree.column("title", width=280, minwidth=120, stretch=True)
         self.tree.column("artist", width=140, minwidth=60)
@@ -388,6 +409,60 @@ class MainWindow:
 
     def clear_track_tree(self) -> None:
         self.tree.delete(*self.tree.get_children())
+        # Drop in-memory PhotoImage refs; on-disk thumbs remain.
+        self._album_art_cache.clear()
+
+    def album_art_photo_from_disk(
+        self,
+        track_path: str,
+        *,
+        cache_key: str | None = None,
+        size: int | None = None,
+    ) -> PhotoImage | None:
+        """Load a *pre-cached* PNG thumb (main thread, no extract).
+
+        Returns None if the disk cache has not been built yet — caller should
+        schedule a background ensure + apply.
+        """
+        from mtpmanager.infra.album_art import (
+            DEFAULT_THUMB_SIZE,
+            cached_thumb_exists,
+            photoimage_from_cache_file,
+        )
+
+        size = size if size is not None else getattr(self, "_thumb_size", DEFAULT_THUMB_SIZE)
+        key = cache_key or track_path
+        if key in self._album_art_cache:
+            return self._album_art_cache[key]
+        path = cached_thumb_exists(track_path, size=size)
+        if path is None:
+            return None
+        photo = photoimage_from_cache_file(path, master=self.root)
+        if photo is not None:
+            self._album_art_cache[key] = photo
+        return photo
+
+    def apply_album_art_photo(
+        self,
+        iid: str,
+        track_path: str,
+        *,
+        cache_key: str | None = None,
+        size: int | None = None,
+    ) -> bool:
+        """Set tree item image from disk cache; return True if applied."""
+        if not self.tree.exists(iid):
+            return False
+        photo = self.album_art_photo_from_disk(
+            track_path, cache_key=cache_key or iid, size=size
+        )
+        if photo is None:
+            return False
+        try:
+            self.tree.item(iid, image=photo)
+            return True
+        except Exception:
+            return False
 
     def set_tracks_usable(self, usable: bool) -> None:
         """Allow interaction, or mark the tree as dead/unreachable."""

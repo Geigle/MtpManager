@@ -50,6 +50,7 @@ Do **not**:
 | UI actions, mode, recovery dialogs | `mtpmanager/ui/controllers.py`, `window.py` |
 | Artist/album selection | `mtpmanager/domain/library.py` |
 | Scan / tags | `app/scan_library.py`, `infra/mutagen_tags.py` |
+| Album art thumbs | `infra/album_art.py` (mutagen + Pillow; album header rows only) |
 | Library index (persist/restore) | `infra/library_index.py`, `infra/app_paths.py` |
 | Device profiles / graphics | `domain/device_profile.py`, `domain/device_profiles.py`, `assets/devices/` |
 | App config (send format, …) | `infra/app_config.py` (`config.json` under data dir) |

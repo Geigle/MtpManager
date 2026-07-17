@@ -22,6 +22,11 @@ from mtpmanager.domain.library_sort import (
     sort_tracks_flat,
 )
 from mtpmanager.domain.models import DeviceInfo, Track
+from mtpmanager.infra.album_art import (
+    DEFAULT_THUMB_SIZE,
+    ensure_cached_thumb,
+    warm_album_thumbs,
+)
 from mtpmanager.infra.app_config import AppConfig, load_app_config, save_app_config
 from mtpmanager.infra.cmd_transport import CmdTransport
 from mtpmanager.infra.device_assets import device_graphic_path
@@ -73,6 +78,8 @@ class AppController:
         # Group header iid → seed Track for filter_by_artist / filter_by_album.
         self._group_seed_by_iid: dict[str, Track] = {}
         self._context_group_seed: Track | None = None
+        self._pending_album_art: list[tuple[str, str]] = []  # (iid, track_path)
+        self._album_art_job_gen = 0
         self._wire()
         # Defer restore so mainloop can start before any index I/O.
         self.win.root.after(0, self._start_index_restore)
@@ -328,6 +335,7 @@ class AppController:
         self._iid_by_path.clear()
         self._group_seed_by_iid.clear()
         self._context_group_seed = None
+        self._pending_album_art = []
         tracks = list(self.library.tracks)
         if not tracks:
             self.win.set_tracks_usable(self._library_root_reachable())
@@ -431,14 +439,25 @@ class AppController:
                 if op[0] == "group":
                     _, parent, iid, label, tags, seed = op
                     if not tree.exists(iid):
-                        # Treeview cannot colspan; put the full group label in the
-                        # wide Title column so it is not clipped by the narrow # column.
-                        # #0 stays empty aside from the expand/collapse control.
+                        # Treeview cannot colspan; full group label in Title.
+                        # #0: expander + optional thumb (only from disk cache here).
+                        image = ""
+                        if seed is not None and "group_album" in tags:
+                            photo = self.win.album_art_photo_from_disk(
+                                seed.path,
+                                cache_key=iid,
+                                size=DEFAULT_THUMB_SIZE,
+                            )
+                            if photo is not None:
+                                image = photo
+                            else:
+                                self._pending_album_art.append((iid, seed.path))
                         tree.insert(
                             parent,
                             "end",
                             iid=iid,
                             text="",
+                            image=image,
                             values=(label, "", "", ""),
                             tags=tags,
                             open=True,
@@ -454,8 +473,69 @@ class AppController:
                 )
             else:
                 self.win.set_tracks_usable(self._library_root_reachable())
+                self._start_background_album_art()
 
         run_chunk(0)
+
+    def _album_seed_paths(self) -> list[str]:
+        """One seed track path per album (for warm cache)."""
+        seen: set[tuple[str, str]] = set()
+        paths: list[str] = []
+        for t in self.library.tracks:
+            key = (
+                (t.meta.artist or "").casefold(),
+                (t.meta.album or "").casefold(),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            paths.append(t.path)
+        return paths
+
+    def _start_background_album_art(self) -> None:
+        """Build missing thumbs off the UI thread; apply when ready."""
+        pending = list(self._pending_album_art)
+        # Also warm all albums even if not visible in current sort (for later).
+        warm_paths = self._album_seed_paths()
+        if not pending and not warm_paths:
+            return
+
+        self._album_art_job_gen += 1
+        gen = self._album_art_job_gen
+        size = DEFAULT_THUMB_SIZE
+
+        def work() -> list[tuple[str, str]]:
+            # Warm full library album set first (disk only; no Tk).
+            warm_album_thumbs(warm_paths, size=size)
+            ready: list[tuple[str, str]] = []
+            for iid, path in pending:
+                if ensure_cached_thumb(path, size=size) is not None:
+                    ready.append((iid, path))
+            return ready
+
+        def on_done(ready: list[tuple[str, str]]) -> None:
+            if gen != self._album_art_job_gen:
+                return
+            for iid, path in ready:
+                self.win.apply_album_art_photo(
+                    iid, path, cache_key=iid, size=size
+                )
+            if ready:
+                logger.info("Applied %d album art thumbnail(s)", len(ready))
+
+        def on_error(exc: BaseException) -> None:
+            logger.debug("Album art background job failed: %s", exc)
+
+        def runner() -> None:
+            try:
+                result = work()
+                self.win.root.after(0, lambda: on_done(result))
+            except BaseException as exc:
+                self.win.root.after(0, lambda e=exc: on_error(e))
+
+        threading.Thread(
+            target=runner, name="mtpmanager-album-art", daemon=True
+        ).start()
 
     def _populate_listbox(self, library: Library) -> None:
         """Rebuild the track tree (name kept for call-site compatibility)."""
@@ -763,6 +843,22 @@ class AppController:
         self.win.set_tracks_usable(reachable)
 
     @staticmethod
+    def _warm_art_for_library(library: Library) -> None:
+        seeds: list[str] = []
+        seen: set[tuple[str, str]] = set()
+        for t in library.tracks:
+            key = (
+                (t.meta.artist or "").casefold(),
+                (t.meta.album or "").casefold(),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            seeds.append(t.path)
+        n = warm_album_thumbs(seeds, size=DEFAULT_THUMB_SIZE)
+        logger.info("Warmed %d album art cache entr(y/ies)", n)
+
+    @staticmethod
     def _load_index_worker() -> Library | None:
         """Worker: load durable index and filter missing files if root is live."""
         loaded = load_library_index(drop_missing_files=False)
@@ -777,12 +873,18 @@ class AppController:
                     dropped,
                     len(live),
                 )
-            return Library(tracks=live, root_path=loaded.root_path)
-        logger.warning(
-            "Library index root not reachable: %r — showing stale index",
-            loaded.root_path,
-        )
-        return loaded
+            lib = Library(tracks=live, root_path=loaded.root_path)
+        else:
+            logger.warning(
+                "Library index root not reachable: %r — showing stale index",
+                loaded.root_path,
+            )
+            lib = loaded
+        try:
+            AppController._warm_art_for_library(lib)
+        except Exception:
+            logger.debug("Album art warm after index load failed", exc_info=True)
+        return lib
 
     @staticmethod
     def _scan_and_save_worker(path: str) -> tuple[Library, str | None]:
@@ -797,6 +899,11 @@ class AppController:
         except OSError as e:
             logger.exception("Failed to save library index")
             return library, str(e)
+        # Warm album thumbs while still off the UI thread (same job as scan).
+        try:
+            AppController._warm_art_for_library(library)
+        except Exception:
+            logger.debug("Album art warm after scan failed", exc_info=True)
         return library, None
 
     def _on_library_job_done(self, library: Library | None, *, kind: str) -> None:
