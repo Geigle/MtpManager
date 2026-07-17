@@ -34,7 +34,7 @@ MtpManager loads music onto picky MTP players (especially Creative ZEN Vision:M)
 
 | Package | Responsibility | Key modules |
 |---------|----------------|-------------|
-| `domain/` | Pure models + library selection logic | `models.py` (`Track`, `TrackMetadata`, `DeviceInfo`), `library.py` (scan helpers, `filter_by_artist` / `filter_by_album`) |
+| `domain/` | Pure models + library selection logic | `models.py` (`Track`, `TrackMetadata`, `DeviceInfo`), `library.py`, `device_profile.py` / `device_profiles.py` (player matching) |
 | `ports/` | Protocols + shared error type | `transport.py` (`Transport`, `TransportError`), `device.py` (`DevicePort`), `tags.py`, `transcoder.py` |
 | `app/` | Use cases (orchestration only) | `transfer.py`, `scan_library.py`, `device_ops.py` |
 | `infra/` | libmtp / ffmpeg / mutagen / logging / library index | `cmd_transport.py`, `pymtp_device.py`, `pymtp_wrapper.py`, `remote_naming.py`, `ffmpeg_transcode.py`, `mutagen_tags.py`, `logging_setup.py`, `app_paths.py`, `library_index.py` |
@@ -73,7 +73,7 @@ UI action surfaces (`ui/window.py`):
 
 - **Track context menu** (both modes): Sync this track / Album / Artist.
 - **Transfer** menubar: entire library / folder sync.
-- **Device** menubar (Device Info + admin tools; enabled only in Experimental) + Experimental tab **Connect/Disconnect** buttons.
+- **Device** menubar (Device Info + admin tools; enabled only in Experimental) + Experimental tab **Connect/Disconnect** and auto-detect graphic (`domain/device_profile` + `assets/devices/`).
 
 Stable is the recommended transfer path. Experimental is for PyMTP/libmtp tools and deliberate in-process send testing. Experimental **does not** silently fall back to CMD on failure (see [decisions.md](./decisions.md) D3).
 

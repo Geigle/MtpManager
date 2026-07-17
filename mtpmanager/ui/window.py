@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Literal
 
+from pathlib import Path
+
 from tkinter import (
     BOTH,
     BOTTOM,
@@ -20,6 +22,7 @@ from tkinter import (
     Label,
     Listbox,
     Menu,
+    PhotoImage,
     Scrollbar,
     Tk,
     ttk,
@@ -176,6 +179,16 @@ class MainWindow:
 
         self.btn_disconnect = Button(experimental_tab, width=20, text="Disconnect")
         self.btn_disconnect.pack(padx=3, pady=3, side=TOP)
+
+        # Auto-detect graphic (profile-specific art when connected).
+        self.lbl_device_caption = Label(
+            experimental_tab, text="", wraplength=180, justify=LEFT
+        )
+        self.lbl_device_caption.pack(padx=6, pady=(6, 0), anchor="w")
+        self.lbl_device_graphic = Label(experimental_tab)
+        self.lbl_device_graphic.pack(padx=6, pady=6)
+        self._device_photo: PhotoImage | None = None
+        self._device_photo_cache: dict[str, PhotoImage] = {}
 
         # Global format preference (all Sync actions).
         format_frame = Frame(leftframe)
@@ -389,6 +402,41 @@ class MainWindow:
                 self.menu_device.entryconfig(label, state=state)
             except Exception:
                 pass
+
+    def set_device_graphic(
+        self,
+        image_path: Path | str | None,
+        *,
+        caption: str = "",
+        max_width: int = 180,
+    ) -> None:
+        """Show device art on the Experimental tab, or clear when *image_path* is None."""
+        if image_path is None:
+            self._device_photo = None
+            self.lbl_device_graphic.configure(image="")
+            self.lbl_device_caption.configure(text="")
+            return
+
+        path = Path(image_path)
+        key = f"{path.resolve()}:{max_width}"
+        photo = self._device_photo_cache.get(key)
+        if photo is None:
+            if not path.is_file():
+                self.set_device_graphic(None)
+                return
+            try:
+                raw = PhotoImage(file=str(path))
+                # Downscale large PNGs to fit the left column.
+                factor = max(1, int(raw.width() / max_width))
+                photo = raw.subsample(factor, factor) if factor > 1 else raw
+                self._device_photo_cache[key] = photo
+            except Exception:
+                self.set_device_graphic(None)
+                return
+
+        self._device_photo = photo  # prevent GC
+        self.lbl_device_graphic.configure(image=photo)
+        self.lbl_device_caption.configure(text=caption or "")
 
     def mainloop(self) -> None:
         self.root.mainloop()

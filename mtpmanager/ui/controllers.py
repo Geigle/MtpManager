@@ -4,14 +4,18 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from tkinter import END, NORMAL, filedialog, messagebox
 
 from mtpmanager.app import device_ops
 from mtpmanager.app.scan_library import scan_library
 from mtpmanager.app.transfer import transfer_track, transfer_tracks
+from mtpmanager.domain.device_profile import DeviceProfile, match_device_profile
+from mtpmanager.domain.device_profiles import BUILTIN_PROFILES
 from mtpmanager.domain.library import Library
-from mtpmanager.domain.models import Track
+from mtpmanager.domain.models import DeviceInfo, Track
 from mtpmanager.infra.cmd_transport import CmdTransport
+from mtpmanager.infra.device_assets import device_graphic_path
 from mtpmanager.infra.ffmpeg_transcode import FFmpegTranscoder
 from mtpmanager.infra.library_index import load_library_index, save_library_index
 from mtpmanager.infra.logging_setup import start_transfer_log, stop_transfer_log
@@ -27,6 +31,9 @@ logger = logging.getLogger(__name__)
 # Insert this many listbox rows per idle slice to keep the UI responsive.
 _LISTBOX_CHUNK = 100
 
+# Experimental auto-connect poll interval (ms).
+_DEVICE_POLL_MS = 3000
+
 
 class AppController:
     def __init__(self, window: MainWindow, device: PymtpDevice | None = None):
@@ -38,6 +45,11 @@ class AppController:
         self._library_busy = False
         self._transfer_busy = False
         self._populate_after_id: str | None = None
+        self._device_poll_after_id: str | None = None
+        self._device_poll_gen = 0
+        self._device_connect_inflight = False
+        self._logged_no_device = False
+        self._active_profile: DeviceProfile | None = None
         self._wire()
         # Defer restore so mainloop can start before any index I/O.
         self.win.root.after(0, self._start_index_restore)
@@ -249,18 +261,169 @@ class AppController:
             mode,
             "CMD" if mode == "stable" else "PyMTP",
         )
+        if mode == "experimental":
+            self._start_device_poll()
+        else:
+            # Stable (mtp-sendtr) fails if a PyMTP session is already open.
+            self._stop_device_poll()
+            self._disconnect_for_stable()
 
+    def _start_device_poll(self) -> None:
+        """Begin Experimental auto-connect polling (immediate + every 3s)."""
+        self._stop_device_poll(cancel_only=True)
+        self._device_poll_gen += 1
+        self._experimental_device_tick(self._device_poll_gen)
+
+    def _stop_device_poll(self, *, cancel_only: bool = False) -> None:
+        self._device_poll_gen += 1
+        if self._device_poll_after_id is not None:
+            try:
+                self.win.root.after_cancel(self._device_poll_after_id)
+            except Exception:
+                pass
+            self._device_poll_after_id = None
+        if not cancel_only:
+            # Leaving Experimental: clear art; disconnect handled separately.
+            pass
+
+    def _schedule_device_poll(self, gen: int) -> None:
+        if gen != self._device_poll_gen:
+            return
+        if self.win.active_mode() != "experimental":
+            return
+        self._device_poll_after_id = self.win.root.after(
+            _DEVICE_POLL_MS,
+            lambda: self._experimental_device_tick(gen),
+        )
+
+    def _experimental_device_tick(self, gen: int) -> None:
+        """Quiet auto-connect attempt while Experimental is active."""
+        if gen != self._device_poll_gen:
+            return
+        if self.win.active_mode() != "experimental":
+            return
+
+        # Avoid racing libmtp during library/transfer work.
+        if self._library_busy or self._transfer_busy or self._device_connect_inflight:
+            self._schedule_device_poll(gen)
+            return
+
+        if self.device.is_connected():
+            if self._active_profile is None:
+                self._refresh_connected_profile()
+            self._schedule_device_poll(gen)
+            return
+
+        # Not connected: try in background (silent on failure).
+        self._device_connect_inflight = True
+        local_gen = gen
+
+        def work() -> DeviceInfo | None:
+            try:
+                device_ops.connect(self.device)
+                return device_ops.get_device_info(self.device)
+            except Exception:
+                return None
+
+        def on_done(info: DeviceInfo | None) -> None:
+            self._device_connect_inflight = False
+            stale = (
+                local_gen != self._device_poll_gen
+                or self.win.active_mode() != "experimental"
+            )
+            if stale:
+                # Drop a session opened after the user left Experimental / cancelled.
+                if self.win.active_mode() != "experimental" and self.device.is_connected():
+                    try:
+                        device_ops.disconnect(self.device)
+                    except Exception:
+                        pass
+                return
+            if info is not None:
+                self._logged_no_device = False
+                self._apply_device_profile(info)
+            else:
+                self._note_no_device()
+                self._clear_device_profile()
+            self._schedule_device_poll(local_gen)
+
+        def on_error(_exc: BaseException) -> None:
+            self._device_connect_inflight = False
+            if (
+                local_gen != self._device_poll_gen
+                or self.win.active_mode() != "experimental"
+            ):
+                return
+            self._note_no_device()
+            self._clear_device_profile()
+            self._schedule_device_poll(local_gen)
+
+        def runner() -> None:
+            try:
+                result = work()
+                self.win.root.after(0, lambda: on_done(result))
+            except BaseException as exc:
+                self.win.root.after(0, lambda e=exc: on_error(e))
+
+        threading.Thread(
+            target=runner, name="mtpmanager-device-poll", daemon=True
+        ).start()
+
+    def _note_no_device(self) -> None:
+        if not self._logged_no_device:
+            logger.info("Experimental auto-connect: no MTP device available")
+            self._logged_no_device = True
+
+    def _refresh_connected_profile(self) -> None:
+        try:
+            info = device_ops.get_device_info(self.device)
+        except Exception:
+            self._clear_device_profile()
+            return
+        self._apply_device_profile(info)
+
+    def _apply_device_profile(self, info: DeviceInfo) -> None:
+        profile = match_device_profile(info, BUILTIN_PROFILES)
+        self._active_profile = profile
+        path = device_graphic_path(profile.graphic_filename)
+        self.win.set_device_graphic(path, caption=profile.display_name)
+        logger.info(
+            "Device profile %s (%s) manufacturer=%r model=%r",
+            profile.id,
+            profile.display_name,
+            info.manufacturer,
+            info.model,
+        )
+
+    def _clear_device_profile(self) -> None:
+        self._active_profile = None
+        self.win.set_device_graphic(None)
+
+    def _disconnect_for_stable(self) -> None:
+        """Drop PyMTP session so Stable mtp-sendtr can claim the device."""
+        self._clear_device_profile()
+        if not self.device.is_connected():
+            return
+        try:
+            device_ops.disconnect(self.device)
+            logger.info("Disconnected PyMTP session for Stable Mode")
+        except Exception:
+            logger.exception("Disconnect for Stable Mode failed")
 
     def on_connect(self) -> None:
         try:
             device_ops.connect(self.device)
+            self._logged_no_device = False
+            self._refresh_connected_profile()
         except Exception as e:
             logger.exception("Connect failed")
             messagebox.showerror("Connect", str(e))
 
-
     def on_disconnect(self) -> None:
         device_ops.disconnect(self.device)
+        self._clear_device_profile()
+        # Allow one log line if auto-connect fails again after unplug.
+        self._logged_no_device = False
 
 
     def on_device_info(self) -> None:
