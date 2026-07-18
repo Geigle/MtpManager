@@ -13,6 +13,7 @@ libmtp (1.1.x) and Apple Silicon / Python 3:
   * create_folder / set_devicename pass Python str without c_char_p argtypes
     (arm64/Py3: often only the first character is stored on the device)
   * get_filelisting linked-list walk (NULL-safe) + filelisting callback argtypes
+  * delete_object argtypes + device-pointer path (LIBMTP_Delete_Object)
 
 Living catalog of failure classes and *predicted* next breaks:
   docs/pymtp-binding-hazards.md
@@ -180,6 +181,11 @@ def _configure_libmtp_ctypes() -> None:
             ctypes.c_void_p,
         ]
         lib.LIBMTP_Get_Filelisting_With_Callback.restype = file_p
+
+    # int LIBMTP_Delete_Object(LIBMTP_mtpdevice_t *, uint32_t object_id)
+    if hasattr(lib, "LIBMTP_Delete_Object"):
+        lib.LIBMTP_Delete_Object.argtypes = [dev_p, ctypes.c_uint32]
+        lib.LIBMTP_Delete_Object.restype = ctypes.c_int
 
 
 _configure_libmtp_ctypes()
@@ -434,6 +440,27 @@ def _set_devicename(self, name):
     return ret
 
 
+def _delete_object(self, object_id):
+    """Delete one object by id with typed device/object args (arm64-safe).
+
+    Stock passes the raw device struct and an untyped int into
+    ``LIBMTP_Delete_Object``. No ``char*`` risk, but missing argtypes still
+    matter on arm64; use the same device-pointer path as other patched calls.
+    """
+    if self.device is None:
+        raise NotConnected
+
+    dev = _device_ptr(self.device)
+    if not dev:
+        raise NotConnected
+
+    ret = self.mtp.LIBMTP_Delete_Object(dev, ctypes.c_uint32(int(object_id)))
+    if ret != 0:
+        _debug_stack(self)
+        raise CommandFailed
+    return ret
+
+
 # Monkey-patch stock methods so all callers get the fixed behavior.
 _MTP.debug_stack = _debug_stack
 _MTP.send_track_from_file = _send_track_from_file
@@ -442,3 +469,4 @@ _MTP.get_parent_folders = _get_parent_folders
 _MTP.get_filelisting = _get_filelisting
 _MTP.create_folder = _create_folder
 _MTP.set_devicename = _set_devicename
+_MTP.delete_object = _delete_object

@@ -106,6 +106,30 @@ class PymtpFileListingTests(unittest.TestCase):
         self.assertIs(fn.argtypes[1], ctypes.c_void_p)
 
 
+class PymtpDeleteObjectTests(unittest.TestCase):
+    """Experimental Delete Track uses patched delete_object."""
+
+    def test_delete_object_is_patched(self) -> None:
+        self.assertIs(pymtp.MTP.delete_object, pymtp._delete_object)
+        src = inspect.getsource(pymtp.MTP.delete_object)
+        self.assertIn("_device_ptr", src)
+        self.assertIn("LIBMTP_Delete_Object", src)
+
+    def test_delete_object_requires_connection(self) -> None:
+        mtp = pymtp.MTP()
+        with self.assertRaises(pymtp.NotConnected):
+            mtp.delete_object(1234)
+
+    def test_delete_object_argtypes(self) -> None:
+        import ctypes
+
+        fn = pymtp._pymtp._libmtp.LIBMTP_Delete_Object
+        self.assertEqual(len(fn.argtypes), 2)
+        self.assertIs(fn.argtypes[0], ctypes.c_void_p)
+        self.assertIs(fn.argtypes[1], ctypes.c_uint32)
+        self.assertEqual(fn.restype, ctypes.c_int)
+
+
 class FileLineFormatTests(unittest.TestCase):
     def test_file_line(self) -> None:
         from mtpmanager.domain.models import FileEntry

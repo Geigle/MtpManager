@@ -39,6 +39,7 @@ from mtpmanager.ports.transport import TransportError
 from mtpmanager.ui.bg import TkBackgroundRunner
 from mtpmanager.ui.dialogs import (
     ask_text,
+    pick_file_entry_dialog,
     show_config_dialog,
     show_device_info_dialog,
     show_file_list_dialog,
@@ -110,6 +111,7 @@ class AppController:
             on_create_folder=self.action_create_folder,
             on_list_folders=self.action_read_folder_list,
             on_list_files=self.action_read_file_list,
+            on_delete_track=self.action_delete_track,
             on_get_file_info=self.action_get_file_info,
             on_delete_all=self.action_delete_all_tracks,
         )
@@ -1450,6 +1452,42 @@ class AppController:
         if len(files) > 50:
             logger.debug("… %d more file(s) not logged at DEBUG", len(files) - 50)
         show_file_list_dialog(self.win.root, files)
+
+    def action_delete_track(self) -> None:
+        """Experimental Device → Delete Track: pick from file listing, delete by id."""
+        if not self._require_device_ready():
+            return
+        try:
+            files = device_ops.list_files(self.device)
+        except Exception as e:
+            logger.exception("Delete track listing failed")
+            messagebox.showerror("Delete Track", str(e))
+            return
+        if not files:
+            messagebox.showinfo(
+                "Delete Track",
+                "No objects found on the device.",
+            )
+            return
+        logger.info("Delete Track (experimental): %d object(s) listed", len(files))
+        entry = pick_file_entry_dialog(self.win.root, files)
+        if entry is None:
+            return
+        try:
+            device_ops.delete_object(self.device, entry.item_id)
+        except TransportError as e:
+            logger.exception("Delete track failed id=%s", entry.item_id)
+            messagebox.showerror("Delete Track", str(e))
+            return
+        except Exception as e:
+            logger.exception("Delete track failed id=%s", entry.item_id)
+            messagebox.showerror("Delete Track", str(e))
+            return
+        name = (entry.name or "").strip() or "(unnamed)"
+        messagebox.showinfo(
+            "Delete Track",
+            f"Deleted object id={entry.item_id}\n{name}",
+        )
 
     def action_delete_all_tracks(self) -> None:
         """Stub: lists storage ids only (same as previous incomplete behavior)."""

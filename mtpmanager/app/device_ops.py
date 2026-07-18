@@ -40,5 +40,10 @@ def list_files(device: DevicePort) -> list[FileEntry]:
     return device.list_files()
 
 
+def delete_object(device: DevicePort, object_id: int) -> None:
+    """Experimental single-object delete (Device → Delete Track)."""
+    device.delete_object(int(object_id))
+
+
 def send_test_file(device: DevicePort, path: str) -> None:
     device.send_file(path)

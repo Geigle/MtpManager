@@ -268,3 +268,119 @@ def show_file_list_dialog(parent, files: list) -> None:
     Button(body, text="Close", command=dlg.destroy).pack(anchor="e")
     dlg.grab_set()
     parent.wait_window(dlg)
+
+
+def pick_file_entry_dialog(parent, files: list):
+    """Modal picker over a file listing; returns selected FileEntry or None.
+
+    Used by Device → Delete Track (experimental): list comes from
+    get_filelisting / list_files; caller deletes by entry.item_id.
+    """
+    from tkinter import BOTH, END, LEFT, RIGHT, Y, Listbox, Scrollbar
+
+    from mtpmanager.domain.models import FileEntry
+    from mtpmanager.ui.formatting import file_line
+
+    entries = list(files or [])
+    result: list[FileEntry | None] = [None]
+
+    dlg = Toplevel(parent)
+    dlg.title("Delete Track (experimental)")
+    dlg.transient(parent)
+    dlg.geometry("720x420")
+
+    body = Frame(dlg, padx=10, pady=10)
+    body.pack(fill=BOTH, expand=True)
+    Label(
+        body,
+        text=(
+            f"{len(entries)} object(s) — select one to delete by object id. "
+            "Folders and system objects are included; choose carefully."
+        ),
+        wraplength=680,
+        justify=LEFT,
+    ).pack(anchor="w")
+
+    list_frame = Frame(body)
+    list_frame.pack(fill=BOTH, expand=True, pady=(6, 8))
+    yscroll = Scrollbar(list_frame)
+    yscroll.pack(side=RIGHT, fill=Y)
+    xscroll = Scrollbar(list_frame, orient="horizontal")
+    xscroll.pack(side="bottom", fill="x")
+    lb = Listbox(
+        list_frame,
+        yscrollcommand=yscroll.set,
+        xscrollcommand=xscroll.set,
+        exportselection=False,
+    )
+    try:
+        lb.configure(font=("Menlo", 11))
+    except Exception:
+        try:
+            lb.configure(font=("Courier", 11))
+        except Exception:
+            pass
+    lb.pack(side=LEFT, fill=BOTH, expand=True)
+    yscroll.config(command=lb.yview)
+    xscroll.config(command=lb.xview)
+    for entry in entries:
+        lb.insert(END, file_line(entry))
+
+    btn_row = Frame(body)
+    btn_row.pack(fill="x")
+
+    def on_cancel() -> None:
+        result[0] = None
+        dlg.destroy()
+
+    def on_delete() -> None:
+        sel = lb.curselection()
+        if not sel:
+            messagebox.showinfo(
+                "Delete Track",
+                "Select an object from the list first.",
+                parent=dlg,
+            )
+            return
+        idx = int(sel[0])
+        if idx < 0 or idx >= len(entries):
+            return
+        entry = entries[idx]
+        name = (entry.name or "").strip() or "(unnamed)"
+        if not messagebox.askyesno(
+            "Confirm Delete",
+            (
+                f"Delete object id={entry.item_id}?\n\n"
+                f"{name}\n"
+                f"parent={entry.parent_id}  type={entry.filetype}\n\n"
+                "This cannot be undone from the app."
+            ),
+            parent=dlg,
+        ):
+            return
+        result[0] = entry
+        dlg.destroy()
+
+    Button(btn_row, text="Cancel", width=10, command=on_cancel).pack(
+        side=RIGHT, padx=(6, 0)
+    )
+    Button(btn_row, text="Delete…", width=10, command=on_delete).pack(side=RIGHT)
+
+    def on_double(_event=None) -> None:
+        on_delete()
+
+    lb.bind("<Double-Button-1>", on_double)
+    dlg.protocol("WM_DELETE_WINDOW", on_cancel)
+    dlg.grab_set()
+    try:
+        px = parent.winfo_rootx() + max(0, (parent.winfo_width() - 720) // 2)
+        py = parent.winfo_rooty() + max(0, (parent.winfo_height() - 420) // 3)
+        dlg.geometry(f"+{px}+{py}")
+    except Exception:
+        pass
+    if entries:
+        lb.selection_set(0)
+        lb.activate(0)
+        lb.focus_set()
+    parent.wait_window(dlg)
+    return result[0]

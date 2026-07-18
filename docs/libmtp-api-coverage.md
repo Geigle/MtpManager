@@ -36,8 +36,10 @@ Rough scale (1.1.23): ~120 exported `LIBMTP_*` ops → ~34 pymtp high-level meth
 | Create folder | `create_folder` → `LIBMTP_Create_Folder` | `pymtp_wrapper._create_folder` |
 | Set friendly name | `set_devicename` → `LIBMTP_Set_Friendlyname` | `pymtp_wrapper._set_devicename` |
 | Error dump | `debug_stack` → `LIBMTP_Dump_Errorstack` | `pymtp_wrapper._debug_stack` |
+| File listing | `get_filelisting` → `LIBMTP_Get_Filelisting_With_Callback` | `pymtp_wrapper._get_filelisting`; Device → **List Files** / **Delete Track** picker |
+| Single-object delete | `delete_object` → `LIBMTP_Delete_Object` | `pymtp_wrapper._delete_object` + argtypes; Device → **Delete Track (experimental)** |
 | Filetype enum | `LIBMTP_Filetype` / `find_filetype` table | Mutated in place (`FOLDER=0`, `MP3=2`, …) |
-| ctypes argtypes (selected) | Send track/file, errorstack get/clear, storage, folders, create, friendly name | `_configure_libmtp_ctypes` |
+| ctypes argtypes (selected) | Send track/file, errorstack get/clear, storage, folders, create, friendly name, filelisting, delete | `_configure_libmtp_ctypes` |
 
 Domain contract for send (parent 100 / artist folder id, storage `0x00010001`, short basename) is **app** code (`remote_naming`, `pymtp_device`, `cmd_transport`), not libmtp itself.
 
@@ -50,7 +52,6 @@ Domain contract for send (parent 100 / artist folder id, storage `0x00010001`, s
 | Capacity | `get_freespace`, `get_totalspace`, `get_usedspace`, `get_usedspace_percent` | Walks storage; multi-storage may be wrong |
 | Filetype guess | `find_filetype` | Table fixed; method body stock |
 | Track list | `get_tracklisting` | Used by Delete All stub listing |
-| File listing | `get_filelisting` → `LIBMTP_Get_Filelisting_With_Callback` | **Used + patched** (NULL-safe walk, argtypes); Device → **List Files (experimental)** |
 | File meta | `get_file_metadata` | Get File Info UI (hard-coded id) |
 | Generic file send | `send_file_from_file` | **Not** product-hardened like track send; residual string/argtypes risk |
 | Storage refresh | `LIBMTP_Get_Storage` (direct ctypes in `send_track`) | Argtypes set in wrapper |
@@ -59,7 +60,7 @@ Domain contract for send (parent 100 / artist folder id, storage `0x00010001`, s
 
 | UI / entry | Gap |
 |------------|-----|
-| **Device → Delete All Tracks…** | Lists track storage ids only; never calls `LIBMTP_Delete_Object` / `delete_object` |
+| **Device → Delete All Tracks…** | Lists track storage ids only; never batch-calls `delete_object` |
 | **Device → Get File Info…** | Hard-coded object id `2654`; not a picker |
 
 ---
@@ -71,7 +72,6 @@ Callable on `pymtp.MTP`; no finished MtpManager feature (or only stub):
 | pymtp method | Typical libmtp symbol | Likely product use |
 |--------------|----------------------|--------------------|
 | `detect_devices` | `LIBMTP_Detect_Raw_Devices` | Multi-device chooser |
-| `delete_object` | `LIBMTP_Delete_Object` | Real delete / delete-all |
 | `get_file_to_file` | `LIBMTP_Get_File_To_File` | Download file → host |
 | `get_track_to_file` | `LIBMTP_Get_Track_To_File` | Download track → host |
 | `get_track_metadata` | `LIBMTP_Get_Trackmetadata` | Single-object inspector |
@@ -170,7 +170,7 @@ CMD path historically **hangs** on album association after send; pure album APIs
 
 Not every libmtp symbol matters. For this app’s goals, the meaningful “not done” set is:
 
-1. **Delete object(s)** — `Delete_Object` (finish Delete All / per-track delete)  
+1. **Delete all / batch delete** — single-object path exists (`Delete Track`); batch Delete All still open  
 2. **Download** track/file to host — `Get_*_To_File`  
 3. ~~**Full file listing**~~ — **partial:** Device → List Files (experimental) uses patched `get_filelisting`; hierarchical browser / `Get_Files_And_Folders` still open  
 4. **Playlists** — list / create / update (pymtp exists; unpatched; unused)  

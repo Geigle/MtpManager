@@ -235,6 +235,41 @@ class PymtpDevice:
         result.sort(key=lambda e: (e.parent_id, e.name.casefold(), e.item_id))
         return result
 
+    def delete_object(self, object_id: int) -> None:
+        """Experimental: delete one object via patched delete_object."""
+        oid = int(object_id)
+        if oid <= 0:
+            raise ValueError(f"Invalid object id: {object_id}")
+        logger.info("delete_object id=%s", oid)
+        try:
+            self._mtp.delete_object(oid)
+        except pymtp.NotConnected as exc:
+            raise TransportError(
+                "PyMTP delete failed: device not connected. "
+                "Use Device → Connect first.",
+                fatal=True,
+            ) from exc
+        except pymtp.CommandFailed as exc:
+            try:
+                self._mtp.debug_stack()
+            except Exception:
+                logger.debug("Could not dump libmtp error stack", exc_info=True)
+            stack_text = _collect_errorstack(self._mtp)
+            detail = str(exc).strip() or "CommandFailed"
+            logger.error(
+                "PyMTP delete_object failed id=%s detail=%s\n%s",
+                oid,
+                detail,
+                stack_text or "(no libmtp errorstack text)",
+            )
+            raise TransportError(
+                f"PyMTP delete failed ({detail}) for object id={oid}. "
+                "Session may be poisoned — disconnect/replug, or use "
+                "Config → Stable Mode for transfers.",
+                fatal=True,
+            ) from exc
+        logger.info("delete_object ok id=%s", oid)
+
     def send_file(self, path: str, remote_name: str | None = None) -> None:
         keep: list[bytes] = []
         fname = remote_name or "000_TEST_FILE.mp3"

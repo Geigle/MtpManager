@@ -208,7 +208,7 @@ Keep this table in sync when adding monkey-patches:
 | `send_file_from_file` | **Not fully replaced** (argtypes partial via Send_File) | C, D residual |
 | Playlist APIs | **Untouched** | D, C predicted |
 | Download to file | **Untouched** | D, C predicted |
-| Delete object | **Untouched** (likely OK) | G residual |
+| `delete_object` | Replaced (argtypes + device ptr) | C, G residual |
 
 ---
 
