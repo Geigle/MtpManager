@@ -7,7 +7,13 @@ import logging
 import os
 
 import mtpmanager.infra.pymtp_wrapper as pymtp
-from mtpmanager.domain.models import DeviceInfo, FileEntry, FolderEntry, TrackMetadata
+from mtpmanager.domain.models import (
+    DeviceInfo,
+    DeviceTrackInfo,
+    FileEntry,
+    FolderEntry,
+    TrackMetadata,
+)
 from mtpmanager.infra.remote_naming import (
     DEFAULT_MUSIC_FOLDER_ID,
     DEFAULT_STORAGE_ID,
@@ -339,6 +345,85 @@ class PymtpDevice:
             entry.filesize,
         )
         return entry
+
+    def get_track_metadata(self, object_id: int) -> DeviceTrackInfo:
+        """Experimental: on-device track tags via patched get_track_metadata."""
+        oid = int(object_id)
+        if oid <= 0:
+            raise ValueError(f"Invalid object id: {object_id}")
+        logger.info("get_track_metadata id=%s", oid)
+        try:
+            node = self._mtp.get_track_metadata(oid)
+        except pymtp.NotConnected as exc:
+            raise TransportError(
+                "PyMTP get track info failed: device not connected. "
+                "Use Device → Connect first.",
+                fatal=True,
+            ) from exc
+        except pymtp.ObjectNotFound as exc:
+            stack_text = _collect_errorstack(self._mtp)
+            logger.warning(
+                "get_track_metadata ObjectNotFound id=%s "
+                "(not a track, missing handle, or property path failed)\n%s",
+                oid,
+                stack_text or "(no libmtp errorstack text)",
+            )
+            raise TransportError(
+                f"No track metadata for object id={oid}. "
+                "Object may not be a music/video track, or the device "
+                "returned no track properties.",
+                fatal=False,
+            ) from exc
+        except pymtp.CommandFailed as exc:
+            try:
+                self._mtp.debug_stack()
+            except Exception:
+                logger.debug("Could not dump libmtp error stack", exc_info=True)
+            stack_text = _collect_errorstack(self._mtp)
+            detail = str(exc).strip() or "CommandFailed"
+            logger.error(
+                "PyMTP get_track_metadata failed id=%s detail=%s\n%s",
+                oid,
+                detail,
+                stack_text or "(no libmtp errorstack text)",
+            )
+            raise TransportError(
+                f"PyMTP get track info failed ({detail}) for object id={oid}.",
+                fatal=True,
+            ) from exc
+
+        info = DeviceTrackInfo(
+            item_id=int(getattr(node, "item_id", 0) or 0),
+            name=_decode(getattr(node, "filename", None)),
+            parent_id=int(getattr(node, "parent_id", 0) or 0),
+            storage_id=int(getattr(node, "storage_id", 0) or 0),
+            filesize=int(getattr(node, "filesize", 0) or 0),
+            filetype=int(getattr(node, "filetype", 0) or 0),
+            modificationdate=int(getattr(node, "modificationdate", 0) or 0),
+            title=_decode(getattr(node, "title", None)),
+            artist=_decode(getattr(node, "artist", None)),
+            album=_decode(getattr(node, "album", None)),
+            genre=_decode(getattr(node, "genre", None)),
+            composer=_decode(getattr(node, "composer", None)),
+            date=_decode(getattr(node, "date", None)),
+            tracknumber=int(getattr(node, "tracknumber", 0) or 0),
+            duration_ms=int(getattr(node, "duration", 0) or 0),
+            sample_rate=int(getattr(node, "samplerate", 0) or 0),
+            channels=int(getattr(node, "nochannels", 0) or 0),
+            bitrate=int(getattr(node, "bitrate", 0) or 0),
+            bitrate_type=int(getattr(node, "bitratetype", 0) or 0),
+            rating=int(getattr(node, "rating", 0) or 0),
+            usecount=int(getattr(node, "usecount", 0) or 0),
+        )
+        logger.debug(
+            "get_track_metadata ok id=%s name=%r title=%r artist=%r album=%r",
+            info.item_id,
+            info.name,
+            info.title,
+            info.artist,
+            info.album,
+        )
+        return info
 
     def send_file(self, path: str, remote_name: str | None = None) -> None:
         keep: list[bytes] = []

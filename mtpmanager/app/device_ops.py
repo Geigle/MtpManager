@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from mtpmanager.domain.models import DeviceInfo, FileEntry, FolderEntry
+from mtpmanager.domain.models import DeviceInfo, DeviceTrackInfo, FileEntry, FolderEntry
 from mtpmanager.infra.remote_naming import DEFAULT_MUSIC_FOLDER_ID
 from mtpmanager.ports.device import DevicePort
 
@@ -48,6 +48,11 @@ def delete_object(device: DevicePort, object_id: int) -> None:
 def get_file_metadata(device: DevicePort, object_id: int) -> FileEntry:
     """Experimental single-object metadata (Device → Get File Info)."""
     return device.get_file_metadata(int(object_id))
+
+
+def get_track_metadata(device: DevicePort, object_id: int) -> DeviceTrackInfo:
+    """Experimental on-device track tags (Device → Get Track Info)."""
+    return device.get_track_metadata(int(object_id))
 
 
 def send_test_file(device: DevicePort, path: str) -> None:

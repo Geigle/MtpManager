@@ -15,6 +15,7 @@ libmtp (1.1.x) and Apple Silicon / Python 3:
   * get_filelisting linked-list walk (NULL-safe) + filelisting callback argtypes
   * delete_object argtypes + device-pointer path (LIBMTP_Delete_Object)
   * get_file_metadata argtypes + device-pointer path (LIBMTP_Get_Filemetadata)
+  * get_track_metadata argtypes + snapshot + destroy_track_t (LIBMTP_Get_Trackmetadata)
 
 Living catalog of failure classes and *predicted* next breaks:
   docs/pymtp-binding-hazards.md
@@ -28,6 +29,7 @@ import ctypes
 import ctypes.util
 import os
 import sys
+import types
 
 if sys.platform == "darwin" and ctypes.util.find_library("mtp") is None:
     _orig_find_library = ctypes.util.find_library
@@ -192,6 +194,15 @@ def _configure_libmtp_ctypes() -> None:
     if hasattr(lib, "LIBMTP_Get_Filemetadata"):
         lib.LIBMTP_Get_Filemetadata.argtypes = [dev_p, ctypes.c_uint32]
         lib.LIBMTP_Get_Filemetadata.restype = file_p
+
+    # LIBMTP_track_t *LIBMTP_Get_Trackmetadata(dev, uint32_t trackid)
+    if hasattr(lib, "LIBMTP_Get_Trackmetadata"):
+        lib.LIBMTP_Get_Trackmetadata.argtypes = [dev_p, ctypes.c_uint32]
+        lib.LIBMTP_Get_Trackmetadata.restype = track_p
+
+    if hasattr(lib, "LIBMTP_destroy_track_t"):
+        lib.LIBMTP_destroy_track_t.argtypes = [track_p]
+        lib.LIBMTP_destroy_track_t.restype = None
 
 
 _configure_libmtp_ctypes()
@@ -498,6 +509,81 @@ def _get_file_metadata(self, file_id):
         raise ObjectNotFound from exc
 
 
+def _c_str_field(value) -> str:
+    """Decode a libmtp ``char *`` field into a Python str."""
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
+def _snapshot_track(node) -> types.SimpleNamespace:
+    """Copy LIBMTP_Track fields into a plain Python object (safe after destroy)."""
+    return types.SimpleNamespace(
+        item_id=int(getattr(node, "item_id", 0) or 0),
+        parent_id=int(getattr(node, "parent_id", 0) or 0),
+        storage_id=int(getattr(node, "storage_id", 0) or 0),
+        title=_c_str_field(getattr(node, "title", None)),
+        artist=_c_str_field(getattr(node, "artist", None)),
+        composer=_c_str_field(getattr(node, "composer", None)),
+        genre=_c_str_field(getattr(node, "genre", None)),
+        album=_c_str_field(getattr(node, "album", None)),
+        date=_c_str_field(getattr(node, "date", None)),
+        filename=_c_str_field(getattr(node, "filename", None)),
+        tracknumber=int(getattr(node, "tracknumber", 0) or 0),
+        duration=int(getattr(node, "duration", 0) or 0),
+        samplerate=int(getattr(node, "samplerate", 0) or 0),
+        nochannels=int(getattr(node, "nochannels", 0) or 0),
+        wavecodec=int(getattr(node, "wavecodec", 0) or 0),
+        bitrate=int(getattr(node, "bitrate", 0) or 0),
+        bitratetype=int(getattr(node, "bitratetype", 0) or 0),
+        rating=int(getattr(node, "rating", 0) or 0),
+        usecount=int(getattr(node, "usecount", 0) or 0),
+        filesize=int(getattr(node, "filesize", 0) or 0),
+        modificationdate=int(getattr(node, "modificationdate", 0) or 0),
+        filetype=int(getattr(node, "filetype", 0) or 0),
+    )
+
+
+def _get_track_metadata(self, track_id):
+    """Return one track metadata snapshot with typed args; free the C track.
+
+    Stock passes untyped device/id into ``LIBMTP_Get_Trackmetadata`` and keeps
+    the C-allocated ``LIBMTP_track_t`` (string leaks). We snapshot fields into
+    Python and call ``LIBMTP_destroy_track_t``.
+
+    Unlike Get_Filemetadata, libmtp only *requires* ObjectInfo for the handle;
+    tags are filled via proplist cache or per-property GETs. Still USB-heavy —
+    do not call in a tight loop. Non-track objects return NULL → ObjectNotFound.
+    """
+    if self.device is None:
+        raise NotConnected
+
+    dev = _device_ptr(self.device)
+    if not dev:
+        raise NotConnected
+
+    ret = self.mtp.LIBMTP_Get_Trackmetadata(dev, ctypes.c_uint32(int(track_id)))
+    if not _ptr_truthy(ret):
+        _debug_stack(self)
+        raise ObjectNotFound
+    try:
+        try:
+            node = ret.contents
+        except (ValueError, TypeError) as exc:
+            _debug_stack(self)
+            raise ObjectNotFound from exc
+        return _snapshot_track(node)
+    finally:
+        destroy = getattr(self.mtp, "LIBMTP_destroy_track_t", None)
+        if destroy is not None:
+            try:
+                destroy(ret)
+            except Exception:
+                pass
+
+
 # Monkey-patch stock methods so all callers get the fixed behavior.
 _MTP.debug_stack = _debug_stack
 _MTP.send_track_from_file = _send_track_from_file
@@ -508,3 +594,4 @@ _MTP.create_folder = _create_folder
 _MTP.set_devicename = _set_devicename
 _MTP.delete_object = _delete_object
 _MTP.get_file_metadata = _get_file_metadata
+_MTP.get_track_metadata = _get_track_metadata

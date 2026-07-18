@@ -45,6 +45,7 @@ from mtpmanager.ui.dialogs import (
     show_file_info_dialog,
     show_file_list_dialog,
     show_folder_list_dialog,
+    show_track_info_dialog,
 )
 from mtpmanager.ui.window import MainWindow
 
@@ -113,6 +114,7 @@ class AppController:
             on_list_folders=self.action_read_folder_list,
             on_list_files=self.action_read_file_list,
             on_delete_track=self.action_delete_track,
+            on_get_track_info=self.action_get_track_info,
             on_get_file_info=self.action_get_file_info,
             on_delete_all=self.action_delete_all_tracks,
         )
@@ -1595,3 +1597,112 @@ class AppController:
                 "when MTP property-list refresh fails; object is still listed)."
             )
         show_file_info_dialog(self.win.root, meta, note=note)
+
+    def action_get_track_info(self) -> None:
+        """Experimental Device → Get Track Info: pick audio-ish object, fetch tags."""
+        if not self._require_device_ready():
+            return
+        try:
+            files = device_ops.list_files(self.device)
+        except Exception as e:
+            logger.exception("Get track info listing failed")
+            messagebox.showerror("Track Info", str(e))
+            return
+        # Prefer objects that look like tracks (audio/video filetypes or
+        # common extensions). Folders and non-media still appear if nothing
+        # matches — libmtp will reject non-tracks with ObjectNotFound.
+        candidates = [e for e in files if _looks_like_track(e)]
+        pool = candidates if candidates else list(files or [])
+        if not pool:
+            messagebox.showinfo(
+                "Track Info",
+                "No objects found on the device.",
+            )
+            return
+        logger.info(
+            "Get Track Info (experimental): %d candidate(s) of %d listed",
+            len(pool),
+            len(files or []),
+        )
+        entry = pick_file_entry_dialog(
+            self.win.root,
+            pool,
+            title="Get Track Info (experimental)",
+            prompt=(
+                "select one track to inspect "
+                "(LIBMTP_Get_Trackmetadata — on-device tags; USB-heavy)."
+            ),
+            action_label="Get Track Info",
+        )
+        if entry is None:
+            return
+        try:
+            info = device_ops.get_track_metadata(self.device, entry.item_id)
+        except TransportError as e:
+            logger.exception("Get track info failed id=%s", entry.item_id)
+            messagebox.showerror("Track Info", str(e))
+            return
+        except Exception as e:
+            logger.exception("Get track info failed id=%s", entry.item_id)
+            messagebox.showerror("Track Info", str(e))
+            return
+        logger.info(
+            "Track Info id=%s name=%r title=%r artist=%r album=%r",
+            info.item_id,
+            info.name,
+            info.title,
+            info.artist,
+            info.album,
+        )
+        show_track_info_dialog(self.win.root, info)
+
+
+# libmtp audio/video-ish filetypes we treat as track candidates in the picker.
+# Values match wrapper LIBMTP_Filetype (libmtp 1.1.x). Unknown/other still
+# allowed if the filtered list is empty.
+_TRACK_FILETYPES = frozenset(
+    {
+        1,  # WAV
+        2,  # MP3
+        3,  # WMA
+        4,  # OGG
+        5,  # AUDIBLE
+        6,  # MP4
+        7,  # UNDEF_AUDIO
+        8,  # WMV
+        9,  # AVI
+        10,  # MPEG
+        11,  # ASF
+        12,  # QT
+        13,  # UNDEF_VIDEO
+        30,  # AAC
+        32,  # FLAC
+        33,  # MP2
+        34,  # M4A
+    }
+)
+_TRACK_EXTS = (
+    ".mp3",
+    ".wma",
+    ".wav",
+    ".ogg",
+    ".flac",
+    ".aac",
+    ".m4a",
+    ".mp4",
+    ".m4b",
+    ".asf",
+    ".wmv",
+    ".avi",
+    ".mpg",
+    ".mpeg",
+)
+
+
+def _looks_like_track(entry) -> bool:
+    """Heuristic for Get Track Info picker (not a hard libmtp gate)."""
+    ft = int(getattr(entry, "filetype", 0) or 0)
+    if ft in _TRACK_FILETYPES:
+        return True
+    name = (getattr(entry, "name", None) or "").strip().lower()
+    return any(name.endswith(ext) for ext in _TRACK_EXTS)

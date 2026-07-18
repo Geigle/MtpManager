@@ -61,7 +61,7 @@ End-to-end send path, Stable vs Experimental behavior, and where to change thing
 |-------------|---------|
 | Right-click track | **Sync this track**, **Sync Album**, **Sync all from Artist** (global format + active mode transport) |
 | **Transfer** menu | **Sync Entire Library** (confirm); **Sync Folder…** (picker + scan + batch) |
-| **Device** menu | Connect, Disconnect, Device Info (only place to edit device name — applied on close if changed), Create Folder…, List Folders, List Files (experimental), Delete Track (experimental; pick from file listing → `delete_object`), Get File Info (experimental; pick → `get_file_metadata`), Delete All Tracks… stub — Experimental only |
+| **Device** menu | Connect, Disconnect, Device Info (only place to edit device name — applied on close if changed), Create Folder…, List Folders, List Files (experimental), Delete Track (experimental; pick from file listing → `delete_object`), Get File Info (experimental; pick → `get_file_metadata`, listing fallback on ZEN), Get Track Info (experimental; pick audio-ish → `get_track_metadata` tags), Delete All Tracks… stub — Experimental only |
 
 Device admin prompts use dialogs (`ui/dialogs.py`); there is no main-window path/name entry.
 

@@ -430,3 +430,34 @@ def show_file_info_dialog(parent, entry, *, note: str | None = None) -> None:
     except Exception:
         pass
     parent.wait_window(dlg)
+
+
+def show_track_info_dialog(parent, info) -> None:
+    """Modal display of on-device track tags (Get Track Info)."""
+    from mtpmanager.ui.formatting import track_metadata_summary
+
+    dlg = Toplevel(parent)
+    dlg.title("Track Info (experimental)")
+    dlg.transient(parent)
+    dlg.resizable(False, False)
+
+    body = Frame(dlg, padx=14, pady=12)
+    body.pack(fill=BOTH, expand=True)
+    Label(
+        body,
+        text=track_metadata_summary(info),
+        justify=LEFT,
+        anchor="w",
+        font=("Menlo", 11),
+    ).pack(anchor="w")
+    Button(body, text="Close", width=10, command=dlg.destroy).pack(
+        anchor="e", pady=(12, 0)
+    )
+    dlg.grab_set()
+    try:
+        px = parent.winfo_rootx() + max(0, (parent.winfo_width() - 460) // 2)
+        py = parent.winfo_rooty() + max(0, (parent.winfo_height() - 420) // 3)
+        dlg.geometry(f"+{px}+{py}")
+    except Exception:
+        pass
+    parent.wait_window(dlg)

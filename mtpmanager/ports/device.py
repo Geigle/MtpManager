@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from mtpmanager.domain.models import DeviceInfo, FileEntry, FolderEntry
+from mtpmanager.domain.models import DeviceInfo, DeviceTrackInfo, FileEntry, FolderEntry
 
 
 class DevicePort(Protocol):
@@ -37,6 +37,10 @@ class DevicePort(Protocol):
 
     def get_file_metadata(self, object_id: int) -> FileEntry:
         """Fetch one object's metadata by id (experimental Get File Info)."""
+        ...
+
+    def get_track_metadata(self, object_id: int) -> DeviceTrackInfo:
+        """Fetch one track's on-device tags by id (experimental Get Track Info)."""
         ...
 
     def send_file(self, path: str, remote_name: str | None = None) -> None: ...

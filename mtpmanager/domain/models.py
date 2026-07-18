@@ -84,3 +84,30 @@ class FileEntry:
     filesize: int = 0
     filetype: int = 0
     modificationdate: int = 0
+
+
+@dataclass(frozen=True)
+class DeviceTrackInfo:
+    """On-device track metadata from LIBMTP_Get_Trackmetadata (experimental)."""
+
+    item_id: int
+    name: str = ""
+    parent_id: int = 0
+    storage_id: int = 0
+    filesize: int = 0
+    filetype: int = 0
+    modificationdate: int = 0
+    title: str = ""
+    artist: str = ""
+    album: str = ""
+    genre: str = ""
+    composer: str = ""
+    date: str = ""
+    tracknumber: int = 0
+    duration_ms: int = 0
+    sample_rate: int = 0
+    channels: int = 0
+    bitrate: int = 0
+    bitrate_type: int = 0
+    rating: int = 0
+    usecount: int = 0

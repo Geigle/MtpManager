@@ -134,7 +134,25 @@ On pure PyMTP send failure: log errorstack, raise `TransportError`, UI points at
 - Wrapper: typed `Get_Filemetadata`; dump errorstack on NULL before `ObjectNotFound`.
 - UI: on non-fatal live failure, show **listing snapshot** with an explicit note (not “object missing”).
 - Do **not** treat this as silent Experimental→CMD fallback; it is the same session’s listing data already fetched for the picker.
-- Optional later: `Get_Trackmetadata` (ObjectInfo-only want) for audio types — still USB-heavy; listing fallback is enough for File Info fields.
+- File Info stays listing-based for shell fields. On-device **tags** are a separate path: Device → **Get Track Info** (`Get_Trackmetadata`).
+
+---
+
+### 8. Get Track Info / `Get_Trackmetadata` — **patched** (C + product)
+
+**Surface:** Device → Get Track Info (experimental). Picker prefers audio/video-ish listing entries; calls patched `get_track_metadata`.
+
+**libmtp behavior:**
+
+- `ptp_object_want(..., OBJECTINFO only)` then fills tags from proplist cache **or** many `GetObjectPropValue` calls (USB-heavy; do not loop).
+- Non-tracks return NULL → `ObjectNotFound` (not a missing handle necessarily).
+- Does **not** hard-require MTPPROPLIST flags the way `Get_Filemetadata` does — better chance on ZEN for ids that fail File Info live refresh, but property GETs can still be empty/slow/noisy.
+
+**Fix:**
+
+- Wrapper: argtypes; snapshot fields into Python; `LIBMTP_destroy_track_t`; dump stack on NULL.
+- Domain: `DeviceTrackInfo`; adapter maps snapshot → model; UI dialog shows tags + stream fields.
+- No silent CMD fallback; no merge into Get File Info.
 
 ---
 
@@ -210,7 +228,7 @@ Do not “fix” those by patching ctypes.
 ---
 
 ## Patch inventory (wrapper today)
-dump + ObjectNotFound); UI listing fallback | C, J
+
 Keep this table in sync when adding monkey-patches:
 
 | Stock surface | Patch status | Classes |
@@ -230,7 +248,8 @@ Keep this table in sync when adding monkey-patches:
 | Playlist APIs | **Untouched** | D, C predicted |
 | Download to file | **Untouched** | D, C predicted |
 | `delete_object` | Replaced (argtypes + device ptr) | C, G residual |
-| `get_file_metadata` | Replaced (argtypes + device ptr; NULL → ObjectNotFound) | C |
+| `get_file_metadata` | Replaced (argtypes + device ptr; NULL → dump + ObjectNotFound); UI listing fallback | C, J |
+| `get_track_metadata` | Replaced (argtypes + snapshot + destroy_track_t; NULL → dump + ObjectNotFound) | C |
 
 ---
 

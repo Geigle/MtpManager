@@ -81,6 +81,7 @@ MENU_LIST_FOLDERS = "List Folders"
 MENU_LIST_FILES = "List Files (experimental)"
 MENU_DELETE_TRACK = "Delete Track (experimental)"
 MENU_GET_FILE_INFO = "Get File Info (experimental)"
+MENU_GET_TRACK_INFO = "Get Track Info (experimental)"
 MENU_DELETE_ALL = "Delete All Tracks…"
 
 # Track context menu
@@ -101,6 +102,7 @@ _DEVICE_MENU_LABELS = (
     MENU_LIST_FILES,
     MENU_DELETE_TRACK,
     MENU_GET_FILE_INFO,
+    MENU_GET_TRACK_INFO,
     MENU_DELETE_ALL,
 )
 
@@ -376,6 +378,7 @@ class MainWindow:
         on_list_files=None,
         on_delete_track=None,
         on_get_file_info,
+        on_get_track_info=None,
         on_delete_all,
     ) -> None:
         self.menu_device.entryconfig(MENU_CONNECT, command=on_connect)
@@ -388,6 +391,10 @@ class MainWindow:
         if on_delete_track is not None:
             self.menu_device.entryconfig(MENU_DELETE_TRACK, command=on_delete_track)
         self.menu_device.entryconfig(MENU_GET_FILE_INFO, command=on_get_file_info)
+        if on_get_track_info is not None:
+            self.menu_device.entryconfig(
+                MENU_GET_TRACK_INFO, command=on_get_track_info
+            )
         self.menu_device.entryconfig(MENU_DELETE_ALL, command=on_delete_all)
     def set_track_context_commands(
         self,
