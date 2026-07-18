@@ -15,11 +15,29 @@ Defaults are **Creative ZEN Vision:M–centric** (VID `041e`, PID `413e`). They 
 
 | Constant | Value | Source |
 |----------|--------|--------|
-| `DEFAULT_MUSIC_FOLDER_ID` | **100** | `mtp-folders`: folder 100 == `"Music"` |
+| `DEFAULT_MUSIC_FOLDER_ID` | **100** | List Folders / `mtp-folders`: folder 100 == `"Music"` |
 | `DEFAULT_STORAGE_ID` | **`0x00010001`** (65537) | `mtp-detect`: Storage Media |
 | `MAX_REMOTE_BASENAME` | **56** | Stay well under ~64-char object-name limits |
 
 These are hardcoded in `remote_naming` and constructor defaults on `CmdTransport` / `PymtpDevice`. **Auto-discovery of folder/storage IDs is future work**, not present today.
+
+### ZEN Vision:M top-level folder IDs (`ZEN_VISION_M_FOLDER_IDS`)
+
+Captured via **Device → List Folders** on a real Creative ZEN Vision:M (same layout as `mtp-folders`). Code: `mtpmanager/infra/remote_naming.py`.
+
+| ID | Name | Notes |
+|----|------|--------|
+| **100** | Music | **Track send parent** (`DEFAULT_MUSIC_FOLDER_ID`) |
+| 104 | My Playlists | |
+| 108 | My Recordings | |
+| 112 | My Organizer | |
+| 116 | Pictures | |
+| 120 | Video | |
+| 124 | TV | |
+| 128 | ZENcast | Podcasts |
+| 132 | My Slideshows | |
+
+Use **numeric IDs**, never string paths like `Music/...`.
 
 ---
 

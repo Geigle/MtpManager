@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from mtpmanager.domain.models import DeviceInfo, FolderEntry
+from mtpmanager.infra.remote_naming import DEFAULT_MUSIC_FOLDER_ID
 from mtpmanager.ports.device import DevicePort
 
 
@@ -22,7 +23,11 @@ def set_device_name(device: DevicePort, name: str) -> None:
     device.set_device_name(name)
 
 
-def create_folder(device: DevicePort, name: str, parent: int = 100) -> None:
+def create_folder(
+    device: DevicePort,
+    name: str,
+    parent: int = DEFAULT_MUSIC_FOLDER_ID,
+) -> None:
     device.create_folder(name, parent=parent)
 
 

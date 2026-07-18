@@ -9,6 +9,8 @@ from mtpmanager.infra.remote_naming import (
     DEFAULT_MUSIC_FOLDER_ID,
     DEFAULT_STORAGE_ID,
     MAX_REMOTE_BASENAME,
+    ZEN_VISION_M_FOLDER_IDS,
+    ZEN_VISION_M_FOLDER_NAMES,
     build_remote_path,
     sanitize_component,
     split_remote_path,
@@ -65,6 +67,28 @@ class RemoteNamingTests(unittest.TestCase):
 
     def test_default_storage_id_is_zen_media(self) -> None:
         self.assertEqual(DEFAULT_STORAGE_ID, 0x00010001)
+
+    def test_zen_vision_m_folder_map(self) -> None:
+        """Device → List Folders layout on Creative ZEN Vision:M (reference)."""
+        expected = {
+            100: "Music",
+            104: "My Playlists",
+            108: "My Recordings",
+            112: "My Organizer",
+            116: "Pictures",
+            120: "Video",
+            124: "TV",
+            128: "ZENcast",
+            132: "My Slideshows",
+        }
+        self.assertEqual(dict(ZEN_VISION_M_FOLDER_IDS), expected)
+        self.assertEqual(DEFAULT_MUSIC_FOLDER_ID, 100)
+        self.assertEqual(ZEN_VISION_M_FOLDER_IDS[DEFAULT_MUSIC_FOLDER_ID], "Music")
+        self.assertEqual(ZEN_VISION_M_FOLDER_NAMES["music"], 100)
+        self.assertEqual(ZEN_VISION_M_FOLDER_NAMES["zencast"], 128)
+        # Immutable reference map — do not invent nested remote paths.
+        with self.assertRaises(TypeError):
+            ZEN_VISION_M_FOLDER_IDS[100] = "Nope"  # type: ignore[index]
 
 
 if __name__ == "__main__":

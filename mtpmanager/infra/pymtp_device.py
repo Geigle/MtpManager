@@ -184,7 +184,9 @@ class PymtpDevice:
     def set_device_name(self, name: str) -> None:
         self._mtp.set_devicename(name.encode("utf-8"))
 
-    def create_folder(self, name: str, parent: int = 100) -> None:
+    def create_folder(
+        self, name: str, parent: int = DEFAULT_MUSIC_FOLDER_ID
+    ) -> None:
         self._mtp.create_folder(name, parent=parent)
 
     def list_folders(self) -> list[FolderEntry]:

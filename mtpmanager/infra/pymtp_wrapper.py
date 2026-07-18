@@ -5,10 +5,11 @@ On Linux, ctypes.util.find_library("mtp") resolves via ldconfig as usual.
 On macOS, find_library often returns None; patch it before pymtp loads libmtp.
 
 Also patches known pymtp/libmtp binding bugs that break track send on modern
-libmtp (1.1.x) and Apple Silicon:
+libmtp (1.1.x) and Apple Silicon / Python 3:
   * LIBMTP_Filetype enum off-by-one (missing FOLDER=0)
   * Missing argtypes for LIBMTP_Send_Track_From_File (bad calls on arm64)
   * Dump_Errorstack called without a device pointer (NULL-device PANIC)
+  * get_folder_list / get_parent_folders use dict.has_key (Python 2 only)
 """
 
 from __future__ import annotations
@@ -140,8 +141,101 @@ def _configure_libmtp_ctypes() -> None:
         lib.LIBMTP_Get_Storage.argtypes = [dev_p, ctypes.c_int]
         lib.LIBMTP_Get_Storage.restype = ctypes.c_int
 
+    folder_p = ctypes.POINTER(_pymtp.LIBMTP_Folder)
+    if hasattr(lib, "LIBMTP_Get_Folder_List"):
+        lib.LIBMTP_Get_Folder_List.argtypes = [dev_p]
+        lib.LIBMTP_Get_Folder_List.restype = folder_p
+    if hasattr(lib, "LIBMTP_Find_Folder"):
+        lib.LIBMTP_Find_Folder.argtypes = [folder_p, ctypes.c_uint32]
+        lib.LIBMTP_Find_Folder.restype = folder_p
+
 
 _configure_libmtp_ctypes()
+
+
+def _ptr_truthy(ptr) -> bool:
+    """True if a ctypes POINTER is non-NULL."""
+    if not ptr:
+        return False
+    try:
+        return ctypes.cast(ptr, ctypes.c_void_p).value not in (None, 0)
+    except (TypeError, ValueError, ctypes.ArgumentError):
+        return bool(ptr)
+
+
+def _get_folder_list(self):
+    """Return ``{folder_id: LIBMTP_Folder}`` for the device (Python 3 safe).
+
+    Stock pymtp uses ``dict.has_key``, which was removed in Python 3, so
+    Device → List Folders crashes with AttributeError. Walk logic matches
+    stock; only membership checks and NULL handling are modernized.
+    """
+    if self.device is None:
+        raise NotConnected
+
+    root = self.mtp.LIBMTP_Get_Folder_List(self.device)
+    if not _ptr_truthy(root):
+        return {}
+
+    ret: dict = {}
+    cur = root
+    while True:
+        if not _ptr_truthy(cur):
+            break
+        try:
+            node = cur.contents
+        except (ValueError, TypeError):
+            break
+
+        if node.folder_id not in ret:
+            ret[node.folder_id] = node
+            scanned = False
+        else:
+            scanned = True
+
+        if (not scanned) and _ptr_truthy(node.child):
+            cur = node.child
+        elif _ptr_truthy(node.sibling):
+            cur = node.sibling
+        elif int(node.parent_id) != 0:
+            found = self.mtp.LIBMTP_Find_Folder(root, int(node.parent_id))
+            if not _ptr_truthy(found):
+                break
+            cur = found
+        else:
+            break
+
+    return ret
+
+
+def _get_parent_folders(self):
+    """Return top-level folder structs (Python 3 safe; stock used has_key)."""
+    if self.device is None:
+        raise NotConnected
+
+    root = self.mtp.LIBMTP_Get_Folder_List(self.device)
+    if not _ptr_truthy(root):
+        return []
+
+    tmp: dict = {}
+    cur = root
+    while True:
+        if not _ptr_truthy(cur):
+            break
+        try:
+            node = cur.contents
+        except (ValueError, TypeError):
+            break
+
+        if node.folder_id not in tmp:
+            tmp[node.folder_id] = node
+
+        if _ptr_truthy(node.sibling):
+            cur = node.sibling
+        else:
+            break
+
+    return list(tmp.values())
 
 
 def _device_ptr(device) -> int | None:
@@ -214,3 +308,5 @@ def _send_track_from_file(self, source, target, metadata, callback=None):
 # Monkey-patch stock methods so all callers get the fixed behavior.
 _MTP.debug_stack = _debug_stack
 _MTP.send_track_from_file = _send_track_from_file
+_MTP.get_folder_list = _get_folder_list
+_MTP.get_parent_folders = _get_parent_folders
