@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from mtpmanager.domain.models import DeviceInfo, FolderEntry
+from mtpmanager.domain.models import DeviceInfo, FileEntry, FolderEntry
 
 
 class DevicePort(Protocol):
@@ -26,6 +26,10 @@ class DevicePort(Protocol):
         ...
 
     def list_folders(self) -> list[FolderEntry]: ...
+
+    def list_files(self) -> list[FileEntry]:
+        """Full device file listing (experimental; may be large/slow)."""
+        ...
 
     def send_file(self, path: str, remote_name: str | None = None) -> None: ...
 

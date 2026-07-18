@@ -85,5 +85,46 @@ class PymtpCreateFolderStringTests(unittest.TestCase):
         self.assertEqual(fn.restype, ctypes.c_uint32)
 
 
+class PymtpFileListingTests(unittest.TestCase):
+    """Experimental List Files uses patched get_filelisting."""
+
+    def test_get_filelisting_is_patched(self) -> None:
+        self.assertIs(pymtp.MTP.get_filelisting, pymtp._get_filelisting)
+        src = inspect.getsource(pymtp.MTP.get_filelisting)
+        self.assertIn("_ptr_truthy", src)
+
+    def test_get_filelisting_requires_connection(self) -> None:
+        mtp = pymtp.MTP()
+        with self.assertRaises(pymtp.NotConnected):
+            mtp.get_filelisting()
+
+    def test_filelisting_argtypes(self) -> None:
+        import ctypes
+
+        fn = pymtp._pymtp._libmtp.LIBMTP_Get_Filelisting_With_Callback
+        self.assertEqual(len(fn.argtypes), 3)
+        self.assertIs(fn.argtypes[1], ctypes.c_void_p)
+
+
+class FileLineFormatTests(unittest.TestCase):
+    def test_file_line(self) -> None:
+        from mtpmanager.domain.models import FileEntry
+        from mtpmanager.ui.formatting import file_line
+
+        line = file_line(
+            FileEntry(
+                item_id=445003,
+                name="Blargh.mp3",
+                parent_id=100,
+                filesize=1_500_000,
+                filetype=2,
+            )
+        )
+        self.assertIn("445003", line)
+        self.assertIn("parent=100", line)
+        self.assertIn("Blargh.mp3", line)
+        self.assertIn("MB", line)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -201,6 +201,8 @@ Keep this table in sync when adding monkey-patches:
 | Send / errorstack / storage argtypes | Configured | C |
 | `get_folder_list` / `get_parent_folders` | Replaced | E |
 | Folder Get/Find argtypes | Configured | C |
+| `get_filelisting` | Replaced (NULL-safe; progress=NULL) | E-adjacent, C |
+| Filelisting callback argtypes | Configured | C |
 | `create_folder` | Replaced | D, C |
 | `set_devicename` | Replaced (was already OK via bytes at adapter) | D, C |
 | `send_file_from_file` | **Not fully replaced** (argtypes partial via Send_File) | C, D residual |

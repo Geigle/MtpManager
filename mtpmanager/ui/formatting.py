@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from mtpmanager.domain.models import DeviceInfo, FolderEntry, Track
+from mtpmanager.domain.models import DeviceInfo, FileEntry, FolderEntry, Track
 
 
 def track_summary(track: Track) -> str:
@@ -31,3 +31,18 @@ def folder_line(entry: FolderEntry) -> str:
     if parent:
         return f"{entry.folder_id:8} {entry.name}  (parent {parent})"
     return f"{entry.folder_id:8} {entry.name}"
+
+
+def file_line(entry: FileEntry) -> str:
+    """One line for Device → List Files dialog / logs."""
+    size = int(entry.filesize or 0)
+    if size >= 1_000_000:
+        size_s = f"{size / 1_000_000:.1f}MB"
+    elif size >= 1000:
+        size_s = f"{size / 1000:.1f}kB"
+    else:
+        size_s = f"{size}B"
+    return (
+        f"{entry.item_id:8}  parent={entry.parent_id:<6}  "
+        f"type={entry.filetype:<3}  {size_s:>8}  {entry.name}"
+    )

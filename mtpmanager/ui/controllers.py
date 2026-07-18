@@ -41,6 +41,7 @@ from mtpmanager.ui.dialogs import (
     ask_text,
     show_config_dialog,
     show_device_info_dialog,
+    show_file_list_dialog,
     show_folder_list_dialog,
 )
 from mtpmanager.ui.window import MainWindow
@@ -108,6 +109,7 @@ class AppController:
             on_device_info=self.on_device_info,
             on_create_folder=self.action_create_folder,
             on_list_folders=self.action_read_folder_list,
+            on_list_files=self.action_read_file_list,
             on_get_file_info=self.action_get_file_info,
             on_delete_all=self.action_delete_all_tracks,
         )
@@ -1424,6 +1426,30 @@ class AppController:
         for entry in folders:
             logger.debug("Folder: %s", entry.name)
         show_folder_list_dialog(self.win.root, folders)
+
+    def action_read_file_list(self) -> None:
+        """Experimental Device → List Files (full MTP file listing)."""
+        if not self._require_device_ready():
+            return
+        try:
+            files = device_ops.list_files(self.device)
+        except Exception as e:
+            logger.exception("List files failed")
+            messagebox.showerror("Files", str(e))
+            return
+        logger.info("List Files (experimental): %d object(s)", len(files))
+        for entry in files[:50]:
+            logger.debug(
+                "File id=%s parent=%s type=%s size=%s name=%r",
+                entry.item_id,
+                entry.parent_id,
+                entry.filetype,
+                entry.filesize,
+                entry.name,
+            )
+        if len(files) > 50:
+            logger.debug("… %d more file(s) not logged at DEBUG", len(files) - 50)
+        show_file_list_dialog(self.win.root, files)
 
     def action_delete_all_tracks(self) -> None:
         """Stub: lists storage ids only (same as previous incomplete behavior)."""

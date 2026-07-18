@@ -7,7 +7,7 @@ import logging
 import os
 
 import mtpmanager.infra.pymtp_wrapper as pymtp
-from mtpmanager.domain.models import DeviceInfo, FolderEntry, TrackMetadata
+from mtpmanager.domain.models import DeviceInfo, FileEntry, FolderEntry, TrackMetadata
 from mtpmanager.infra.remote_naming import (
     DEFAULT_MUSIC_FOLDER_ID,
     DEFAULT_STORAGE_ID,
@@ -211,6 +211,28 @@ class PymtpDevice:
                     parent_id=parent_id,
                 )
             )
+        return result
+
+    def list_files(self) -> list[FileEntry]:
+        """Experimental: full MTP file listing via patched get_filelisting."""
+        raw = self._mtp.get_filelisting()
+        result: list[FileEntry] = []
+        if not raw:
+            return result
+        for node in raw:
+            name = _decode(getattr(node, "filename", None))
+            result.append(
+                FileEntry(
+                    item_id=int(getattr(node, "item_id", 0) or 0),
+                    name=name,
+                    parent_id=int(getattr(node, "parent_id", 0) or 0),
+                    storage_id=int(getattr(node, "storage_id", 0) or 0),
+                    filesize=int(getattr(node, "filesize", 0) or 0),
+                    filetype=int(getattr(node, "filetype", 0) or 0),
+                )
+            )
+        # Stable order for UI / logs
+        result.sort(key=lambda e: (e.parent_id, e.name.casefold(), e.item_id))
         return result
 
     def send_file(self, path: str, remote_name: str | None = None) -> None:

@@ -71,3 +71,15 @@ class FolderEntry:
     folder_id: int
     name: str
     parent_id: int = 0
+
+
+@dataclass(frozen=True)
+class FileEntry:
+    """One object from device file listing (LIBMTP_file_t summary)."""
+
+    item_id: int
+    name: str
+    parent_id: int = 0
+    storage_id: int = 0
+    filesize: int = 0
+    filetype: int = 0

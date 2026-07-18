@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from mtpmanager.domain.models import DeviceInfo, FolderEntry
+from mtpmanager.domain.models import DeviceInfo, FileEntry, FolderEntry
 from mtpmanager.infra.remote_naming import DEFAULT_MUSIC_FOLDER_ID
 from mtpmanager.ports.device import DevicePort
 
@@ -33,6 +33,11 @@ def create_folder(
 
 def list_folders(device: DevicePort) -> list[FolderEntry]:
     return device.list_folders()
+
+
+def list_files(device: DevicePort) -> list[FileEntry]:
+    """Experimental full file listing (Device → List Files)."""
+    return device.list_files()
 
 
 def send_test_file(device: DevicePort, path: str) -> None:

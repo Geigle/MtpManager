@@ -215,3 +215,56 @@ def show_folder_list_dialog(parent, folders: list) -> None:
     Button(body, text="Close", command=dlg.destroy).pack(anchor="e")
     dlg.grab_set()
     parent.wait_window(dlg)
+
+
+def show_file_list_dialog(parent, files: list) -> None:
+    """Modal scrollable list of device files (experimental List Files)."""
+    from tkinter import BOTH, END, LEFT, RIGHT, Y, Listbox, Scrollbar
+
+    from mtpmanager.ui.formatting import file_line
+
+    dlg = Toplevel(parent)
+    dlg.title("Device Files (experimental)")
+    dlg.transient(parent)
+    dlg.geometry("720x420")
+
+    body = Frame(dlg, padx=10, pady=10)
+    body.pack(fill=BOTH, expand=True)
+    Label(
+        body,
+        text=(
+            f"{len(files)} object(s) — full MTP file listing. "
+            "May be large/slow on big libraries."
+        ),
+        wraplength=680,
+        justify=LEFT,
+    ).pack(anchor="w")
+
+    list_frame = Frame(body)
+    list_frame.pack(fill=BOTH, expand=True, pady=(6, 8))
+    yscroll = Scrollbar(list_frame)
+    yscroll.pack(side=RIGHT, fill=Y)
+    xscroll = Scrollbar(list_frame, orient="horizontal")
+    xscroll.pack(side="bottom", fill="x")
+    lb = Listbox(
+        list_frame,
+        yscrollcommand=yscroll.set,
+        xscrollcommand=xscroll.set,
+    )
+    # Prefer monospaced font for aligned columns when available.
+    try:
+        lb.configure(font=("Menlo", 11))
+    except Exception:
+        try:
+            lb.configure(font=("Courier", 11))
+        except Exception:
+            pass
+    lb.pack(side=LEFT, fill=BOTH, expand=True)
+    yscroll.config(command=lb.yview)
+    xscroll.config(command=lb.xview)
+    for entry in files:
+        lb.insert(END, file_line(entry))
+
+    Button(body, text="Close", command=dlg.destroy).pack(anchor="e")
+    dlg.grab_set()
+    parent.wait_window(dlg)

@@ -12,6 +12,7 @@ libmtp (1.1.x) and Apple Silicon / Python 3:
   * get_folder_list / get_parent_folders use dict.has_key (Python 2 only)
   * create_folder / set_devicename pass Python str without c_char_p argtypes
     (arm64/Py3: often only the first character is stored on the device)
+  * get_filelisting linked-list walk (NULL-safe) + filelisting callback argtypes
 
 Living catalog of failure classes and *predicted* next breaks:
   docs/pymtp-binding-hazards.md
@@ -169,6 +170,16 @@ def _configure_libmtp_ctypes() -> None:
     if hasattr(lib, "LIBMTP_Set_Friendlyname"):
         lib.LIBMTP_Set_Friendlyname.argtypes = [dev_p, ctypes.c_char_p]
         lib.LIBMTP_Set_Friendlyname.restype = ctypes.c_int
+
+    file_p = ctypes.POINTER(_pymtp.LIBMTP_File)
+    # LIBMTP_file_t *Get_Filelisting_With_Callback(dev, progress_cb, user_data)
+    if hasattr(lib, "LIBMTP_Get_Filelisting_With_Callback"):
+        lib.LIBMTP_Get_Filelisting_With_Callback.argtypes = [
+            dev_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+        ]
+        lib.LIBMTP_Get_Filelisting_With_Callback.restype = file_p
 
 
 _configure_libmtp_ctypes()
@@ -338,6 +349,41 @@ def _send_track_from_file(self, source, target, metadata, callback=None):
     return metadata.item_id
 
 
+def _get_filelisting(self, callback=None):
+    """Return a list of ``LIBMTP_File`` structs (Python 3 / NULL-safe walk).
+
+    Stock walks ``while next:`` without treating a NULL head as empty and uses
+    an untyped progress callback. We always pass NULL for progress (experimental
+    List Files does not need a callback) and stop cleanly on NULL links.
+    """
+    if self.device is None:
+        raise NotConnected
+
+    _ = callback  # progress callbacks remain unpatched / unused
+    dev = _device_ptr(self.device)
+    if not dev:
+        raise NotConnected
+
+    head = self.mtp.LIBMTP_Get_Filelisting_With_Callback(dev, None, None)
+    if not _ptr_truthy(head):
+        return []
+
+    ret: list = []
+    cur = head
+    while _ptr_truthy(cur):
+        try:
+            node = cur.contents
+        except (ValueError, TypeError):
+            break
+        ret.append(node)
+        nxt = getattr(node, "next", None)
+        if not _ptr_truthy(nxt):
+            break
+        cur = nxt
+
+    return ret
+
+
 def _create_folder(self, name, parent=0, storage=0):
     """Create a folder with a proper UTF-8 C string (Python 3 / arm64 safe).
 
@@ -393,5 +439,6 @@ _MTP.debug_stack = _debug_stack
 _MTP.send_track_from_file = _send_track_from_file
 _MTP.get_folder_list = _get_folder_list
 _MTP.get_parent_folders = _get_parent_folders
+_MTP.get_filelisting = _get_filelisting
 _MTP.create_folder = _create_folder
 _MTP.set_devicename = _set_devicename

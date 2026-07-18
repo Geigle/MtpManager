@@ -78,6 +78,7 @@ MENU_DISCONNECT = "Disconnect"
 MENU_DEVICE_INFO = "Device Info"
 MENU_CREATE_FOLDER = "Create Folder…"
 MENU_LIST_FOLDERS = "List Folders"
+MENU_LIST_FILES = "List Files (experimental)"
 MENU_GET_FILE_INFO = "Get File Info…"
 MENU_DELETE_ALL = "Delete All Tracks…"
 
@@ -96,6 +97,7 @@ _DEVICE_MENU_LABELS = (
     MENU_DEVICE_INFO,
     MENU_CREATE_FOLDER,
     MENU_LIST_FOLDERS,
+    MENU_LIST_FILES,
     MENU_GET_FILE_INFO,
     MENU_DELETE_ALL,
 )
@@ -369,6 +371,7 @@ class MainWindow:
         on_device_info,
         on_create_folder,
         on_list_folders,
+        on_list_files=None,
         on_get_file_info,
         on_delete_all,
     ) -> None:
@@ -377,9 +380,10 @@ class MainWindow:
         self.menu_device.entryconfig(MENU_DEVICE_INFO, command=on_device_info)
         self.menu_device.entryconfig(MENU_CREATE_FOLDER, command=on_create_folder)
         self.menu_device.entryconfig(MENU_LIST_FOLDERS, command=on_list_folders)
+        if on_list_files is not None:
+            self.menu_device.entryconfig(MENU_LIST_FILES, command=on_list_files)
         self.menu_device.entryconfig(MENU_GET_FILE_INFO, command=on_get_file_info)
         self.menu_device.entryconfig(MENU_DELETE_ALL, command=on_delete_all)
-
     def set_track_context_commands(
         self,
         *,

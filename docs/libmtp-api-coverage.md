@@ -50,6 +50,7 @@ Domain contract for send (parent 100 / artist folder id, storage `0x00010001`, s
 | Capacity | `get_freespace`, `get_totalspace`, `get_usedspace`, `get_usedspace_percent` | Walks storage; multi-storage may be wrong |
 | Filetype guess | `find_filetype` | Table fixed; method body stock |
 | Track list | `get_tracklisting` | Used by Delete All stub listing |
+| File listing | `get_filelisting` → `LIBMTP_Get_Filelisting_With_Callback` | **Used + patched** (NULL-safe walk, argtypes); Device → **List Files (experimental)** |
 | File meta | `get_file_metadata` | Get File Info UI (hard-coded id) |
 | Generic file send | `send_file_from_file` | **Not** product-hardened like track send; residual string/argtypes risk |
 | Storage refresh | `LIBMTP_Get_Storage` (direct ctypes in `send_track`) | Argtypes set in wrapper |
@@ -71,7 +72,6 @@ Callable on `pymtp.MTP`; no finished MtpManager feature (or only stub):
 |--------------|----------------------|--------------------|
 | `detect_devices` | `LIBMTP_Detect_Raw_Devices` | Multi-device chooser |
 | `delete_object` | `LIBMTP_Delete_Object` | Real delete / delete-all |
-| `get_filelisting` | `LIBMTP_Get_Filelisting_With_Callback` | Full object browser |
 | `get_file_to_file` | `LIBMTP_Get_File_To_File` | Download file → host |
 | `get_track_to_file` | `LIBMTP_Get_Track_To_File` | Download track → host |
 | `get_track_metadata` | `LIBMTP_Get_Trackmetadata` | Single-object inspector |
@@ -172,7 +172,7 @@ Not every libmtp symbol matters. For this app’s goals, the meaningful “not d
 
 1. **Delete object(s)** — `Delete_Object` (finish Delete All / per-track delete)  
 2. **Download** track/file to host — `Get_*_To_File`  
-3. **Full file listing / browser** — `Get_Filelisting*` / `Get_Files_And_Folders`  
+3. ~~**Full file listing**~~ — **partial:** Device → List Files (experimental) uses patched `get_filelisting`; hierarchical browser / `Get_Files_And_Folders` still open  
 4. **Playlists** — list / create / update (pymtp exists; unpatched; unused)  
 5. **Device albums** — create / update / list (libmtp only; watch CMD album hang class)  
 6. **Rename** folder / file / track — `Set_*_Name` / `Set_Object_Filename`  
@@ -180,7 +180,7 @@ Not every libmtp symbol matters. For this app’s goals, the meaningful “not d
 8. **Cover art / thumbnail to device** — representative sample / thumbnail  
 9. **Multi-device selection** — detect / open by serial  
 10. **Update on-device metadata** without re-send — `Update_Track_Metadata`  
-11. **Harden remaining used stock paths** — especially `send_file_from_file`, listing walks, capacity getters  
+11. **Harden remaining used stock paths** — especially `send_file_from_file`, capacity getters  
 12. **Real Get File Info** — user-chosen object id; optional track metadata  
 13. **Storage-scoped** folder/track lists (multi-storage devices)  
 14. **Admin footguns** — format storage / reset (only if ever needed; gate hard)
@@ -209,6 +209,8 @@ Not every libmtp symbol matters. For this app’s goals, the meaningful “not d
 | Send / errorstack / storage argtypes | Configured |
 | `get_folder_list` / `get_parent_folders` | Replaced |
 | Folder Get/Find argtypes | Configured |
+| `get_filelisting` | Replaced (NULL-safe walk; no progress callback) |
+| Filelisting callback argtypes | Configured |
 | `create_folder` | Replaced |
 | `set_devicename` | Replaced |
 | `send_file_from_file` | Partial (argtypes only; method body stock) |
