@@ -12,6 +12,9 @@ libmtp (1.1.x) and Apple Silicon / Python 3:
   * get_folder_list / get_parent_folders use dict.has_key (Python 2 only)
   * create_folder / set_devicename pass Python str without c_char_p argtypes
     (arm64/Py3: often only the first character is stored on the device)
+
+Living catalog of failure classes and *predicted* next breaks:
+  docs/pymtp-binding-hazards.md
 """
 
 from __future__ import annotations

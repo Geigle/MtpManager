@@ -106,15 +106,15 @@ Debriefs remain the forensic narrative; this file is what we keep doing.
 
 ## D8 — Patch stock pymtp in-process rather than forking PyPI package
 
-**Context:** Stock pymtp is effectively unmaintained vs libmtp 1.1.x: missing `FOLDER=0` in filetype enum (MP3 labeled as WAV), missing ctypes `argtypes`, `Dump_Errorstack` without device pointer, macOS `find_library` failure.
+**Context:** Stock pymtp is effectively unmaintained vs libmtp 1.1.x / Python 3 / arm64: missing `FOLDER=0` in filetype enum (MP3 labeled as WAV), missing ctypes `argtypes`, `Dump_Errorstack` without device pointer, Python 2 `has_key`, untyped `str`→`char*` (first character only on device), macOS `find_library` failure.
 
-**Decision:** Load via `infra/pymtp_wrapper.py`: macOS lib path patch, mutate `LIBMTP_Filetype` in place, fix send/errorstack bindings. Unit-test filetype table.
+**Decision:** Load via `infra/pymtp_wrapper.py`: macOS lib path patch, mutate `LIBMTP_Filetype` in place, fix send/errorstack/folder/create/name bindings as we hit them. Unit-test filetype table and critical patches. Catalog patterns and predictions in [pymtp-binding-hazards.md](./pymtp-binding-hazards.md).
 
-**Rationale:** Small project surface; avoids maintaining a full fork until an upstream binding is viable.
+**Rationale:** Small project surface; avoids maintaining a full fork until an upstream binding is viable. Failures arrive **layered** (contract → enum → ctypes → strings → session); a living hazard list stops rediscovering the same classes.
 
-**Consequences:** Always import pymtp through the wrapper. Upgrading pymtp may require re-checking patches. Experimental send still device/session-dependent after binding fixes.
+**Consequences:** Always import pymtp through the wrapper. Opening a new stock method requires a hazard checklist pass (encode strings, set argtypes, no `has_key`). Upgrading pymtp may require re-checking patches. Experimental send still device/session-dependent after binding fixes.
 
-**Source:** [debrief-pymtp-transfer-failure.md](./debrief-pymtp-transfer-failure.md); `tests/test_pymtp_filetypes.py`.
+**Source:** [debrief-pymtp-transfer-failure.md](./debrief-pymtp-transfer-failure.md); [pymtp-binding-hazards.md](./pymtp-binding-hazards.md); `tests/test_pymtp_filetypes.py`.
 
 ---
 

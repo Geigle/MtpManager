@@ -20,6 +20,7 @@
 
 - CMD / hang / 99% finalize → [docs/debrief-zen-track-send-failure.md](docs/debrief-zen-track-send-failure.md)  
 - PyMTP / filetype / ctypes / fallback policy → [docs/debrief-pymtp-transfer-failure.md](docs/debrief-pymtp-transfer-failure.md)  
+- Opening **any new stock pymtp API** or Device menu path → [docs/pymtp-binding-hazards.md](docs/pymtp-binding-hazards.md) (failure classes + predicted breaks)  
 
 Run/setup: [README.md](README.md), [PLATFORMS.md](PLATFORMS.md).
 

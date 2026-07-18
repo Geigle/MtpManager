@@ -115,6 +115,6 @@ Platform defaults: macOS `~/Library/Logs/MtpManager`; Linux `~/.local/share/mtpm
 | Multi-device discovery | Not implemented; user must match device layout |
 | Transfer send still blocking in worker | Convert/send pipeline + UI job are off the Tk thread; each `send_track` still blocks the transfer worker until the device finishes |
 | Full “Delete All Tracks” | Stub lists storage ids only |
-| Upstream-maintained libmtp Python binding | Stock pymtp patched in-process via `pymtp_wrapper.py` |
+| Upstream-maintained libmtp Python binding | Stock pymtp patched in-process via `pymtp_wrapper.py`; hazards catalog [pymtp-binding-hazards.md](./pymtp-binding-hazards.md) |
 
 These are known limitations, not accidental omissions in the docs. Product follow-ups stay out of this architecture description except as honest gaps.
