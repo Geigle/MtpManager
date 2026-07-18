@@ -182,12 +182,18 @@ class PymtpDevice:
         )
 
     def set_device_name(self, name: str) -> None:
-        self._mtp.set_devicename(name.encode("utf-8"))
+        # Wrapper encodes UTF-8 + correct c_char_p argtypes.
+        self._mtp.set_devicename(name)
 
     def create_folder(
         self, name: str, parent: int = DEFAULT_MUSIC_FOLDER_ID
     ) -> None:
-        self._mtp.create_folder(name, parent=parent)
+        # Parent defaults to Music (100). Storage must match the ZEN media id
+        # (same contract as track send); 0 often works for create but is wrong
+        # for this device class.
+        self._mtp.create_folder(
+            name, parent=int(parent), storage=int(self.storage_id)
+        )
 
     def list_folders(self) -> list[FolderEntry]:
         folders = self._mtp.get_folder_list()

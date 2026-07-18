@@ -55,5 +55,35 @@ class PymtpFolderListPy3Tests(unittest.TestCase):
             mtp.get_folder_list()
 
 
+class PymtpCreateFolderStringTests(unittest.TestCase):
+    """Stock create_folder passed Python str without c_char_p → first char only."""
+
+    def test_create_folder_is_patched(self) -> None:
+        self.assertIs(pymtp.MTP.create_folder, pymtp._create_folder)
+        src = inspect.getsource(pymtp.MTP.create_folder)
+        self.assertIn("create_string_buffer", src)
+        self.assertIn("_as_c_char_p", src)
+        self.assertIn("utf-8", inspect.getsource(pymtp._as_c_char_p))
+
+    def test_as_c_char_p_encodes_full_string(self) -> None:
+        # Regression for “Blargh” → “B”: full UTF-8 bytes must be preserved.
+        self.assertEqual(pymtp._as_c_char_p("Blargh"), b"Blargh")
+        self.assertEqual(pymtp._as_c_char_p(b"Blargh"), b"Blargh")
+        self.assertEqual(pymtp._as_c_char_p("café"), "café".encode("utf-8"))
+
+    def test_create_folder_requires_connection(self) -> None:
+        mtp = pymtp.MTP()
+        with self.assertRaises(pymtp.NotConnected):
+            mtp.create_folder("Blargh", parent=100)
+
+    def test_create_folder_ctypes_argtypes(self) -> None:
+        import ctypes
+
+        fn = pymtp._pymtp._libmtp.LIBMTP_Create_Folder
+        self.assertEqual(len(fn.argtypes), 4)
+        self.assertIs(fn.argtypes[1], ctypes.c_char_p)
+        self.assertEqual(fn.restype, ctypes.c_uint32)
+
+
 if __name__ == "__main__":
     unittest.main()

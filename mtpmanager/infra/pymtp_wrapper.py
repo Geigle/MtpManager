@@ -10,6 +10,8 @@ libmtp (1.1.x) and Apple Silicon / Python 3:
   * Missing argtypes for LIBMTP_Send_Track_From_File (bad calls on arm64)
   * Dump_Errorstack called without a device pointer (NULL-device PANIC)
   * get_folder_list / get_parent_folders use dict.has_key (Python 2 only)
+  * create_folder / set_devicename pass Python str without c_char_p argtypes
+    (arm64/Py3: often only the first character is stored on the device)
 """
 
 from __future__ import annotations
@@ -149,8 +151,34 @@ def _configure_libmtp_ctypes() -> None:
         lib.LIBMTP_Find_Folder.argtypes = [folder_p, ctypes.c_uint32]
         lib.LIBMTP_Find_Folder.restype = folder_p
 
+    # uint32_t LIBMTP_Create_Folder(dev, char *name, uint32_t parent, uint32_t storage)
+    if hasattr(lib, "LIBMTP_Create_Folder"):
+        lib.LIBMTP_Create_Folder.argtypes = [
+            dev_p,
+            ctypes.c_char_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+        ]
+        lib.LIBMTP_Create_Folder.restype = ctypes.c_uint32
+
+    if hasattr(lib, "LIBMTP_Set_Friendlyname"):
+        lib.LIBMTP_Set_Friendlyname.argtypes = [dev_p, ctypes.c_char_p]
+        lib.LIBMTP_Set_Friendlyname.restype = ctypes.c_int
+
 
 _configure_libmtp_ctypes()
+
+
+def _as_c_char_p(value) -> bytes:
+    """Encode a name for libmtp char* APIs (must stay bytes for the call)."""
+    if value is None:
+        return b""
+    if isinstance(value, bytes):
+        return value
+    if isinstance(value, ctypes.c_char_p):
+        raw = value.value
+        return raw if raw is not None else b""
+    return str(value).encode("utf-8")
 
 
 def _ptr_truthy(ptr) -> bool:
@@ -305,8 +333,60 @@ def _send_track_from_file(self, source, target, metadata, callback=None):
     return metadata.item_id
 
 
+def _create_folder(self, name, parent=0, storage=0):
+    """Create a folder with a proper UTF-8 C string (Python 3 / arm64 safe).
+
+    Stock pymtp passes a Python ``str`` into ``LIBMTP_Create_Folder`` with no
+    argtypes. On modern ctypes that mis-marshals the pointer so libmtp often
+    only sees the first byte (folder named ``"B"`` for ``"Blargh"``).
+    """
+    if self.device is None:
+        raise NotConnected
+
+    name_b = _as_c_char_p(name)
+    if not name_b:
+        raise ValueError("Folder name must be non-empty")
+
+    # create_string_buffer keeps a stable NUL-terminated buffer for the call.
+    name_buf = ctypes.create_string_buffer(name_b)
+    dev = _device_ptr(self.device)
+    if not dev:
+        raise NotConnected
+
+    ret = self.mtp.LIBMTP_Create_Folder(
+        dev,
+        name_buf,
+        ctypes.c_uint32(int(parent)),
+        ctypes.c_uint32(int(storage)),
+    )
+    if ret == 0:
+        _debug_stack(self)
+        raise CommandFailed
+    return int(ret)
+
+
+def _set_devicename(self, name):
+    """Set friendly name with UTF-8 c_char_p (same first-byte class of bug)."""
+    if self.device is None:
+        raise NotConnected
+
+    name_b = _as_c_char_p(name)
+    name_buf = ctypes.create_string_buffer(name_b)
+    dev = _device_ptr(self.device)
+    if not dev:
+        raise NotConnected
+
+    ret = self.mtp.LIBMTP_Set_Friendlyname(dev, name_buf)
+    if ret != 0:
+        _debug_stack(self)
+        raise CommandFailed
+    return ret
+
+
 # Monkey-patch stock methods so all callers get the fixed behavior.
 _MTP.debug_stack = _debug_stack
 _MTP.send_track_from_file = _send_track_from_file
 _MTP.get_folder_list = _get_folder_list
 _MTP.get_parent_folders = _get_parent_folders
+_MTP.create_folder = _create_folder
+_MTP.set_devicename = _set_devicename
