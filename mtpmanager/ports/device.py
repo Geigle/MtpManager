@@ -18,8 +18,11 @@ class DevicePort(Protocol):
 
     def set_device_name(self, name: str) -> None: ...
 
-    def create_folder(self, name: str, parent: int = 100) -> None:
-        """Create a folder under *parent* (default Music id 100 on ZEN Vision:M)."""
+    def create_folder(self, name: str, parent: int = 100) -> int:
+        """Create a folder under *parent* (default Music id 100 on ZEN Vision:M).
+
+        Returns the new folder object id.
+        """
         ...
 
     def list_folders(self) -> list[FolderEntry]: ...

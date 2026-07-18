@@ -27,4 +27,7 @@ def device_info_summary(info: DeviceInfo) -> str:
 
 
 def folder_line(entry: FolderEntry) -> str:
+    parent = getattr(entry, "parent_id", 0) or 0
+    if parent:
+        return f"{entry.folder_id:8} {entry.name}  (parent {parent})"
     return f"{entry.folder_id:8} {entry.name}"

@@ -238,12 +238,21 @@ class CmdTransport:
         self.storage_id = storage_id
         self.music_folder_id = music_folder_id
 
-    def send_track(self, path: str, meta: TrackMetadata) -> None:
+    def send_track(
+        self,
+        path: str,
+        meta: TrackMetadata,
+        *,
+        parent_id: int | None = None,
+    ) -> None:
         _, file_extension = os.path.splitext(path)
+        folder_id = (
+            int(parent_id) if parent_id is not None else int(self.music_folder_id)
+        )
         remote = build_remote_path(
             meta,
             file_extension or ".mp3",
-            music_folder_id=self.music_folder_id,
+            music_folder_id=folder_id,
         )
         cmd = [
             self.binary,

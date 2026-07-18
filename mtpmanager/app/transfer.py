@@ -24,6 +24,8 @@ logger = logging.getLogger(__name__)
 ProgressCallback = Callable[[int, int, str], None]
 # source_path, status: "transcoding" | "transferring" | "done" | "failed"
 TrackStatusCallback = Callable[[str, str], None]
+# Optional: resolve MTP parent folder id for a track (artist folders, etc.).
+ParentFolderResolver = Callable[[TrackMetadata], int | None]
 
 
 @dataclass(frozen=True)
@@ -101,6 +103,15 @@ def prepare_track(
     )
 
 
+def _resolve_parent(
+    resolver: ParentFolderResolver | None,
+    meta: TrackMetadata,
+) -> int | None:
+    if resolver is None:
+        return None
+    return resolver(meta)
+
+
 def transfer_track(
     track: Track,
     *,
@@ -110,6 +121,7 @@ def transfer_track(
     reread_tags_after_convert: bool = True,
     slot: int = 0,
     on_track_status: TrackStatusCallback | None = None,
+    resolve_parent_folder: ParentFolderResolver | None = None,
 ) -> None:
     """
     Ensure track is in target_format (transcode if needed), then send via transport.
@@ -125,7 +137,10 @@ def transfer_track(
     )
     try:
         _notify_status(on_track_status, track.path, "transferring")
-        transport.send_track(prepared.send_path, prepared.meta)
+        parent_id = _resolve_parent(resolve_parent_folder, prepared.meta)
+        transport.send_track(
+            prepared.send_path, prepared.meta, parent_id=parent_id
+        )
         _notify_status(on_track_status, track.path, "done")
     except Exception:
         _notify_status(on_track_status, track.path, "failed")
@@ -145,6 +160,7 @@ def transfer_tracks(
     on_track_status: TrackStatusCallback | None = None,
     stop_on_fatal: bool = True,
     session_log: bool = True,
+    resolve_parent_folder: ParentFolderResolver | None = None,
 ) -> int:
     """Transfer many tracks with dual-slot convert/send pipeline.
 
@@ -222,7 +238,14 @@ def transfer_tracks(
                 assert prepared is not None
                 try:
                     _notify_status(on_track_status, track.path, "transferring")
-                    transport.send_track(prepared.send_path, prepared.meta)
+                    parent_id = _resolve_parent(
+                        resolve_parent_folder, prepared.meta
+                    )
+                    transport.send_track(
+                        prepared.send_path,
+                        prepared.meta,
+                        parent_id=parent_id,
+                    )
                     succeeded += 1
                     _notify_status(on_track_status, track.path, "done")
                 except TransportError as exc:

@@ -66,7 +66,8 @@ class DeviceInfo:
         }
 
 
-@dataclass
+@dataclass(frozen=True)
 class FolderEntry:
     folder_id: int
     name: str
+    parent_id: int = 0

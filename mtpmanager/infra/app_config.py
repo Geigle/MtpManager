@@ -25,6 +25,8 @@ class AppConfig:
     send_format: str = DEFAULT_SEND_FORMAT
     # When True, transfers use mtp-sendtr (Stable). Default is PyMTP (Experimental).
     stable_mode: bool = False
+    # When True, create Music/<artist> on the device and send tracks there (PyMTP).
+    store_tracks_in_artist_folder: bool = False
     version: int = CONFIG_VERSION
 
     def normalized_send_format(self) -> str:
@@ -71,6 +73,9 @@ def load_app_config(*, path: Path | None = None) -> AppConfig:
     cfg = AppConfig(
         send_format=fmt,
         stable_mode=_as_bool(raw.get("stable_mode"), False),
+        store_tracks_in_artist_folder=_as_bool(
+            raw.get("store_tracks_in_artist_folder"), False
+        ),
         version=int(raw.get("version", CONFIG_VERSION) or CONFIG_VERSION),
     )
     cfg.send_format = cfg.normalized_send_format()
@@ -85,6 +90,7 @@ def save_app_config(config: AppConfig, *, path: Path | None = None) -> Path:
         "version": CONFIG_VERSION,
         "send_format": config.normalized_send_format(),
         "stable_mode": bool(config.stable_mode),
+        "store_tracks_in_artist_folder": bool(config.store_tracks_in_artist_folder),
     }
     text = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
     tmp = dest.with_suffix(dest.suffix + ".tmp")

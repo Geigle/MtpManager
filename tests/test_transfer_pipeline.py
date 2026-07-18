@@ -35,19 +35,31 @@ class _FakeTranscoder:
 
 class _RecordingTransport:
     def __init__(self) -> None:
-        self.sent: list[tuple[str, str]] = []  # (path, title)
+        self.sent: list[tuple[str, str, int | None]] = []  # path, title, parent
         self.hold_paths: list[str] = []
 
-    def send_track(self, path: str, meta: TrackMetadata) -> None:
+    def send_track(
+        self,
+        path: str,
+        meta: TrackMetadata,
+        *,
+        parent_id: int | None = None,
+    ) -> None:
         # Prove the file still exists at send time (not clobbered/deleted).
         self.hold_paths.append(path)
         assert os.path.isfile(path), f"missing at send: {path}"
-        self.sent.append((path, meta.title))
+        self.sent.append((path, meta.title, parent_id))
 
 
 class _FailSecondTransport(_RecordingTransport):
-    def send_track(self, path: str, meta: TrackMetadata) -> None:
-        super().send_track(path, meta)
+    def send_track(
+        self,
+        path: str,
+        meta: TrackMetadata,
+        *,
+        parent_id: int | None = None,
+    ) -> None:
+        super().send_track(path, meta, parent_id=parent_id)
         if len(self.sent) == 2:
             raise TransportError("boom", fatal=True, path=path)
 
@@ -124,13 +136,33 @@ class DualSlotPipelineTests(unittest.TestCase):
                 session_log=False,
             )
             self.assertEqual(n, 3)
-            self.assertEqual([t for _, t in transport.sent], ["One", "Two", "Three"])
+            self.assertEqual(
+                [t for _, t, _ in transport.sent], ["One", "Two", "Three"]
+            )
+            self.assertEqual([p for _, _, p in transport.sent], [None, None, None])
             # Convert order uses slots 0, 1, 0
             slots = [c[2] for c in tr.calls]
             self.assertEqual(slots, [0, 1, 0])
             # After batch, temps should be cleaned up
             self.assertFalse(os.path.exists(os.path.join(tmp, "TRANSCODE_0.mp3")))
             self.assertFalse(os.path.exists(os.path.join(tmp, "TRANSCODE_1.mp3")))
+
+    def test_resolve_parent_folder_passed_to_transport(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            src = os.path.join(tmp, "a.flac")
+            Path(src).write_bytes(b"x")
+            tr = _FakeTranscoder(tmp)
+            transport = _RecordingTransport()
+            n = transfer_tracks(
+                [_track(src, "One")],
+                target_format="mp3",
+                transport=transport,
+                transcoder=tr,
+                session_log=False,
+                resolve_parent_folder=lambda _meta: 445003,
+            )
+            self.assertEqual(n, 1)
+            self.assertEqual(transport.sent[0][2], 445003)
 
     def test_fatal_aborts_remaining(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -187,13 +187,14 @@ class PymtpDevice:
 
     def create_folder(
         self, name: str, parent: int = DEFAULT_MUSIC_FOLDER_ID
-    ) -> None:
+    ) -> int:
         # Parent defaults to Music (100). Storage must match the ZEN media id
         # (same contract as track send); 0 often works for create but is wrong
-        # for this device class.
-        self._mtp.create_folder(
+        # for this device class. Returns the new folder object id.
+        new_id = self._mtp.create_folder(
             name, parent=int(parent), storage=int(self.storage_id)
         )
+        return int(new_id)
 
     def list_folders(self) -> list[FolderEntry]:
         folders = self._mtp.get_folder_list()
@@ -202,7 +203,14 @@ class PymtpDevice:
             return result
         for folder_id, folder in folders.items():
             name = _decode(folder.name)
-            result.append(FolderEntry(folder_id=int(folder_id), name=name))
+            parent_id = int(getattr(folder, "parent_id", 0) or 0)
+            result.append(
+                FolderEntry(
+                    folder_id=int(folder_id),
+                    name=name,
+                    parent_id=parent_id,
+                )
+            )
         return result
 
     def send_file(self, path: str, remote_name: str | None = None) -> None:
@@ -220,21 +228,30 @@ class PymtpDevice:
     def get_file_metadata(self, object_id: int):
         return self._mtp.get_file_metadata(object_id)
 
-    def send_track(self, path: str, meta: TrackMetadata) -> None:
+    def send_track(
+        self,
+        path: str,
+        meta: TrackMetadata,
+        *,
+        parent_id: int | None = None,
+    ) -> None:
         """Transport.send_track — push audio with metadata via libmtp.
 
-        Uses the same ZEN remote contract as CmdTransport: Music folder parent,
-        explicit storage id, and a short sanitized object basename. Tags keep
-        full title/artist/album (including characters unsafe in filenames).
+        Uses the same ZEN remote contract as CmdTransport: numeric folder parent
+        (Music or an artist subfolder), explicit storage id, and a short
+        sanitized object basename. Tags keep full title/artist/album.
 
         On failure raises TransportError (fatal). Does not fall back to CMD.
         """
         _, ext = os.path.splitext(path)
         ext = ext or ".mp3"
+        folder_id = (
+            int(parent_id) if parent_id is not None else int(self.music_folder_id)
+        )
         remote = build_remote_path(
             meta,
             ext,
-            music_folder_id=self.music_folder_id,
+            music_folder_id=folder_id,
         )
         parent_id, basename = split_remote_path(remote)
 

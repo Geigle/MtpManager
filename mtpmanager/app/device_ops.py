@@ -27,8 +27,8 @@ def create_folder(
     device: DevicePort,
     name: str,
     parent: int = DEFAULT_MUSIC_FOLDER_ID,
-) -> None:
-    device.create_folder(name, parent=parent)
+) -> int:
+    return device.create_folder(name, parent=parent)
 
 
 def list_folders(device: DevicePort) -> list[FolderEntry]:

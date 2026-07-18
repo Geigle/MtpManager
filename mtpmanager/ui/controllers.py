@@ -8,6 +8,7 @@ import threading
 from tkinter import filedialog, messagebox
 
 from mtpmanager.app import device_ops
+from mtpmanager.app.artist_folders import ensure_artist_folder
 from mtpmanager.app.scan_library import scan_library
 from mtpmanager.app.transfer import transfer_track, transfer_tracks
 from mtpmanager.domain.device_profile import DeviceProfile, match_device_profile
@@ -98,7 +99,9 @@ class AppController:
         w.set_config_menu_commands(
             on_config=self.on_config,
             on_stable_mode_toggle=self.on_stable_mode_toggle,
+            on_artist_folders_toggle=self.on_artist_folders_toggle,
         )
+        w.var_artist_folders.set(bool(self._config.store_tracks_in_artist_folder))
         w.set_device_menu_commands(
             on_connect=self.on_connect,
             on_disconnect=self.on_disconnect,
@@ -158,7 +161,53 @@ class AppController:
         """Config → Stable Mode checkbutton: switch transport and persist."""
         stable = bool(self.win.var_stable_mode.get())
         mode = "stable" if stable else "experimental"
+        if stable and self._config.store_tracks_in_artist_folder:
+            # Artist folders need PyMTP create_folder + an open session.
+            self._config.store_tracks_in_artist_folder = False
+            self.win.var_artist_folders.set(False)
+            logger.info(
+                "Disabled store_tracks_in_artist_folder (incompatible with Stable Mode)"
+            )
         self._apply_transfer_mode(mode, persist=True, reason="config_menu")
+
+    def on_artist_folders_toggle(self) -> None:
+        """Config → Store tracks in artist folder (experimental)."""
+        enabled = bool(self.win.var_artist_folders.get())
+        if enabled and self._config.stable_mode:
+            messagebox.showinfo(
+                "Artist folders",
+                "Store tracks in artist folder needs PyMTP "
+                "(uncheck Config → Stable Mode).\n\n"
+                "It creates Music/<Artist> on the device and sends tracks "
+                "into that folder id.",
+            )
+            self.win.var_artist_folders.set(False)
+            return
+        self._config.store_tracks_in_artist_folder = enabled
+        try:
+            save_app_config(self._config)
+        except OSError as e:
+            logger.exception("Failed to save store_tracks_in_artist_folder")
+            messagebox.showerror("Config", f"Could not save settings:\n{e}")
+            return
+        logger.info("Config store_tracks_in_artist_folder=%s", enabled)
+
+    def _parent_folder_resolver(self):
+        """Return a resolve_parent_folder callback, or None when feature is off."""
+        if not self._config.store_tracks_in_artist_folder:
+            return None
+        if self.win.active_mode() != "experimental":
+            return None
+        if not self.device.is_connected():
+            return None
+
+        cache: dict[str, int] = {}
+        device = self.device
+
+        def resolve(meta) -> int | None:
+            return ensure_artist_folder(device, meta, cache=cache)
+
+        return resolve
 
     def _apply_transfer_mode(
         self,
@@ -172,6 +221,9 @@ class AppController:
             mode = "experimental"
         prev = self.win.active_mode()
         self._config.stable_mode = mode == "stable"
+        if mode == "stable" and self._config.store_tracks_in_artist_folder:
+            self._config.store_tracks_in_artist_folder = False
+            self.win.var_artist_folders.set(False)
         self.win.apply_mode_ui(mode)  # type: ignore[arg-type]
         if persist:
             try:
@@ -1180,6 +1232,7 @@ class AppController:
                     transcoder=transcoder,
                     slot=0,
                     on_track_status=on_track_status,
+                    resolve_parent_folder=self._parent_folder_resolver(),
                 )
                 logger.info("Single-track transfer done: path=%s", path)
             finally:
@@ -1239,6 +1292,7 @@ class AppController:
                 transcoder=transcoder,
                 on_progress=on_progress,
                 on_track_status=on_track_status,
+                resolve_parent_folder=self._parent_folder_resolver(),
             )
 
         def on_done(succeeded: int) -> None:

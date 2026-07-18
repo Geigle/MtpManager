@@ -69,6 +69,7 @@ MENU_SYNC_FOLDER = "Sync Folder…"
 
 # Config menu
 MENU_STABLE_MODE = "Stable Mode"
+MENU_ARTIST_FOLDERS = "Store tracks in artist folder (experimental)"
 MENU_CONFIG = "Config…"
 
 # Device menu (PyMTP / default)
@@ -138,11 +139,18 @@ class MainWindow:
             self.menu_device.add_command(label=label, state=DISABLED)
 
         self.var_stable_mode = BooleanVar(value=False)
+        self.var_artist_folders = BooleanVar(value=False)
         self.menu_config = Menu(self.menubar, tearoff=0)
         self.menubar.add_cascade(label="Config", menu=self.menu_config)
         self.menu_config.add_checkbutton(
             label=MENU_STABLE_MODE,
             variable=self.var_stable_mode,
+            onvalue=True,
+            offvalue=False,
+        )
+        self.menu_config.add_checkbutton(
+            label=MENU_ARTIST_FOLDERS,
+            variable=self.var_artist_folders,
             onvalue=True,
             offvalue=False,
         )
@@ -341,11 +349,16 @@ class MainWindow:
         *,
         on_config,
         on_stable_mode_toggle=None,
+        on_artist_folders_toggle=None,
     ) -> None:
         self.menu_config.entryconfig(MENU_CONFIG, command=on_config)
         if on_stable_mode_toggle is not None:
             self.menu_config.entryconfig(
                 MENU_STABLE_MODE, command=on_stable_mode_toggle
+            )
+        if on_artist_folders_toggle is not None:
+            self.menu_config.entryconfig(
+                MENU_ARTIST_FOLDERS, command=on_artist_folders_toggle
             )
 
     def set_device_menu_commands(

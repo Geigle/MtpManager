@@ -8,7 +8,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Iterable
 
-from mtpmanager.domain.models import Track
+from mtpmanager.domain.models import Track, TrackMetadata
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +64,15 @@ def _artist_meaningful(artist: str) -> bool:
     return bool(artist) and artist != _UNKNOWN_ARTIST
 
 
+def primary_artist_meta(meta: TrackMetadata) -> str:
+    """Artist key for grouping / device folders from track metadata."""
+    aa = (meta.albumartist or "").strip()
+    if _albumartist_meaningful(aa):
+        return aa
+    ar = (meta.artist or "").strip()
+    return ar if ar else _UNKNOWN_ARTIST
+
+
 def primary_artist(track: Track) -> str:
     """Artist key for library grouping: prefer albumartist, else track artist.
 
@@ -72,11 +81,7 @@ def primary_artist(track: Track) -> str:
     real albumartist, etc.). Falls back to the track artist when albumartist
     is missing or the unknown placeholder.
     """
-    aa = (track.meta.albumartist or "").strip()
-    if _albumartist_meaningful(aa):
-        return aa
-    ar = (track.meta.artist or "").strip()
-    return ar if ar else _UNKNOWN_ARTIST
+    return primary_artist_meta(track.meta)
 
 
 def _path_has_component(path: str, name: str) -> bool:
