@@ -5,7 +5,8 @@
 **Code:** `mtpmanager/infra/remote_naming.py`  
 **Consumers:** `cmd_transport.py`, `pymtp_device.py`  
 **Tests:** `tests/test_remote_naming.py`  
-**How we learned:** [debrief-zen-track-send-failure.md](./debrief-zen-track-send-failure.md), [debrief-pymtp-transfer-failure.md](./debrief-pymtp-transfer-failure.md)
+**How we learned:** [debrief-zen-track-send-failure.md](./debrief-zen-track-send-failure.md), [debrief-pymtp-transfer-failure.md](./debrief-pymtp-transfer-failure.md)  
+**Basename length evidence:** [basename-limit-evidence.md](./basename-limit-evidence.md)
 
 ---
 
@@ -17,7 +18,7 @@ Defaults are **Creative ZEN Vision:M–centric** (VID `041e`, PID `413e`). They 
 |----------|--------|--------|
 | `DEFAULT_MUSIC_FOLDER_ID` | **100** | List Folders / `mtp-folders`: folder 100 == `"Music"` |
 | `DEFAULT_STORAGE_ID` | **`0x00010001`** (65537) | `mtp-detect`: Storage Media |
-| `MAX_REMOTE_BASENAME` | **56** | Stay well under ~64-char object-name limits |
+| `MAX_REMOTE_BASENAME` | **56** | Empirical send hygiene (margin under a suspected ~64 boundary from a ZEN finalize incident) — **not** a proven hard device max; see [basename-limit-evidence.md](./basename-limit-evidence.md) |
 
 These are hardcoded in `remote_naming` and constructor defaults on `CmdTransport` / `PymtpDevice`. **Auto-discovery of folder/storage IDs is future work**, not present today.
 
@@ -98,7 +99,7 @@ CMD always passes `-s <storage_id>`. PyMTP sets `mt.storage_id` and refreshes st
 
 Implemented by `sanitize_component` / `build_remote_path`:
 
-1. **Max body ~56** (`MAX_REMOTE_BASENAME`), including extension budget: body room is `max_basename - len(ext)`, minimum body length 8.
+1. **Max body ~56** (`MAX_REMOTE_BASENAME`), including extension budget: body room is `max_basename - len(ext)`, minimum body length 8. This is a **send reliability margin**, not a claim that the player cannot store longer names from other software (PTP allows much longer strings; a 91-char name has been observed on-device under Music parent 100). Details: [basename-limit-evidence.md](./basename-limit-evidence.md).
 2. **Strip unsafe characters** (replaced with space, then collapsed whitespace):
 
    ```text
@@ -112,11 +113,13 @@ Implemented by `sanitize_component` / `build_remote_path`:
 
 **Tags** may still contain `&`, long titles, full album names, etc. Only the **on-wire object filename** is sanitized.
 
+Do **not** raise `MAX_REMOTE_BASENAME` only because longer names already exist on the device. Loosen only after a controlled send experiment (see evidence note).
+
 ---
 
 ## Tags vs filename split
 
-| Channel | Content |
+| Channel | Content |within our send basename budge
 |---------|---------|
 | Remote **filename** | Short, safe, under length limit |
 | **Tags** / metadata flags | Full title, artist, album, genre, track number, year |
@@ -169,7 +172,7 @@ When a send fails near the end or rejects immediately:
 2. **Storage ID** in logs/CMD output — `0` is a red flag; expect `65537` / `0x00010001`.
 3. **`mtp-detect`** — confirm Storage Media id and free space (post-death “full” is often a lie).
 4. **`mtp-folders`** — confirm Music folder id (100 on this ZEN).
-5. **Remote basename** — length well under 64; no `& \ / : * ? " < > |`; extension present.
+5. **Remote basename** — within `MAX_REMOTE_BASENAME` (56) send budget; no `& \ / : * ? " < > |`; extension present. Longer names may already exist on-device from other tools; that does not relax our send policy ([basename-limit-evidence.md](./basename-limit-evidence.md)).
 6. **Cascade after unplug** — PTP `02ff`, “storage full or corrupt” often means **session dead**, not root cause.
 7. **App abort** — one fatal `TransportError` should stop the batch; if not, transfer error handling regressed.
 8. **Experimental only** — `filetype=2` for MP3 (not 1); libmtp errorstack in logs, not bare `CommandFailed`.

@@ -13,8 +13,11 @@ from types import MappingProxyType
 
 from mtpmanager.domain.models import TrackMetadata
 
-# Creative ZEN Vision:M (and many MTP players) use a short object-name limit.
-# Track 8 of Doom hit exactly 64 chars with the old long remote basename.
+# Empirical send hygiene: keep basenames short. Track 8 of Doom hit exactly 64
+# chars (no ext, contained &) with the old long remote basename and failed at
+# finalize when stacked with bad parent/storage. Not a proven hard device max —
+# longer ObjectFileName values can already exist on-device from other tools.
+# See docs/basename-limit-evidence.md.
 MAX_REMOTE_BASENAME = 56
 
 # ---------------------------------------------------------------------------

@@ -39,6 +39,7 @@ This folder is the **design and incident** map. For run instructions, logs, and 
 | [architecture.md](./architecture.md) | System design: layers, package map, composition root, dual-mode wiring, logging, known gaps |
 | [decisions.md](./decisions.md) | ADR-lite: dual mode, no silent fallback, shared naming, fatal abort, pymtp patches, license, … |
 | [device-contract.md](./device-contract.md) | MTP/ZEN remote path, storage, basename, tags vs filename — **do not rebreak** |
+| [basename-limit-evidence.md](./basename-limit-evidence.md) | Why `MAX_REMOTE_BASENAME=56`: external vs empirical evidence; long on-device names |
 | [transfer-and-modes.md](./transfer-and-modes.md) | Scan → transcode → send; Stable vs Experimental; batch abort; tests |
 | [pymtp-binding-hazards.md](./pymtp-binding-hazards.md) | Living catalog: PyMTP breakage patterns, confirmed fixes, predicted next failures |
 | [libmtp-api-coverage.md](./libmtp-api-coverage.md) | libmtp vs stock pymtp vs MtpManager: what is implemented, stubbed, or unbound |
@@ -51,6 +52,7 @@ This folder is the **design and incident** map. For run instructions, logs, and 
 
 | Question | Answer lives in |
 |----------|-----------------|
+| Why 56-char basenames if the device has longer names? | [basename-limit-evidence.md](./basename-limit-evidence.md) |
 | Where do I change remote filenames? | `mtpmanager/infra/remote_naming.py` — [device-contract.md](./device-contract.md) |
 | Why doesn’t Experimental fall back to mtp-sendtr? | [decisions.md](./decisions.md) D3 |
 | Why abort the whole album on one failure? | [decisions.md](./decisions.md) D5; CMD debrief |

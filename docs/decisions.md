@@ -92,15 +92,15 @@ Debriefs remain the forensic narrative; this file is what we keep doing.
 
 ## D7 — Tags carry full metadata; remote filename is short/sanitized
 
-**Context:** Verbose archive-style object names hit ~64-char limits and unsafe characters (`&`). Player UI still needs real titles.
+**Context:** Verbose archive-style object names (exactly 64 chars, `&`, no extension in the Doom incident) stacked with bad parent/storage and failed at finalize. Player UI still needs real titles. Longer names can already exist on-device from other tools; that does not make long names a safe default for our send path.
 
-**Decision:** Metadata flags/fields keep full title/artist/album (including `&`). Object basename is sanitized, length-bounded, extension required (`08 Flesh Metal.mp3`).
+**Decision:** Metadata flags/fields keep full title/artist/album (including `&`). Object basename is sanitized, length-bounded (`MAX_REMOTE_BASENAME = 56` as empirical send hygiene), extension required (`08 Flesh Metal.mp3`).
 
-**Rationale:** Tags and object names are different channels on MTP; only the name is device-fragile on Creative-era firmware.
+**Rationale:** Tags and object names are different channels on MTP; only the name is device-fragile on Creative-era firmware. 56 is a margin under a suspected ~64 boundary from local incident data, not a proven PTP/libmtp hard max.
 
-**Consequences:** On-device browser may show short names; library views that use tags stay correct. Do not “fix” send by stuffing full `Artist - Album - Title` into the remote path.
+**Consequences:** On-device browser may show short names; library views that use tags stay correct. Do not “fix” send by stuffing full `Artist - Album - Title` into the remote path. Do not raise the basename budget solely because Get File Info shows a longer existing object.
 
-**Source:** [device-contract.md](./device-contract.md); CMD debrief.
+**Source:** [device-contract.md](./device-contract.md); [basename-limit-evidence.md](./basename-limit-evidence.md); CMD debrief.
 
 ---
 
