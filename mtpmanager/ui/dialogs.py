@@ -388,8 +388,12 @@ def pick_file_entry_dialog(
     return result[0]
 
 
-def show_file_info_dialog(parent, entry) -> None:
-    """Modal display of one object's metadata (Get File Info)."""
+def show_file_info_dialog(parent, entry, *, note: str | None = None) -> None:
+    """Modal display of one object's metadata (Get File Info).
+
+    Optional *note* is shown under the summary (e.g. listing-snapshot fallback
+    when live Get_Filemetadata fails on ZEN).
+    """
     from mtpmanager.ui.formatting import file_metadata_summary
 
     dlg = Toplevel(parent)
@@ -406,6 +410,15 @@ def show_file_info_dialog(parent, entry) -> None:
         anchor="w",
         font=("Menlo", 11),
     ).pack(anchor="w")
+    if note:
+        Label(
+            body,
+            text=note,
+            justify=LEFT,
+            anchor="w",
+            wraplength=420,
+            fg="#555555",
+        ).pack(anchor="w", pady=(10, 0))
     Button(body, text="Close", width=10, command=dlg.destroy).pack(
         anchor="e", pady=(12, 0)
     )

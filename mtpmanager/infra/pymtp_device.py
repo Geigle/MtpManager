@@ -288,8 +288,19 @@ class PymtpDevice:
                 fatal=True,
             ) from exc
         except pymtp.ObjectNotFound as exc:
+            # Wrapper already dumped errorstack; collect text for logs.
+            stack_text = _collect_errorstack(self._mtp)
+            logger.warning(
+                "get_file_metadata ObjectNotFound id=%s "
+                "(often ZEN proplist/Get_Filemetadata fragility, not a missing "
+                "handle — prefer listing snapshot for File Info)\n%s",
+                oid,
+                stack_text or "(no libmtp errorstack text)",
+            )
             raise TransportError(
-                f"Object id={oid} not found on device.",
+                f"Live Get_Filemetadata failed for object id={oid} "
+                "(device returned no metadata; object may still exist — "
+                "use listing fields).",
                 fatal=False,
             ) from exc
         except pymtp.CommandFailed as exc:

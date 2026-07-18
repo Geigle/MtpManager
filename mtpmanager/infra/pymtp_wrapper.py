@@ -472,6 +472,12 @@ def _get_file_metadata(self, file_id):
 
     Stock passes the raw device struct and untyped int into
     ``LIBMTP_Get_Filemetadata``. Same arm64 argtypes class as delete_object.
+
+    libmtp's Get_Filemetadata asks ``ptp_object_want`` for ObjectInfo **and**
+    MTP property list. On ZEN Vision:M (``BROKEN_MTPGETOBJPROPLIST_ALL``),
+    single-object proplist can fail for some handles that still appear in
+    ``Get_Filelisting`` — NULL here is often "proplist incomplete", not a
+    missing object. Callers should fall back to listing snapshot fields.
     """
     if self.device is None:
         raise NotConnected
@@ -482,10 +488,13 @@ def _get_file_metadata(self, file_id):
 
     ret = self.mtp.LIBMTP_Get_Filemetadata(dev, ctypes.c_uint32(int(file_id)))
     if not _ptr_truthy(ret):
+        # Surface libmtp/USB noise (e.g. zero-packet panic) before ObjectNotFound.
+        _debug_stack(self)
         raise ObjectNotFound
     try:
         return ret.contents
     except (ValueError, TypeError) as exc:
+        _debug_stack(self)
         raise ObjectNotFound from exc
 
 

@@ -1553,22 +1553,45 @@ class AppController:
         )
         if entry is None:
             return
+        # Prefer a live Get_Filemetadata refresh; on ZEN some listed/playable
+        # handles still return NULL (proplist path). Listing already has every
+        # field File Info shows — fall back instead of claiming "not found".
+        meta = entry
+        source = "listing"
         try:
             meta = device_ops.get_file_metadata(self.device, entry.item_id)
+            source = "live"
         except TransportError as e:
-            logger.exception("Get file info failed id=%s", entry.item_id)
-            messagebox.showerror("File Info", str(e))
-            return
+            if e.fatal:
+                logger.exception("Get file info failed id=%s", entry.item_id)
+                messagebox.showerror("File Info", str(e))
+                return
+            logger.warning(
+                "Get file info live refresh failed id=%s (%s); "
+                "showing listing snapshot",
+                entry.item_id,
+                e,
+            )
+            meta = entry
+            source = "listing"
         except Exception as e:
             logger.exception("Get file info failed id=%s", entry.item_id)
             messagebox.showerror("File Info", str(e))
             return
         logger.info(
-            "File Info id=%s name=%r parent=%s type=%s size=%s",
+            "File Info id=%s name=%r parent=%s type=%s size=%s source=%s",
             meta.item_id,
             meta.name,
             meta.parent_id,
             meta.filetype,
             meta.filesize,
+            source,
         )
-        show_file_info_dialog(self.win.root, meta)
+        note = None
+        if source == "listing":
+            note = (
+                "Source: file listing snapshot "
+                "(live Get_Filemetadata failed for this id — common on ZEN "
+                "when MTP property-list refresh fails; object is still listed)."
+            )
+        show_file_info_dialog(self.win.root, meta, note=note)

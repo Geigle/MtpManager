@@ -38,7 +38,7 @@ Rough scale (1.1.23): ~120 exported `LIBMTP_*` ops → ~34 pymtp high-level meth
 | Error dump | `debug_stack` → `LIBMTP_Dump_Errorstack` | `pymtp_wrapper._debug_stack` |
 | File listing | `get_filelisting` → `LIBMTP_Get_Filelisting_With_Callback` | `pymtp_wrapper._get_filelisting`; Device → **List Files** / **Delete Track** / **Get File Info** picker |
 | Single-object delete | `delete_object` → `LIBMTP_Delete_Object` | `pymtp_wrapper._delete_object` + argtypes; Device → **Delete Track (experimental)** |
-| File metadata | `get_file_metadata` → `LIBMTP_Get_Filemetadata` | `pymtp_wrapper._get_file_metadata` + argtypes; Device → **Get File Info (experimental)** |
+| File metadata | `get_file_metadata` → `LIBMTP_Get_Filemetadata` | `pymtp_wrapper._get_file_metadata` + argtypes; Device → **Get File Info**; on ZEN NULL/proplist fail → **listing snapshot** (class J in hazards) |
 | Filetype enum | `LIBMTP_Filetype` / `find_filetype` table | Mutated in place (`FOLDER=0`, `MP3=2`, …) |
 | ctypes argtypes (selected) | Send track/file, errorstack get/clear, storage, folders, create, friendly name, filelisting, delete, file metadata | `_configure_libmtp_ctypes` |
 
@@ -180,7 +180,7 @@ Not every libmtp symbol matters. For this app’s goals, the meaningful “not d
 9. **Multi-device selection** — detect / open by serial  
 10. **Update on-device metadata** without re-send — `Update_Track_Metadata`  
 11. **Harden remaining used stock paths** — especially `send_file_from_file`, capacity getters  
-12. ~~**Real Get File Info**~~ — **done:** picker + patched `get_file_metadata`; optional track metadata still open  
+12. ~~**Real Get File Info**~~ — **done:** picker + patched `get_file_metadata` + listing fallback when live proplist refresh fails (ZEN class J); optional track-metadata path still open  
 13. **Storage-scoped** folder/track lists (multi-storage devices)  
 14. **Admin footguns** — format storage / reset (only if ever needed; gate hard)
 

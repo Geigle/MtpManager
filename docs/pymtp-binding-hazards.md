@@ -40,6 +40,7 @@ CMD / Stable Mode (`mtp-sendtr`) avoids most of 3–6 because the C CLI is maint
 | **G. Poisoned session** | Next PyMTP op fails immediately after a bad send | Long-lived session after PTP death | Disconnect/replug; Config → Stable Mode; no silent CMD fallback |
 | **H. Platform load** | Import fails / no libmtp | `find_library("mtp")` is `None` on macOS | Wrapper patches Homebrew lib paths |
 | **I. Exists-check bugs** | Wrong IOError / always/never fail | `os.path.exists(source) == None` (stock send_track) | Use `os.path.isfile` (already in patched send) |
+| **J. Get_Filemetadata / proplist** | Listed, playable object → `ObjectNotFound` on Get File Info | libmtp wants ObjectInfo **+** MTP proplist; ZEN `BROKEN_MTPGETOBJPROPLIST_ALL` + single-object proplist fail → NULL | Fall back to **listing snapshot** fields; dump errorstack; do not claim missing handle |
 
 ---
 
@@ -117,6 +118,26 @@ On pure PyMTP send failure: log errorstack, raise `TransportError`, UI points at
 
 ---
 
+### 7. Get File Info / `Get_Filemetadata` intermittent NULL — **mitigated** (J)
+
+**Symptom:** Device → Get File Info lists the object (e.g. id `398401`, `66617`); live refresh raises `ObjectNotFound`. Same session can succeed for other ids (e.g. `262464`). Object remains playable via the device library. Logs may show concurrent `LIBMTP panic: unable to read in zero packet` (USB noise; not proof the handle is gone).
+
+**Root shape (libmtp, not ctypes skew):**
+
+- `LIBMTP_Get_Filemetadata` → `ptp_object_want(..., OBJECTINFO | MTPPROPLIST)`.
+- If proplist flags are not fully loaded, `ptp_object_want` returns `PTP_RC_GeneralError` → libmtp returns **NULL** → pymtp `ObjectNotFound`.
+- ZEN Vision:M is flagged `DEVICE_FLAG_BROKEN_MTPGETOBJPROPLIST_ALL` (bulk proplist). Listing uses classic ObjectInfo path and already has id/name/parent/storage/size/type/mtime.
+- `LIBMTP_File` ctypes layout matches C on this platform (`sizeof` 56) — not a struct-offset bug for `item_id`.
+
+**Fix / policy:**
+
+- Wrapper: typed `Get_Filemetadata`; dump errorstack on NULL before `ObjectNotFound`.
+- UI: on non-fatal live failure, show **listing snapshot** with an explicit note (not “object missing”).
+- Do **not** treat this as silent Experimental→CMD fallback; it is the same session’s listing data already fetched for the picker.
+- Optional later: `Get_Trackmetadata` (ObjectInfo-only want) for audio types — still USB-heavy; listing fallback is enough for File Info fields.
+
+---
+
 ## Predicted breakages (not all patched yet)
 
 Assume stock pymtp methods are **guilty until proven** on device under Python 3.13 + arm64 + libmtp 1.1.x.
@@ -189,7 +210,7 @@ Do not “fix” those by patching ctypes.
 ---
 
 ## Patch inventory (wrapper today)
-
+dump + ObjectNotFound); UI listing fallback | C, J
 Keep this table in sync when adding monkey-patches:
 
 | Stock surface | Patch status | Classes |
@@ -234,6 +255,7 @@ If a PyMTP feature:
 - **succeeds but corrupts strings on device** → class **D**; encode / `c_char_p`.  
 - **fails in ~1s with empty `CommandFailed`** → class **B/C/F**; filetype + argtypes + errorstack.  
 - **fails after a prior bad send** → class **G**; session poison, not a new enum.  
-- **looks like CMD’s old 99% finalize** → class **A**; re-check parent/storage/name contract first.
+- **looks like CMD’s old 99% finalize** → class **A**; re-check parent/storage/name contract first.  
+- **listed object, Get_Filemetadata NULL** → class **J**; listing snapshot, not “missing id”.
 
 Stock pymtp is a **compatibility tax**, not a stable platform. Prefer **small, tested wrapper patches** over expanding call surface without a checklist pass.

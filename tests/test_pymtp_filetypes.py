@@ -153,6 +153,13 @@ class PymtpGetFileMetadataTests(unittest.TestCase):
         self.assertIs(fn.argtypes[0], ctypes.c_void_p)
         self.assertIs(fn.argtypes[1], ctypes.c_uint32)
 
+    def test_get_file_metadata_null_dumps_stack(self) -> None:
+        """NULL from libmtp should dump errorstack then raise ObjectNotFound."""
+        src = inspect.getsource(pymtp.MTP.get_file_metadata)
+        self.assertIn("_debug_stack", src)
+        self.assertIn("ObjectNotFound", src)
+        self.assertIn("proplist", src.lower())
+
 
 class FileLineFormatTests(unittest.TestCase):
     def test_file_line(self) -> None:
