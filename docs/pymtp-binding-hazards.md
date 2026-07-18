@@ -209,6 +209,7 @@ Keep this table in sync when adding monkey-patches:
 | Playlist APIs | **Untouched** | D, C predicted |
 | Download to file | **Untouched** | D, C predicted |
 | `delete_object` | Replaced (argtypes + device ptr) | C, G residual |
+| `get_file_metadata` | Replaced (argtypes + device ptr; NULL → ObjectNotFound) | C |
 
 ---
 

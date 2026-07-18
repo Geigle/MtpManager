@@ -270,11 +270,20 @@ def show_file_list_dialog(parent, files: list) -> None:
     parent.wait_window(dlg)
 
 
-def pick_file_entry_dialog(parent, files: list):
+def pick_file_entry_dialog(
+    parent,
+    files: list,
+    *,
+    title: str = "Select Object",
+    prompt: str = "Select an object from the list.",
+    action_label: str = "Select",
+    confirm_message=None,
+):
     """Modal picker over a file listing; returns selected FileEntry or None.
 
-    Used by Device → Delete Track (experimental): list comes from
-    get_filelisting / list_files; caller deletes by entry.item_id.
+    Used by experimental Device admin paths that start from get_filelisting /
+    list_files (Delete Track, Get File Info). Optional *confirm_message(entry)*
+    returns a yes/no body string, or None to skip confirmation.
     """
     from tkinter import BOTH, END, LEFT, RIGHT, Y, Listbox, Scrollbar
 
@@ -285,7 +294,7 @@ def pick_file_entry_dialog(parent, files: list):
     result: list[FileEntry | None] = [None]
 
     dlg = Toplevel(parent)
-    dlg.title("Delete Track (experimental)")
+    dlg.title(title)
     dlg.transient(parent)
     dlg.geometry("720x420")
 
@@ -293,10 +302,7 @@ def pick_file_entry_dialog(parent, files: list):
     body.pack(fill=BOTH, expand=True)
     Label(
         body,
-        text=(
-            f"{len(entries)} object(s) — select one to delete by object id. "
-            "Folders and system objects are included; choose carefully."
-        ),
+        text=f"{len(entries)} object(s) — {prompt}",
         wraplength=680,
         justify=LEFT,
     ).pack(anchor="w")
@@ -333,11 +339,11 @@ def pick_file_entry_dialog(parent, files: list):
         result[0] = None
         dlg.destroy()
 
-    def on_delete() -> None:
+    def on_choose() -> None:
         sel = lb.curselection()
         if not sel:
             messagebox.showinfo(
-                "Delete Track",
+                title,
                 "Select an object from the list first.",
                 parent=dlg,
             )
@@ -346,28 +352,24 @@ def pick_file_entry_dialog(parent, files: list):
         if idx < 0 or idx >= len(entries):
             return
         entry = entries[idx]
-        name = (entry.name or "").strip() or "(unnamed)"
-        if not messagebox.askyesno(
-            "Confirm Delete",
-            (
-                f"Delete object id={entry.item_id}?\n\n"
-                f"{name}\n"
-                f"parent={entry.parent_id}  type={entry.filetype}\n\n"
-                "This cannot be undone from the app."
-            ),
-            parent=dlg,
-        ):
-            return
+        if confirm_message is not None:
+            body_text = confirm_message(entry)
+            if body_text and not messagebox.askyesno(
+                "Confirm",
+                body_text,
+                parent=dlg,
+            ):
+                return
         result[0] = entry
         dlg.destroy()
 
     Button(btn_row, text="Cancel", width=10, command=on_cancel).pack(
         side=RIGHT, padx=(6, 0)
     )
-    Button(btn_row, text="Delete…", width=10, command=on_delete).pack(side=RIGHT)
+    Button(btn_row, text=action_label, width=10, command=on_choose).pack(side=RIGHT)
 
     def on_double(_event=None) -> None:
-        on_delete()
+        on_choose()
 
     lb.bind("<Double-Button-1>", on_double)
     dlg.protocol("WM_DELETE_WINDOW", on_cancel)
@@ -384,3 +386,34 @@ def pick_file_entry_dialog(parent, files: list):
         lb.focus_set()
     parent.wait_window(dlg)
     return result[0]
+
+
+def show_file_info_dialog(parent, entry) -> None:
+    """Modal display of one object's metadata (Get File Info)."""
+    from mtpmanager.ui.formatting import file_metadata_summary
+
+    dlg = Toplevel(parent)
+    dlg.title("File Info (experimental)")
+    dlg.transient(parent)
+    dlg.resizable(False, False)
+
+    body = Frame(dlg, padx=14, pady=12)
+    body.pack(fill=BOTH, expand=True)
+    Label(
+        body,
+        text=file_metadata_summary(entry),
+        justify=LEFT,
+        anchor="w",
+        font=("Menlo", 11),
+    ).pack(anchor="w")
+    Button(body, text="Close", width=10, command=dlg.destroy).pack(
+        anchor="e", pady=(12, 0)
+    )
+    dlg.grab_set()
+    try:
+        px = parent.winfo_rootx() + max(0, (parent.winfo_width() - 420) // 2)
+        py = parent.winfo_rooty() + max(0, (parent.winfo_height() - 240) // 3)
+        dlg.geometry(f"+{px}+{py}")
+    except Exception:
+        pass
+    parent.wait_window(dlg)

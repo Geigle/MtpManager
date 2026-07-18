@@ -42,6 +42,7 @@ from mtpmanager.ui.dialogs import (
     pick_file_entry_dialog,
     show_config_dialog,
     show_device_info_dialog,
+    show_file_info_dialog,
     show_file_list_dialog,
     show_folder_list_dialog,
 )
@@ -1470,7 +1471,27 @@ class AppController:
             )
             return
         logger.info("Delete Track (experimental): %d object(s) listed", len(files))
-        entry = pick_file_entry_dialog(self.win.root, files)
+
+        def _confirm(entry) -> str:
+            name = (entry.name or "").strip() or "(unnamed)"
+            return (
+                f"Delete object id={entry.item_id}?\n\n"
+                f"{name}\n"
+                f"parent={entry.parent_id}  type={entry.filetype}\n\n"
+                "This cannot be undone from the app."
+            )
+
+        entry = pick_file_entry_dialog(
+            self.win.root,
+            files,
+            title="Delete Track (experimental)",
+            prompt=(
+                "select one to delete by object id. "
+                "Folders and system objects are included; choose carefully."
+            ),
+            action_label="Delete…",
+            confirm_message=_confirm,
+        )
         if entry is None:
             return
         try:
@@ -1507,13 +1528,47 @@ class AppController:
         )
 
     def action_get_file_info(self) -> None:
+        """Experimental Device → Get File Info: pick from listing, fetch metadata."""
         if not self._require_device_ready():
             return
-        obid = 2654
         try:
-            fmd = self.device.get_file_metadata(obid)
-            logger.debug("File metadata for %s: %s", obid, fmd)
-            messagebox.showinfo("File Info", str(fmd))
+            files = device_ops.list_files(self.device)
         except Exception as e:
-            logger.exception("Get file info failed")
+            logger.exception("Get file info listing failed")
             messagebox.showerror("File Info", str(e))
+            return
+        if not files:
+            messagebox.showinfo(
+                "File Info",
+                "No objects found on the device.",
+            )
+            return
+        logger.info("Get File Info (experimental): %d object(s) listed", len(files))
+        entry = pick_file_entry_dialog(
+            self.win.root,
+            files,
+            title="Get File Info (experimental)",
+            prompt="select one object to inspect by id (LIBMTP_Get_Filemetadata).",
+            action_label="Get Info",
+        )
+        if entry is None:
+            return
+        try:
+            meta = device_ops.get_file_metadata(self.device, entry.item_id)
+        except TransportError as e:
+            logger.exception("Get file info failed id=%s", entry.item_id)
+            messagebox.showerror("File Info", str(e))
+            return
+        except Exception as e:
+            logger.exception("Get file info failed id=%s", entry.item_id)
+            messagebox.showerror("File Info", str(e))
+            return
+        logger.info(
+            "File Info id=%s name=%r parent=%s type=%s size=%s",
+            meta.item_id,
+            meta.name,
+            meta.parent_id,
+            meta.filetype,
+            meta.filesize,
+        )
+        show_file_info_dialog(self.win.root, meta)

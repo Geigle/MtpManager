@@ -46,3 +46,38 @@ def file_line(entry: FileEntry) -> str:
         f"{entry.item_id:8}  parent={entry.parent_id:<6}  "
         f"type={entry.filetype:<3}  {size_s:>8}  {entry.name}"
     )
+
+
+def file_metadata_summary(entry: FileEntry) -> str:
+    """Multi-line summary for Device → Get File Info."""
+    size = int(entry.filesize or 0)
+    if size >= 1_000_000:
+        size_s = f"{size / 1_000_000:.2f} MB ({size} bytes)"
+    elif size >= 1000:
+        size_s = f"{size / 1000:.1f} kB ({size} bytes)"
+    else:
+        size_s = f"{size} bytes"
+
+    mtime = int(entry.modificationdate or 0)
+    if mtime > 0:
+        try:
+            from datetime import datetime, timezone
+
+            mtime_s = datetime.fromtimestamp(mtime, tz=timezone.utc).strftime(
+                "%Y-%m-%d %H:%M:%S UTC"
+            )
+        except (OverflowError, OSError, ValueError):
+            mtime_s = str(mtime)
+    else:
+        mtime_s = "(none)"
+
+    name = (entry.name or "").strip() or "(unnamed)"
+    return (
+        f"Object id: {entry.item_id}\n"
+        f"Name: {name}\n"
+        f"Parent id: {entry.parent_id}\n"
+        f"Storage id: 0x{int(entry.storage_id):08x} ({entry.storage_id})\n"
+        f"Filetype: {entry.filetype}\n"
+        f"Size: {size_s}\n"
+        f"Modified: {mtime_s}"
+    )

@@ -80,7 +80,7 @@ MENU_CREATE_FOLDER = "Create Folder…"
 MENU_LIST_FOLDERS = "List Folders"
 MENU_LIST_FILES = "List Files (experimental)"
 MENU_DELETE_TRACK = "Delete Track (experimental)"
-MENU_GET_FILE_INFO = "Get File Info…"
+MENU_GET_FILE_INFO = "Get File Info (experimental)"
 MENU_DELETE_ALL = "Delete All Tracks…"
 
 # Track context menu

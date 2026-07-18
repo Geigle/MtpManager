@@ -114,7 +114,7 @@ Platform defaults: macOS `~/Library/Logs/MtpManager`; Linux `~/.local/share/mtpm
 | Hardcoded ZEN Music folder / storage defaults | `remote_naming.DEFAULT_*`; constructors on both transports |
 | Multi-device discovery | Not implemented; user must match device layout |
 | Transfer send still blocking in worker | Convert/send pipeline + UI job are off the Tk thread; each `send_track` still blocks the transfer worker until the device finishes |
-| Full “Delete All Tracks” | Stub lists storage ids only; single-object **Delete Track (experimental)** uses file listing + `delete_object` |
+| Full “Delete All Tracks” | Stub lists storage ids only; single-object **Delete Track (experimental)** uses file listing + `delete_object`; **Get File Info (experimental)** uses the same picker + `get_file_metadata` |
 | Upstream-maintained libmtp Python binding | Stock pymtp patched in-process via `pymtp_wrapper.py`; hazards [pymtp-binding-hazards.md](./pymtp-binding-hazards.md); coverage [libmtp-api-coverage.md](./libmtp-api-coverage.md) |
 
 These are known limitations, not accidental omissions in the docs. Product follow-ups stay out of this architecture description except as honest gaps.

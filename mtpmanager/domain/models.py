@@ -75,7 +75,7 @@ class FolderEntry:
 
 @dataclass(frozen=True)
 class FileEntry:
-    """One object from device file listing (LIBMTP_file_t summary)."""
+    """One object from device file listing / file metadata (LIBMTP_file_t)."""
 
     item_id: int
     name: str
@@ -83,3 +83,4 @@ class FileEntry:
     storage_id: int = 0
     filesize: int = 0
     filetype: int = 0
+    modificationdate: int = 0

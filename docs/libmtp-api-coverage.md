@@ -36,10 +36,11 @@ Rough scale (1.1.23): ~120 exported `LIBMTP_*` ops → ~34 pymtp high-level meth
 | Create folder | `create_folder` → `LIBMTP_Create_Folder` | `pymtp_wrapper._create_folder` |
 | Set friendly name | `set_devicename` → `LIBMTP_Set_Friendlyname` | `pymtp_wrapper._set_devicename` |
 | Error dump | `debug_stack` → `LIBMTP_Dump_Errorstack` | `pymtp_wrapper._debug_stack` |
-| File listing | `get_filelisting` → `LIBMTP_Get_Filelisting_With_Callback` | `pymtp_wrapper._get_filelisting`; Device → **List Files** / **Delete Track** picker |
+| File listing | `get_filelisting` → `LIBMTP_Get_Filelisting_With_Callback` | `pymtp_wrapper._get_filelisting`; Device → **List Files** / **Delete Track** / **Get File Info** picker |
 | Single-object delete | `delete_object` → `LIBMTP_Delete_Object` | `pymtp_wrapper._delete_object` + argtypes; Device → **Delete Track (experimental)** |
+| File metadata | `get_file_metadata` → `LIBMTP_Get_Filemetadata` | `pymtp_wrapper._get_file_metadata` + argtypes; Device → **Get File Info (experimental)** |
 | Filetype enum | `LIBMTP_Filetype` / `find_filetype` table | Mutated in place (`FOLDER=0`, `MP3=2`, …) |
-| ctypes argtypes (selected) | Send track/file, errorstack get/clear, storage, folders, create, friendly name, filelisting, delete | `_configure_libmtp_ctypes` |
+| ctypes argtypes (selected) | Send track/file, errorstack get/clear, storage, folders, create, friendly name, filelisting, delete, file metadata | `_configure_libmtp_ctypes` |
 
 Domain contract for send (parent 100 / artist folder id, storage `0x00010001`, short basename) is **app** code (`remote_naming`, `pymtp_device`, `cmd_transport`), not libmtp itself.
 
@@ -52,7 +53,6 @@ Domain contract for send (parent 100 / artist folder id, storage `0x00010001`, s
 | Capacity | `get_freespace`, `get_totalspace`, `get_usedspace`, `get_usedspace_percent` | Walks storage; multi-storage may be wrong |
 | Filetype guess | `find_filetype` | Table fixed; method body stock |
 | Track list | `get_tracklisting` | Used by Delete All stub listing |
-| File meta | `get_file_metadata` | Get File Info UI (hard-coded id) |
 | Generic file send | `send_file_from_file` | **Not** product-hardened like track send; residual string/argtypes risk |
 | Storage refresh | `LIBMTP_Get_Storage` (direct ctypes in `send_track`) | Argtypes set in wrapper |
 
@@ -61,7 +61,6 @@ Domain contract for send (parent 100 / artist folder id, storage `0x00010001`, s
 | UI / entry | Gap |
 |------------|-----|
 | **Device → Delete All Tracks…** | Lists track storage ids only; never batch-calls `delete_object` |
-| **Device → Get File Info…** | Hard-coded object id `2654`; not a picker |
 
 ---
 
@@ -181,7 +180,7 @@ Not every libmtp symbol matters. For this app’s goals, the meaningful “not d
 9. **Multi-device selection** — detect / open by serial  
 10. **Update on-device metadata** without re-send — `Update_Track_Metadata`  
 11. **Harden remaining used stock paths** — especially `send_file_from_file`, capacity getters  
-12. **Real Get File Info** — user-chosen object id; optional track metadata  
+12. ~~**Real Get File Info**~~ — **done:** picker + patched `get_file_metadata`; optional track metadata still open  
 13. **Storage-scoped** folder/track lists (multi-storage devices)  
 14. **Admin footguns** — format storage / reset (only if ever needed; gate hard)
 

@@ -14,6 +14,7 @@ libmtp (1.1.x) and Apple Silicon / Python 3:
     (arm64/Py3: often only the first character is stored on the device)
   * get_filelisting linked-list walk (NULL-safe) + filelisting callback argtypes
   * delete_object argtypes + device-pointer path (LIBMTP_Delete_Object)
+  * get_file_metadata argtypes + device-pointer path (LIBMTP_Get_Filemetadata)
 
 Living catalog of failure classes and *predicted* next breaks:
   docs/pymtp-binding-hazards.md
@@ -46,7 +47,7 @@ if sys.platform == "darwin" and ctypes.util.find_library("mtp") is None:
 from pymtp import *  # noqa: E402, F403
 from pymtp import LIBMTP_Filetype  # noqa: E402
 from pymtp import MTP as _MTP  # noqa: E402
-from pymtp import CommandFailed, NotConnected  # noqa: E402
+from pymtp import CommandFailed, NotConnected, ObjectNotFound  # noqa: E402
 import pymtp as _pymtp  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -186,6 +187,11 @@ def _configure_libmtp_ctypes() -> None:
     if hasattr(lib, "LIBMTP_Delete_Object"):
         lib.LIBMTP_Delete_Object.argtypes = [dev_p, ctypes.c_uint32]
         lib.LIBMTP_Delete_Object.restype = ctypes.c_int
+
+    # LIBMTP_file_t *LIBMTP_Get_Filemetadata(dev, uint32_t fileid)
+    if hasattr(lib, "LIBMTP_Get_Filemetadata"):
+        lib.LIBMTP_Get_Filemetadata.argtypes = [dev_p, ctypes.c_uint32]
+        lib.LIBMTP_Get_Filemetadata.restype = file_p
 
 
 _configure_libmtp_ctypes()
@@ -461,6 +467,28 @@ def _delete_object(self, object_id):
     return ret
 
 
+def _get_file_metadata(self, file_id):
+    """Return one ``LIBMTP_File`` by id with typed device/object args.
+
+    Stock passes the raw device struct and untyped int into
+    ``LIBMTP_Get_Filemetadata``. Same arm64 argtypes class as delete_object.
+    """
+    if self.device is None:
+        raise NotConnected
+
+    dev = _device_ptr(self.device)
+    if not dev:
+        raise NotConnected
+
+    ret = self.mtp.LIBMTP_Get_Filemetadata(dev, ctypes.c_uint32(int(file_id)))
+    if not _ptr_truthy(ret):
+        raise ObjectNotFound
+    try:
+        return ret.contents
+    except (ValueError, TypeError) as exc:
+        raise ObjectNotFound from exc
+
+
 # Monkey-patch stock methods so all callers get the fixed behavior.
 _MTP.debug_stack = _debug_stack
 _MTP.send_track_from_file = _send_track_from_file
@@ -470,3 +498,4 @@ _MTP.get_filelisting = _get_filelisting
 _MTP.create_folder = _create_folder
 _MTP.set_devicename = _set_devicename
 _MTP.delete_object = _delete_object
+_MTP.get_file_metadata = _get_file_metadata

@@ -229,6 +229,9 @@ class PymtpDevice:
                     storage_id=int(getattr(node, "storage_id", 0) or 0),
                     filesize=int(getattr(node, "filesize", 0) or 0),
                     filetype=int(getattr(node, "filetype", 0) or 0),
+                    modificationdate=int(
+                        getattr(node, "modificationdate", 0) or 0
+                    ),
                 )
             )
         # Stable order for UI / logs
@@ -270,6 +273,62 @@ class PymtpDevice:
             ) from exc
         logger.info("delete_object ok id=%s", oid)
 
+    def get_file_metadata(self, object_id: int) -> FileEntry:
+        """Experimental: one-object metadata via patched get_file_metadata."""
+        oid = int(object_id)
+        if oid <= 0:
+            raise ValueError(f"Invalid object id: {object_id}")
+        logger.info("get_file_metadata id=%s", oid)
+        try:
+            node = self._mtp.get_file_metadata(oid)
+        except pymtp.NotConnected as exc:
+            raise TransportError(
+                "PyMTP get file info failed: device not connected. "
+                "Use Device → Connect first.",
+                fatal=True,
+            ) from exc
+        except pymtp.ObjectNotFound as exc:
+            raise TransportError(
+                f"Object id={oid} not found on device.",
+                fatal=False,
+            ) from exc
+        except pymtp.CommandFailed as exc:
+            try:
+                self._mtp.debug_stack()
+            except Exception:
+                logger.debug("Could not dump libmtp error stack", exc_info=True)
+            stack_text = _collect_errorstack(self._mtp)
+            detail = str(exc).strip() or "CommandFailed"
+            logger.error(
+                "PyMTP get_file_metadata failed id=%s detail=%s\n%s",
+                oid,
+                detail,
+                stack_text or "(no libmtp errorstack text)",
+            )
+            raise TransportError(
+                f"PyMTP get file info failed ({detail}) for object id={oid}.",
+                fatal=True,
+            ) from exc
+
+        entry = FileEntry(
+            item_id=int(getattr(node, "item_id", 0) or 0),
+            name=_decode(getattr(node, "filename", None)),
+            parent_id=int(getattr(node, "parent_id", 0) or 0),
+            storage_id=int(getattr(node, "storage_id", 0) or 0),
+            filesize=int(getattr(node, "filesize", 0) or 0),
+            filetype=int(getattr(node, "filetype", 0) or 0),
+            modificationdate=int(getattr(node, "modificationdate", 0) or 0),
+        )
+        logger.debug(
+            "get_file_metadata ok id=%s name=%r parent=%s type=%s size=%s",
+            entry.item_id,
+            entry.name,
+            entry.parent_id,
+            entry.filetype,
+            entry.filesize,
+        )
+        return entry
+
     def send_file(self, path: str, remote_name: str | None = None) -> None:
         keep: list[bytes] = []
         fname = remote_name or "000_TEST_FILE.mp3"
@@ -281,9 +340,6 @@ class PymtpDevice:
 
     def get_tracklisting(self):
         return self._mtp.get_tracklisting()
-
-    def get_file_metadata(self, object_id: int):
-        return self._mtp.get_file_metadata(object_id)
 
     def send_track(
         self,

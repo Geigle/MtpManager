@@ -130,6 +130,30 @@ class PymtpDeleteObjectTests(unittest.TestCase):
         self.assertEqual(fn.restype, ctypes.c_int)
 
 
+class PymtpGetFileMetadataTests(unittest.TestCase):
+    """Experimental Get File Info uses patched get_file_metadata."""
+
+    def test_get_file_metadata_is_patched(self) -> None:
+        self.assertIs(pymtp.MTP.get_file_metadata, pymtp._get_file_metadata)
+        src = inspect.getsource(pymtp.MTP.get_file_metadata)
+        self.assertIn("_device_ptr", src)
+        self.assertIn("LIBMTP_Get_Filemetadata", src)
+        self.assertIn("_ptr_truthy", src)
+
+    def test_get_file_metadata_requires_connection(self) -> None:
+        mtp = pymtp.MTP()
+        with self.assertRaises(pymtp.NotConnected):
+            mtp.get_file_metadata(1234)
+
+    def test_get_file_metadata_argtypes(self) -> None:
+        import ctypes
+
+        fn = pymtp._pymtp._libmtp.LIBMTP_Get_Filemetadata
+        self.assertEqual(len(fn.argtypes), 2)
+        self.assertIs(fn.argtypes[0], ctypes.c_void_p)
+        self.assertIs(fn.argtypes[1], ctypes.c_uint32)
+
+
 class FileLineFormatTests(unittest.TestCase):
     def test_file_line(self) -> None:
         from mtpmanager.domain.models import FileEntry
@@ -148,6 +172,27 @@ class FileLineFormatTests(unittest.TestCase):
         self.assertIn("parent=100", line)
         self.assertIn("Blargh.mp3", line)
         self.assertIn("MB", line)
+
+    def test_file_metadata_summary(self) -> None:
+        from mtpmanager.domain.models import FileEntry
+        from mtpmanager.ui.formatting import file_metadata_summary
+
+        text = file_metadata_summary(
+            FileEntry(
+                item_id=445003,
+                name="Blargh.mp3",
+                parent_id=100,
+                storage_id=0x00010001,
+                filesize=1_500_000,
+                filetype=2,
+                modificationdate=1_700_000_000,
+            )
+        )
+        self.assertIn("445003", text)
+        self.assertIn("Blargh.mp3", text)
+        self.assertIn("0x00010001", text)
+        self.assertIn("Filetype: 2", text)
+        self.assertIn("UTC", text)
 
 
 if __name__ == "__main__":

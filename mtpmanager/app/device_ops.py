@@ -45,5 +45,10 @@ def delete_object(device: DevicePort, object_id: int) -> None:
     device.delete_object(int(object_id))
 
 
+def get_file_metadata(device: DevicePort, object_id: int) -> FileEntry:
+    """Experimental single-object metadata (Device → Get File Info)."""
+    return device.get_file_metadata(int(object_id))
+
+
 def send_test_file(device: DevicePort, path: str) -> None:
     device.send_file(path)
