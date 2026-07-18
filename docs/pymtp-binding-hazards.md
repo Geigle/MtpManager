@@ -214,6 +214,7 @@ Keep this table in sync when adding monkey-patches:
 
 | Doc | Role |
 |-----|------|
+| [libmtp-api-coverage.md](./libmtp-api-coverage.md) | What libmtp/pymtp/MtpManager implement vs leave unbound |
 | [debrief-pymtp-transfer-failure.md](./debrief-pymtp-transfer-failure.md) | Forensic send-path layers |
 | [debrief-zen-track-send-failure.md](./debrief-zen-track-send-failure.md) | CMD finalize / hang (same device pickiness) |
 | [device-contract.md](./device-contract.md) | Parent 100, storage, basenames, folder id map |

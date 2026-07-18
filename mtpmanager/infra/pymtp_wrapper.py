@@ -15,6 +15,8 @@ libmtp (1.1.x) and Apple Silicon / Python 3:
 
 Living catalog of failure classes and *predicted* next breaks:
   docs/pymtp-binding-hazards.md
+What libmtp/pymtp/MtpManager implement vs leave unbound:
+  docs/libmtp-api-coverage.md
 """
 
 from __future__ import annotations
