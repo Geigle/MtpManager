@@ -56,6 +56,7 @@ Do **not**:
 | Library index (persist/restore) | `infra/library_index.py`, `infra/app_paths.py` |
 | Device profiles / graphics | `domain/device_profile.py`, `domain/device_profiles.py`, `assets/devices/` |
 | App config (send format, …) | `infra/app_config.py` (`config.json` under data dir) |
+| Track listing / media filter (ZEN) | `domain/device_media.py` + `pymtp_device.list_tracks` (filelisting + media filter) + on-demand tags via `device_ops.enrich_track_refs` / `get_track_metadata` + `tests/test_device_media.py` |
 
 ---
 

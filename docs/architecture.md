@@ -114,7 +114,9 @@ Platform defaults: macOS `~/Library/Logs/MtpManager`; Linux `~/.local/share/mtpm
 | Hardcoded ZEN Music folder / storage defaults | `remote_naming.DEFAULT_*`; constructors on both transports |
 | Multi-device discovery | Not implemented; user must match device layout |
 | Transfer send still blocking in worker | Convert/send pipeline + UI job are off the Tk thread; each `send_track` still blocks the transfer worker until the device finishes |
-| Full “Delete All Tracks” | Stub lists storage ids only; single-object **Delete Track (experimental)** uses file listing + `delete_object`; **Get File Info** / **Get Track Info** use the same picker + `get_file_metadata` / `get_track_metadata` |
+| Single-object metadata after picker | Listing is backgrounded; live `get_file_metadata` / one-shot `get_track_metadata` (Get Track Info) / one-shot `delete_object` still run on the main thread after the user picks (usually short; can still hitch). List Tracks → **Load tags for selection** batches `get_track_metadata` on a worker |
 | Upstream-maintained libmtp Python binding | Stock pymtp patched in-process via `pymtp_wrapper.py`; hazards [pymtp-binding-hazards.md](./pymtp-binding-hazards.md); coverage [libmtp-api-coverage.md](./libmtp-api-coverage.md) |
+
+**Device admin (experimental, implemented):** **List Files** / **List Tracks** (fast `get_filelisting` + media filter; ids/filenames; optional **Load tags for selection** via per-id `get_track_metadata` — not full-library `get_tracklisting`); single **Delete Track** (file listing picker + `delete_object`); **Delete All Tracks** (same fast list path + confirmed batch `delete_object`, fatal abort); **Get File Info** / **Get Track Info** (picker + `get_file_metadata` / `get_track_metadata`). Full-device listings use `_run_device_bg` so USB walks do not freeze Tk.
 
 These are known limitations, not accidental omissions in the docs. Product follow-ups stay out of this architecture description except as honest gaps.

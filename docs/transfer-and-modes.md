@@ -61,9 +61,13 @@ End-to-end send path, Stable vs Experimental behavior, and where to change thing
 |-------------|---------|
 | Right-click track | **Sync this track**, **Sync Album**, **Sync all from Artist** (global format + active mode transport) |
 | **Transfer** menu | **Sync Entire Library** (confirm); **Sync Folder…** (picker + scan + batch) |
-| **Device** menu | Connect, Disconnect, Device Info (only place to edit device name — applied on close if changed), Create Folder…, List Folders, List Files (experimental), Delete Track (experimental; pick from file listing → `delete_object`), Get File Info (experimental; pick → `get_file_metadata`, listing fallback on ZEN), Get Track Info (experimental; pick audio-ish → `get_track_metadata` tags), Delete All Tracks… stub — Experimental only |
+| **Device** menu | Connect, Disconnect, Device Info (only place to edit device name — applied on close if changed), Create Folder…, List Folders, List Files (experimental), List Tracks (experimental; fast `get_filelisting` + media filter; optional **Load tags for selection** via `get_track_metadata`), Delete Track (experimental; pick from file listing → `delete_object`), Get File Info (experimental; pick → `get_file_metadata`, listing fallback on ZEN), Get Track Info (experimental; pick audio-ish → `get_track_metadata` tags), Delete All Tracks… (experimental; same fast list path + confirm + batch `delete_object`, fatal abort) — Experimental only |
 
 Device admin prompts use dialogs (`ui/dialogs.py`); there is no main-window path/name entry.
+
+**USB listings never run on the Tk thread.** List Folders / Files / Tracks and the listing phase of Delete Track, Delete All Tracks, Get File Info, and Get Track Info go through `AppController._run_device_bg` → `TkBackgroundRunner` (same busy flag as transfers, so auto-connect poll does not race the session). List paths use an indeterminate bar. **Do not** use full-library `get_tracklisting` as the default List Tracks path on ZEN (multi-hour USB; no partial results until C returns). Tags are on-demand only. Long USB walks may still print `LIBMTP panic: unable to read in zero packet` to **stderr** (C library, not Python logging); that noise is often non-fatal.
+
+After a heavy USB job the controller keeps a short **USB quiet window** (`_DEVICE_USB_COOLDOWN_S`) and treats a single failed liveness probe as a **soft-fail** (keep session; only disconnect after consecutive failures). Immediate post-listing `get_device_info` / `get_modelname` used to look like “list_tracks failed” when the listing had already succeeded and auto-connect tore the session down (`Could not close session!` / endpoint errors on disconnect).
 
 ---
 

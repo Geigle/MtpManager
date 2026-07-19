@@ -5,11 +5,15 @@ from __future__ import annotations
 import ctypes
 import logging
 import os
+import time
+from collections.abc import Callable
 
 import mtpmanager.infra.pymtp_wrapper as pymtp
+from mtpmanager.domain.device_media import track_refs_from_files
 from mtpmanager.domain.models import (
     DeviceInfo,
     DeviceTrackInfo,
+    DeviceTrackRef,
     FileEntry,
     FolderEntry,
     TrackMetadata,
@@ -221,9 +225,37 @@ class PymtpDevice:
 
     def list_files(self) -> list[FileEntry]:
         """Experimental: full MTP file listing via patched get_filelisting."""
-        raw = self._mtp.get_filelisting()
+        logger.info("list_files (get_filelisting)")
+        t0 = time.monotonic()
+        try:
+            raw = self._mtp.get_filelisting()
+        except pymtp.NotConnected as exc:
+            raise TransportError(
+                "PyMTP file listing failed: device not connected. "
+                "Use Device → Connect first.",
+                fatal=True,
+            ) from exc
+        except pymtp.CommandFailed as exc:
+            try:
+                self._mtp.debug_stack()
+            except Exception:
+                logger.debug("Could not dump libmtp error stack", exc_info=True)
+            stack_text = _collect_errorstack(self._mtp)
+            detail = str(exc).strip() or "CommandFailed"
+            logger.error(
+                "PyMTP get_filelisting failed detail=%s\n%s",
+                detail,
+                stack_text or "(no libmtp errorstack text)",
+            )
+            raise TransportError(
+                f"PyMTP file listing failed ({detail}).",
+                fatal=True,
+            ) from exc
+
         result: list[FileEntry] = []
         if not raw:
+            elapsed = time.monotonic() - t0
+            logger.info("list_files ok count=0 elapsed=%.1fs", elapsed)
             return result
         for node in raw:
             name = _decode(getattr(node, "filename", None))
@@ -242,6 +274,15 @@ class PymtpDevice:
             )
         # Stable order for UI / logs
         result.sort(key=lambda e: (e.parent_id, e.name.casefold(), e.item_id))
+        elapsed = time.monotonic() - t0
+        logger.info("list_files ok count=%s elapsed=%.1fs", len(result), elapsed)
+        if elapsed >= 15.0:
+            logger.warning(
+                "list_files was slow (%.1fs). libmtp may print "
+                "'LIBMTP panic: unable to read in zero packet' to stderr "
+                "during long USB walks; that noise can be non-fatal.",
+                elapsed,
+            )
         return result
 
     def delete_object(self, object_id: int) -> None:
@@ -434,8 +475,55 @@ class PymtpDevice:
         oid = self._mtp.send_file_from_file(path, buf)
         logger.debug("send_file object_id=%s", oid)
 
-    def get_tracklisting(self):
-        return self._mtp.get_tracklisting()
+    def list_tracks(
+        self,
+        on_progress: Callable[[int, int, str], None] | None = None,
+    ) -> list[DeviceTrackRef]:
+        """Experimental: music/video tracks via **file listing + media filter**.
+
+        Full ``LIBMTP_Get_Tracklisting*`` is unusable as a bulk path on ZEN
+        Vision:M (multi-hour USB walks, zero-packet noise, historically
+        incomplete results). List Tracks / Delete All use the fast complete
+        file listing instead. Rows are id + filename (empty artist/title);
+        load tags on demand via ``get_track_metadata`` (Get Track Info or
+        List Tracks → Load tags for selection).
+
+        *on_progress* is optional (listing is usually ~1s); kept for port
+        compatibility. Never touch Tk here.
+        """
+        if on_progress is not None:
+            try:
+                on_progress(0, 0, "listing device files (track filter)…")
+            except Exception:
+                logger.debug("list_tracks progress callback failed", exc_info=True)
+
+        logger.info("list_tracks (via get_filelisting + media filter)")
+        t0 = time.monotonic()
+        files = self.list_files()
+        result = track_refs_from_files(files)
+        elapsed = time.monotonic() - t0
+        logger.info(
+            "list_tracks ok count=%s of %s files elapsed=%.1fs",
+            len(result),
+            len(files),
+            elapsed,
+        )
+        if elapsed >= 15.0:
+            logger.warning(
+                "list_tracks was slow (%.1fs). Auto-connect probes are paused "
+                "briefly afterward so a recovering session is not torn down.",
+                elapsed,
+            )
+        if on_progress is not None:
+            try:
+                on_progress(
+                    len(result),
+                    len(result),
+                    f"found {len(result)} track(s)",
+                )
+            except Exception:
+                logger.debug("list_tracks progress callback failed", exc_info=True)
+        return result
 
     def send_track(
         self,

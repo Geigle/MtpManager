@@ -2,7 +2,13 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from mtpmanager.domain.models import DeviceInfo, DeviceTrackInfo, FileEntry, FolderEntry
+from mtpmanager.domain.models import (
+    DeviceInfo,
+    DeviceTrackInfo,
+    DeviceTrackRef,
+    FileEntry,
+    FolderEntry,
+)
 
 
 class DevicePort(Protocol):
@@ -31,6 +37,17 @@ class DevicePort(Protocol):
         """Full device file listing (experimental; may be large/slow)."""
         ...
 
+    def list_tracks(
+        self,
+        on_progress=None,
+    ) -> list[DeviceTrackRef]:
+        """Device track listing (music/video; experimental).
+
+        Fast file-listing + media filter (ids/filenames). Optional
+        *on_progress(done, total, message)*. Tags via get_track_metadata.
+        """
+        ...
+
     def delete_object(self, object_id: int) -> None:
         """Delete one object by MTP item id (experimental)."""
         ...
@@ -44,5 +61,3 @@ class DevicePort(Protocol):
         ...
 
     def send_file(self, path: str, remote_name: str | None = None) -> None: ...
-
-    def get_tracklisting(self): ...

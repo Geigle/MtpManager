@@ -130,6 +130,35 @@ class PymtpDeleteObjectTests(unittest.TestCase):
         self.assertEqual(fn.restype, ctypes.c_int)
 
 
+class PymtpTrackListingTests(unittest.TestCase):
+    """Patched get_tracklisting kept for diagnostics (not bulk List Tracks UX)."""
+
+    def test_get_tracklisting_is_patched(self) -> None:
+        self.assertIs(pymtp.MTP.get_tracklisting, pymtp._get_tracklisting)
+        src = inspect.getsource(pymtp.MTP.get_tracklisting)
+        self.assertIn("_device_ptr", src)
+        self.assertIn("LIBMTP_Get_Tracklisting_With_Callback", src)
+        self.assertIn("_snapshot_track", src)
+        self.assertIn("LIBMTP_destroy_track_t", src)
+        self.assertIn("_ptr_truthy", src)
+        self.assertIn("_ProgressFunc", src)
+        self.assertIn("callback", src)
+
+    def test_get_tracklisting_requires_connection(self) -> None:
+        mtp = pymtp.MTP()
+        with self.assertRaises(pymtp.NotConnected):
+            mtp.get_tracklisting()
+
+    def test_tracklisting_argtypes(self) -> None:
+        import ctypes
+
+        fn = pymtp._pymtp._libmtp.LIBMTP_Get_Tracklisting_With_Callback
+        self.assertEqual(len(fn.argtypes), 3)
+        self.assertIs(fn.argtypes[0], ctypes.c_void_p)
+        self.assertIs(fn.argtypes[1], ctypes.c_void_p)
+        self.assertIs(fn.argtypes[2], ctypes.c_void_p)
+
+
 class PymtpGetFileMetadataTests(unittest.TestCase):
     """Experimental Get File Info uses patched get_file_metadata."""
 
@@ -212,6 +241,26 @@ class FileLineFormatTests(unittest.TestCase):
         self.assertIn("Blargh.mp3", line)
         self.assertIn("MB", line)
 
+    def test_track_line(self) -> None:
+        from mtpmanager.domain.models import DeviceTrackRef
+        from mtpmanager.ui.formatting import track_line
+
+        line = track_line(
+            DeviceTrackRef(
+                item_id=398401,
+                name="song.mp3",
+                title="Black To The Future",
+                artist="Fury Weekend",
+                parent_id=100,
+                filetype=2,
+            )
+        )
+        self.assertIn("398401", line)
+        self.assertIn("parent=100", line)
+        self.assertIn("Fury Weekend", line)
+        self.assertIn("Black To The Future", line)
+        self.assertIn("song.mp3", line)
+
     def test_file_metadata_summary(self) -> None:
         from mtpmanager.domain.models import FileEntry
         from mtpmanager.ui.formatting import file_metadata_summary
@@ -265,32 +314,7 @@ class FileLineFormatTests(unittest.TestCase):
         self.assertIn("44100 Hz", text)
 
 
-class LooksLikeTrackTests(unittest.TestCase):
-    def test_mp3_filetype(self) -> None:
-        from mtpmanager.domain.models import FileEntry
-        from mtpmanager.ui.controllers import _looks_like_track
-
-        self.assertTrue(
-            _looks_like_track(FileEntry(item_id=1, name="x.bin", filetype=2))
-        )
-
-    def test_extension_fallback(self) -> None:
-        from mtpmanager.domain.models import FileEntry
-        from mtpmanager.ui.controllers import _looks_like_track
-
-        self.assertTrue(
-            _looks_like_track(
-                FileEntry(item_id=1, name="Tune.MP3", filetype=44)
-            )
-        )
-
-    def test_folder_rejected(self) -> None:
-        from mtpmanager.domain.models import FileEntry
-        from mtpmanager.ui.controllers import _looks_like_track
-
-        self.assertFalse(
-            _looks_like_track(FileEntry(item_id=100, name="Music", filetype=0))
-        )
+# looks_like_track / track_refs_from_files: tests/test_device_media.py
 
 
 if __name__ == "__main__":

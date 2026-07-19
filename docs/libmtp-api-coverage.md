@@ -36,12 +36,13 @@ Rough scale (1.1.23): ~120 exported `LIBMTP_*` ops → ~34 pymtp high-level meth
 | Create folder | `create_folder` → `LIBMTP_Create_Folder` | `pymtp_wrapper._create_folder` |
 | Set friendly name | `set_devicename` → `LIBMTP_Set_Friendlyname` | `pymtp_wrapper._set_devicename` |
 | Error dump | `debug_stack` → `LIBMTP_Dump_Errorstack` | `pymtp_wrapper._debug_stack` |
-| File listing | `get_filelisting` → `LIBMTP_Get_Filelisting_With_Callback` | `pymtp_wrapper._get_filelisting`; Device → **List Files** / **Delete Track** / **Get File Info** picker |
-| Single-object delete | `delete_object` → `LIBMTP_Delete_Object` | `pymtp_wrapper._delete_object` + argtypes; Device → **Delete Track (experimental)** |
+| File listing | `get_filelisting` → `LIBMTP_Get_Filelisting_With_Callback` | `pymtp_wrapper._get_filelisting`; Device → **List Files** / pickers / **List Tracks** + **Delete All** list (media filter) via `_run_device_bg` |
+| Track listing | `get_tracklisting` → `LIBMTP_Get_Tracklisting_With_Callback` | `pymtp_wrapper._get_tracklisting` patched (NULL-safe + snapshot + destroy + optional progress) for diagnostics; **not** the bulk List Tracks / Delete All path on ZEN (multi-hour / incomplete) |
+| Single-object delete | `delete_object` → `LIBMTP_Delete_Object` | `pymtp_wrapper._delete_object` + argtypes; Device → **Delete Track** / batch **Delete All Tracks** |
 | File metadata | `get_file_metadata` → `LIBMTP_Get_Filemetadata` | `pymtp_wrapper._get_file_metadata` + argtypes; Device → **Get File Info**; on ZEN NULL/proplist fail → **listing snapshot** (class J in hazards) |
-| Track metadata | `get_track_metadata` → `LIBMTP_Get_Trackmetadata` | `pymtp_wrapper._get_track_metadata` (argtypes + snapshot + destroy); Device → **Get Track Info (experimental)** |
+| Track metadata | `get_track_metadata` → `LIBMTP_Get_Trackmetadata` | `pymtp_wrapper._get_track_metadata` (argtypes + snapshot + destroy); Device → **Get Track Info** + List Tracks → **Load tags for selection** (`device_ops.enrich_track_refs`) |
 | Filetype enum | `LIBMTP_Filetype` / `find_filetype` table | Mutated in place (`FOLDER=0`, `MP3=2`, …) |
-| ctypes argtypes (selected) | Send track/file, errorstack get/clear, storage, folders, create, friendly name, filelisting, delete, file metadata | `_configure_libmtp_ctypes` |
+| ctypes argtypes (selected) | Send track/file, errorstack get/clear, storage, folders, create, friendly name, filelisting, tracklisting, delete, file/track metadata | `_configure_libmtp_ctypes` |
 
 Domain contract for send (parent 100 / artist folder id, storage `0x00010001`, short basename) is **app** code (`remote_naming`, `pymtp_device`, `cmd_transport`), not libmtp itself.
 
@@ -53,15 +54,8 @@ Domain contract for send (parent 100 / artist folder id, storage `0x00010001`, s
 | Device info | `get_devicename`, `get_serialnumber`, `get_manufacturer`, `get_modelname`, `get_deviceversion`, `get_batterylevel` | |
 | Capacity | `get_freespace`, `get_totalspace`, `get_usedspace`, `get_usedspace_percent` | Walks storage; multi-storage may be wrong |
 | Filetype guess | `find_filetype` | Table fixed; method body stock |
-| Track list | `get_tracklisting` | Used by Delete All stub listing |
 | Generic file send | `send_file_from_file` | **Not** product-hardened like track send; residual string/argtypes risk |
 | Storage refresh | `LIBMTP_Get_Storage` (direct ctypes in `send_track`) | Argtypes set in wrapper |
-
-### Stub / half UI
-
-| UI / entry | Gap |
-|------------|-----|
-| **Device → Delete All Tracks…** | Lists track storage ids only; never batch-calls `delete_object` |
 
 ---
 
@@ -168,7 +162,7 @@ CMD path historically **hangs** on album association after send; pure album APIs
 
 Not every libmtp symbol matters. For this app’s goals, the meaningful “not done” set is:
 
-1. **Delete all / batch delete** — single-object path exists (`Delete Track`); batch Delete All still open  
+1. ~~**Delete all / batch delete**~~ — **done:** Device → Delete All Tracks (track listing + confirmed batch `delete_object`, fatal abort); single Delete Track remains  
 2. **Download** track/file to host — `Get_*_To_File`  
 3. ~~**Full file listing**~~ — **partial:** Device → List Files (experimental) uses patched `get_filelisting`; hierarchical browser / `Get_Files_And_Folders` still open  
 4. **Playlists** — list / create / update (pymtp exists; unpatched; unused)  
@@ -210,11 +204,15 @@ Not every libmtp symbol matters. For this app’s goals, the meaningful “not d
 | Folder Get/Find argtypes | Configured |
 | `get_filelisting` | Replaced (NULL-safe walk; no progress callback) |
 | Filelisting callback argtypes | Configured |
+| `get_tracklisting` | Replaced (NULL-safe; snapshot + destroy_track_t; optional LIBMTP_progressfunc_t) |
+| Tracklisting callback argtypes | Configured |
 | `create_folder` | Replaced |
 | `set_devicename` | Replaced |
 | `send_file_from_file` | Partial (argtypes only; method body stock) |
 | Playlist APIs | Untouched |
 | Download to file | Untouched |
-| Delete object | Untouched (UI stub) |
+| `delete_object` | Replaced (argtypes + device ptr); batch Delete All uses it |
+| `get_file_metadata` | Replaced (+ listing fallback in UI) |
+| `get_track_metadata` | Replaced (snapshot + destroy) |
 
 When this table diverges from `mtpmanager/infra/pymtp_wrapper.py`, **trust the code** and update this file.

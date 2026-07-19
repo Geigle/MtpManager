@@ -270,6 +270,198 @@ def show_file_list_dialog(parent, files: list) -> None:
     parent.wait_window(dlg)
 
 
+def show_track_list_dialog(
+    parent,
+    tracks: list,
+    *,
+    on_load_tags: Callable | None = None,
+) -> None:
+    """Modal scrollable list of device tracks (experimental List Tracks).
+
+    Rows come from the fast file listing (ids/filenames). Optional
+    *on_load_tags(selected_refs, apply_updates)* starts a background tag
+    fetch; *apply_updates(updated_refs)* must be called on the UI thread
+    with the enriched refs for those ids.
+    """
+    from tkinter import BOTH, END, EXTENDED, LEFT, RIGHT, Y, Listbox, Scrollbar
+
+    from mtpmanager.ui.formatting import track_line
+
+    rows = list(tracks or [])
+    loading = {"active": False}
+
+    dlg = Toplevel(parent)
+    dlg.title("Device Tracks (experimental)")
+    dlg.transient(parent)
+    dlg.geometry("860x460")
+
+    body = Frame(dlg, padx=10, pady=10)
+    body.pack(fill=BOTH, expand=True)
+
+    note_var = StringVar()
+    status_var = StringVar(value="")
+
+    def _tagged_count() -> int:
+        return sum(
+            1
+            for t in rows
+            if (getattr(t, "title", None) or getattr(t, "artist", None) or "").strip()
+        )
+
+    def _refresh_note() -> None:
+        tagged = _tagged_count()
+        note_var.set(
+            f"{len(rows)} track(s) from file listing "
+            f"({tagged} with artist/title tags). "
+            "Filenames first — select rows and Load tags for on-device "
+            "metadata (per-object USB; keep selections small)."
+        )
+
+    _refresh_note()
+    Label(
+        body,
+        textvariable=note_var,
+        wraplength=820,
+        justify=LEFT,
+    ).pack(anchor="w")
+    Label(
+        body,
+        textvariable=status_var,
+        wraplength=820,
+        justify=LEFT,
+        fg="#444",
+    ).pack(anchor="w", pady=(2, 0))
+
+    list_frame = Frame(body)
+    list_frame.pack(fill=BOTH, expand=True, pady=(6, 8))
+    yscroll = Scrollbar(list_frame)
+    yscroll.pack(side=RIGHT, fill=Y)
+    xscroll = Scrollbar(list_frame, orient="horizontal")
+    xscroll.pack(side="bottom", fill="x")
+    lb = Listbox(
+        list_frame,
+        yscrollcommand=yscroll.set,
+        xscrollcommand=xscroll.set,
+        selectmode=EXTENDED,
+        exportselection=False,
+    )
+    try:
+        lb.configure(font=("Menlo", 11))
+    except Exception:
+        try:
+            lb.configure(font=("Courier", 11))
+        except Exception:
+            pass
+    lb.pack(side=LEFT, fill=BOTH, expand=True)
+    yscroll.config(command=lb.yview)
+    xscroll.config(command=lb.xview)
+
+    def _rebuild_list(*, keep_ids: set[int] | None = None) -> None:
+        selected_ids = keep_ids
+        if selected_ids is None:
+            selected_ids = set()
+            for idx in lb.curselection():
+                i = int(idx)
+                if 0 <= i < len(rows):
+                    selected_ids.add(int(rows[i].item_id or 0))
+        lb.delete(0, END)
+        for entry in rows:
+            lb.insert(END, track_line(entry))
+        if selected_ids:
+            for i, entry in enumerate(rows):
+                if int(entry.item_id or 0) in selected_ids:
+                    lb.selection_set(i)
+
+    _rebuild_list(keep_ids=set())
+
+    btn_row = Frame(body)
+    btn_row.pack(fill="x")
+
+    def on_close() -> None:
+        if loading["active"]:
+            if not messagebox.askyesno(
+                "Close track list",
+                "Tag loading is still running.\n\nClose the dialog anyway?",
+                parent=dlg,
+            ):
+                return
+        dlg.destroy()
+
+    def apply_updates(updated_refs: list) -> None:
+        """Merge enriched refs into the open dialog (UI thread)."""
+        if not dlg.winfo_exists():
+            return
+        by_id = {int(r.item_id or 0): r for r in (updated_refs or []) if int(r.item_id or 0) > 0}
+        if by_id:
+            for i, ref in enumerate(rows):
+                oid = int(ref.item_id or 0)
+                if oid in by_id:
+                    rows[i] = by_id[oid]
+            _rebuild_list()
+            _refresh_note()
+        loading["active"] = False
+        try:
+            btn_tags.configure(state="normal")
+        except Exception:
+            pass
+
+    def on_load_clicked() -> None:
+        if on_load_tags is None:
+            return
+        if loading["active"]:
+            return
+        sel = lb.curselection()
+        if not sel:
+            messagebox.showinfo(
+                "Load tags",
+                "Select one or more tracks first.\n\n"
+                "Tip: keep selections small — each tag fetch is a USB round-trip.",
+                parent=dlg,
+            )
+            return
+        selected = []
+        for idx in sel:
+            i = int(idx)
+            if 0 <= i < len(rows):
+                selected.append(rows[i])
+        if not selected:
+            return
+        # Soft cap: warn on large selections (still allowed).
+        if len(selected) > 25 and not messagebox.askyesno(
+            "Load tags",
+            f"Load on-device tags for {len(selected)} tracks?\n\n"
+            "Each object is a separate USB metadata call. Large batches "
+            "can take a long time and stress the device session.\n\n"
+            "Continue?",
+            parent=dlg,
+            icon=messagebox.WARNING,
+        ):
+            return
+        loading["active"] = True
+        btn_tags.configure(state="disabled")
+        status_var.set(f"Loading tags for {len(selected)} track(s)…")
+
+        def apply_and_status(updated_refs: list, *, message: str = "") -> None:
+            apply_updates(updated_refs)
+            if dlg.winfo_exists():
+                status_var.set(message or "")
+
+        on_load_tags(selected, apply_and_status)
+
+    Button(btn_row, text="Close", width=10, command=on_close).pack(side=RIGHT)
+    btn_tags = Button(
+        btn_row,
+        text="Load tags for selection",
+        command=on_load_clicked,
+        state="normal" if on_load_tags is not None else "disabled",
+    )
+    btn_tags.pack(side=RIGHT, padx=(0, 8))
+
+    dlg.protocol("WM_DELETE_WINDOW", on_close)
+    dlg.grab_set()
+    parent.wait_window(dlg)
+
+
 def pick_file_entry_dialog(
     parent,
     files: list,

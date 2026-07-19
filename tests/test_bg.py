@@ -86,6 +86,42 @@ class TkBackgroundRunnerTests(unittest.TestCase):
         self._pump_until(lambda: "fast" in results and not self.runner.busy)
         self.assertEqual(results, ["fast"])
 
+    def test_progress_callback_on_main_thread(self) -> None:
+        seen: list[tuple] = []
+        main = threading.get_ident()
+        started = threading.Event()
+
+        def work() -> str:
+            started.wait(timeout=2.0)
+            gen = self.runner.generation
+            report = self.runner.progress_callback(gen)
+            report("status", "scanning 10/100")
+            report("progress", 10, 100, "scanning 10/100")
+            # Give the main-thread poll a chance to drain progress before done.
+            time.sleep(0.05)
+            return "ok"
+
+        def on_progress(*args) -> None:
+            seen.append((threading.get_ident(), args))
+
+        done: list[str] = []
+        self.runner.submit(
+            work,
+            on_done=done.append,
+            on_error=lambda e: self.fail(str(e)),
+            on_progress=on_progress,
+        )
+        started.set()
+        self._pump_until(lambda: bool(done), timeout=3.0)
+        # Progress may arrive in the same poll burst as done; drain once more.
+        self.root.update()
+        self.assertEqual(done, ["ok"])
+        self.assertGreaterEqual(len(seen), 2)
+        self.assertTrue(all(tid == main for tid, _ in seen))
+        kinds = [args[0] for _, args in seen]
+        self.assertIn("status", kinds)
+        self.assertIn("progress", kinds)
+
 
 if __name__ == "__main__":
     unittest.main()

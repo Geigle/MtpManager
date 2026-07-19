@@ -111,3 +111,26 @@ class DeviceTrackInfo:
     bitrate_type: int = 0
     rating: int = 0
     usecount: int = 0
+
+
+@dataclass(frozen=True)
+class DeviceTrackRef:
+    """One track from device track listing (ids + labels for delete/admin)."""
+
+    item_id: int
+    name: str = ""
+    title: str = ""
+    artist: str = ""
+    parent_id: int = 0
+    storage_id: int = 0
+    filetype: int = 0
+
+
+@dataclass(frozen=True)
+class DeleteAllResult:
+    """Outcome of Device → Delete All Tracks."""
+
+    total: int
+    deleted: int
+    failed_id: int | None = None
+    aborted: bool = False

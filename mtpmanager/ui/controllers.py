@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 from tkinter import filedialog, messagebox
 
 from mtpmanager.app import device_ops
@@ -22,6 +23,7 @@ from mtpmanager.domain.library_sort import (
     iter_track_cells,
     sort_tracks_flat,
 )
+from mtpmanager.domain.device_media import looks_like_track
 from mtpmanager.domain.models import DeviceInfo, Track
 from mtpmanager.infra.album_art import (
     DEFAULT_THUMB_SIZE,
@@ -46,6 +48,7 @@ from mtpmanager.ui.dialogs import (
     show_file_list_dialog,
     show_folder_list_dialog,
     show_track_info_dialog,
+    show_track_list_dialog,
 )
 from mtpmanager.ui.window import MainWindow
 
@@ -56,6 +59,11 @@ _TREE_CHUNK = 80
 
 # Experimental auto-connect poll interval (ms).
 _DEVICE_POLL_MS = 3000
+# After a heavy USB job (listing/transfer), skip probes so a recovering
+# ZEN session is not torn down by get_modelname / get_device_info.
+_DEVICE_USB_COOLDOWN_S = 12.0
+# Consecutive soft probe failures before disconnect/reconnect.
+_DEVICE_PROBE_FAIL_LIMIT = 2
 
 
 class AppController:
@@ -73,6 +81,9 @@ class AppController:
         self._device_poll_gen = 0
         self._device_connect_inflight = False
         self._logged_no_device = False
+        # monotonic deadline: auto-connect must not touch USB until then
+        self._usb_quiet_until = 0.0
+        self._device_probe_fails = 0
         # When False, experimental poll is stopped until Device → Connect.
         self._device_auto_reconnect = True
         self._active_profile: DeviceProfile | None = None
@@ -113,6 +124,7 @@ class AppController:
             on_create_folder=self.action_create_folder,
             on_list_folders=self.action_read_folder_list,
             on_list_files=self.action_read_file_list,
+            on_list_tracks=self.action_read_track_list,
             on_delete_track=self.action_delete_track,
             on_get_track_info=self.action_get_track_info,
             on_get_file_info=self.action_get_file_info,
@@ -685,6 +697,16 @@ class AppController:
             if len(rest) >= 3:
                 self._progress(int(rest[0]), int(rest[1]), str(rest[2]))
             return
+        if kind == "status":
+            # Long USB listing: show text in the library count slot.
+            if rest:
+                msg = str(rest[0]).strip()
+                if msg:
+                    try:
+                        self.win.lbl_library_count.configure(text=msg)
+                    except Exception:
+                        pass
+            return
 
 
     def _start_device_poll(self) -> None:
@@ -733,29 +755,37 @@ class AppController:
         if not self._device_auto_reconnect:
             return
 
-        # Avoid racing libmtp during library/transfer work.
-        if self._library_busy or self._transfer_busy or self._device_connect_inflight:
+        # Avoid racing libmtp during library/transfer work, and give the
+        # session a quiet window after heavy USB (list_tracks can leave the
+        # ZEN bus flaky for several seconds).
+        if (
+            self._library_busy
+            or self._transfer_busy
+            or self._device_connect_inflight
+            or self._usb_is_quiet()
+        ):
             self._schedule_device_poll(gen)
             return
 
         self._device_connect_inflight = True
         local_gen = gen
+        need_info = self._active_profile is None
 
         def work() -> tuple[str, DeviceInfo | None]:
-            """Return (status, info). status: ok | gone | absent."""
+            """Return (status, info). status: ok | soft_fail | gone | absent."""
             if self.device.is_connected():
                 if self.device.session_alive():
+                    if not need_info:
+                        # Already profiled — skip full get_device_info (battery
+                        # + storage walks are USB-heavy on a recovering bus).
+                        return ("ok", None)
                     try:
                         return ("ok", device_ops.get_device_info(self.device))
                     except Exception:
-                        # Probe passed earlier but info failed — treat as gone.
-                        pass
-                # Stale or dead session after unplug: tear down so connect can retry.
-                try:
-                    device_ops.disconnect(self.device)
-                except Exception:
-                    pass
-                return ("gone", None)
+                        # Lightweight probe passed; full info failed — do not
+                        # tear down on a single glitch after long listings.
+                        return ("soft_fail", None)
+                return ("soft_fail", None)
 
             try:
                 device_ops.connect(self.device)
@@ -780,16 +810,42 @@ class AppController:
                 return
 
             status, info = result
-            if status == "ok" and info is not None:
+            if status == "ok":
+                self._device_probe_fails = 0
                 self._logged_no_device = False
                 # Only re-apply art/log when profile missing or first connect.
-                if self._active_profile is None:
+                if info is not None and self._active_profile is None:
                     self._apply_device_profile(info)
+            elif status == "soft_fail":
+                self._device_probe_fails += 1
+                if self._device_probe_fails < _DEVICE_PROBE_FAIL_LIMIT:
+                    logger.info(
+                        "Experimental auto-connect: session probe soft-fail "
+                        "%s/%s (keeping session; common after long listings)",
+                        self._device_probe_fails,
+                        _DEVICE_PROBE_FAIL_LIMIT,
+                    )
+                    self._mark_usb_quiet(_DEVICE_USB_COOLDOWN_S)
+                else:
+                    logger.info(
+                        "Experimental auto-connect: session probe failed %s "
+                        "times — disconnecting to recover",
+                        self._device_probe_fails,
+                    )
+                    try:
+                        device_ops.disconnect(self.device)
+                    except Exception:
+                        pass
+                    self._device_probe_fails = 0
+                    self._logged_no_device = False
+                    self._clear_device_profile()
             elif status == "gone":
                 logger.info("Experimental auto-connect: device disconnected")
+                self._device_probe_fails = 0
                 self._logged_no_device = False  # allow one "no device" log on next fails
                 self._clear_device_profile()
             else:
+                self._device_probe_fails = 0
                 self._note_no_device()
                 self._clear_device_profile()
             self._schedule_device_poll(local_gen)
@@ -1189,12 +1245,14 @@ class AppController:
             return False
         if self._transfer_busy or self._bg.busy:
             messagebox.showinfo(
-                "Transfer",
+                "Busy",
                 "A background job is already running. Wait for it to finish.",
             )
             return False
         self._transfer_busy = True
         self._clear_transfer_highlights()
+        # Hold auto-connect off the bus for the whole job + cooldown tail.
+        self._mark_usb_quiet(_DEVICE_USB_COOLDOWN_S)
         try:
             self.win.progress["value"] = 0
         except Exception:
@@ -1204,6 +1262,110 @@ class AppController:
     def _end_transfer_job(self) -> None:
         self._transfer_busy = False
         self._clear_transfer_highlights()
+        self._stop_busy_progress()
+        # Listing/transfer just finished — pause auto-connect USB probes.
+        self._device_probe_fails = 0
+        self._mark_usb_quiet()
+
+    def _mark_usb_quiet(self, seconds: float = _DEVICE_USB_COOLDOWN_S) -> None:
+        """Defer auto-connect probes until *seconds* after now (monotonic)."""
+        until = time.monotonic() + max(0.0, float(seconds))
+        if until > self._usb_quiet_until:
+            self._usb_quiet_until = until
+
+    def _usb_is_quiet(self) -> bool:
+        return time.monotonic() < self._usb_quiet_until
+
+    def _start_busy_progress(self) -> None:
+        """Indeterminate bar while a USB listing (etc.) runs off the UI thread."""
+        try:
+            self.win.progress.configure(mode="indeterminate")
+            self.win.progress.start(12)
+        except Exception:
+            try:
+                self.win.progress["value"] = 0
+            except Exception:
+                pass
+
+    def _stop_busy_progress(self) -> None:
+        try:
+            self.win.progress.stop()
+        except Exception:
+            pass
+        try:
+            self.win.progress.configure(mode="determinate")
+            self.win.progress["value"] = 0
+        except Exception:
+            pass
+
+    def _run_device_bg(
+        self,
+        *,
+        title: str,
+        name: str,
+        work,
+        on_success,
+        busy_message: str | None = None,
+        on_progress=None,
+        progress_mode: str = "indeterminate",
+    ) -> None:
+        """Run blocking device I/O off the Tk thread; deliver UI on main thread.
+
+        USB listings (track/file) can take tens of seconds and emit libmtp
+        panics to stderr — never call them on the main thread.
+
+        *on_progress* is a main-thread handler for worker progress events
+        (same shape as transfer: kind + args). When *progress_mode* is
+        ``\"determinate\"``, the bar starts at 0% instead of pulsing.
+        """
+        if not self._require_device_ready():
+            return
+        if not self._begin_transfer_job():
+            return
+        if busy_message:
+            logger.info("%s: %s", title, busy_message)
+        device = self.device
+        if progress_mode == "determinate":
+            try:
+                self.win.progress.configure(mode="determinate")
+                self.win.progress["value"] = 0
+            except Exception:
+                pass
+        else:
+            self._start_busy_progress()
+
+        def _work():
+            return work(device)
+
+        def on_done(result) -> None:
+            self._end_transfer_job()
+            # Restore library count if listing overwrote the toolbar status.
+            try:
+                self._sync_library_chrome()
+            except Exception:
+                pass
+            try:
+                on_success(result)
+            except Exception:
+                logger.exception("%s UI handler failed", title)
+                messagebox.showerror(title, "Could not show results (see log).")
+
+        def on_error(exc: BaseException) -> None:
+            self._end_transfer_job()
+            try:
+                self._sync_library_chrome()
+            except Exception:
+                pass
+            logger.exception("%s failed", title)
+            messagebox.showerror(title, str(exc))
+
+        self._bg.submit(
+            _work,
+            on_done=on_done,
+            on_error=on_error,
+            on_progress=on_progress,
+            name=name,
+        )
 
     def _transfer_one(self, track: Track, fmt: str) -> None:
         if not self._begin_transfer_job():
@@ -1420,289 +1582,459 @@ class AppController:
             messagebox.showerror("Create Folder", str(e))
 
     def action_read_folder_list(self) -> None:
-        if not self._require_device_ready():
-            return
-        try:
-            folders = device_ops.list_folders(self.device)
-        except Exception as e:
-            logger.exception("List folders failed")
-            messagebox.showerror("Folders", str(e))
-            return
-        for entry in folders:
-            logger.debug("Folder: %s", entry.name)
-        show_folder_list_dialog(self.win.root, folders)
+        """Device → List Folders (USB; run off the Tk thread)."""
+
+        def on_success(folders) -> None:
+            for entry in folders:
+                logger.debug("Folder: %s", entry.name)
+            show_folder_list_dialog(self.win.root, folders)
+
+        self._run_device_bg(
+            title="Folders",
+            name="list-folders",
+            work=lambda device: device_ops.list_folders(device),
+            on_success=on_success,
+            busy_message="listing device folders in background…",
+        )
 
     def action_read_file_list(self) -> None:
         """Experimental Device → List Files (full MTP file listing)."""
-        if not self._require_device_ready():
-            return
-        try:
-            files = device_ops.list_files(self.device)
-        except Exception as e:
-            logger.exception("List files failed")
-            messagebox.showerror("Files", str(e))
-            return
-        logger.info("List Files (experimental): %d object(s)", len(files))
-        for entry in files[:50]:
-            logger.debug(
-                "File id=%s parent=%s type=%s size=%s name=%r",
-                entry.item_id,
-                entry.parent_id,
-                entry.filetype,
-                entry.filesize,
-                entry.name,
+
+        def on_success(files) -> None:
+            logger.info("List Files (experimental): %d object(s)", len(files))
+            for entry in files[:50]:
+                logger.debug(
+                    "File id=%s parent=%s type=%s size=%s name=%r",
+                    entry.item_id,
+                    entry.parent_id,
+                    entry.filetype,
+                    entry.filesize,
+                    entry.name,
+                )
+            if len(files) > 50:
+                logger.debug(
+                    "… %d more file(s) not logged at DEBUG", len(files) - 50
+                )
+            show_file_list_dialog(self.win.root, files)
+
+        self._run_device_bg(
+            title="Files",
+            name="list-files",
+            work=lambda device: device_ops.list_files(device),
+            on_success=on_success,
+            busy_message="listing device files in background…",
+        )
+
+    def action_read_track_list(self) -> None:
+        """Experimental Device → List Tracks (fast file listing + optional tags)."""
+
+        def on_success(tracks) -> None:
+            logger.info(
+                "List Tracks (experimental): %d track(s) from file listing",
+                len(tracks),
             )
-        if len(files) > 50:
-            logger.debug("… %d more file(s) not logged at DEBUG", len(files) - 50)
-        show_file_list_dialog(self.win.root, files)
+            for entry in tracks[:50]:
+                logger.debug(
+                    "Track id=%s parent=%s type=%s artist=%r title=%r name=%r",
+                    entry.item_id,
+                    entry.parent_id,
+                    entry.filetype,
+                    entry.artist,
+                    entry.title,
+                    entry.name,
+                )
+            if len(tracks) > 50:
+                logger.debug(
+                    "… %d more track(s) not logged at DEBUG", len(tracks) - 50
+                )
+
+            def on_load_tags(selected, apply_updates) -> None:
+                """Background get_track_metadata for dialog selection only."""
+                batch = list(selected or [])
+                if not batch:
+                    apply_updates([], message="No tracks selected.")
+                    return
+                if not self.device.is_connected():
+                    apply_updates(
+                        [],
+                        message="Device not connected — reconnect and try again.",
+                    )
+                    messagebox.showerror(
+                        "Load tags",
+                        "Device is not connected. Use Device → Connect first.",
+                    )
+                    return
+                if not self._begin_transfer_job():
+                    apply_updates(
+                        [],
+                        message="Another device job is busy — try again shortly.",
+                    )
+                    return
+
+                def work():
+                    gen = self._bg.generation
+                    report = self._bg.progress_callback(gen)
+
+                    def on_progress(done: int, total: int, message: str) -> None:
+                        report("status", message)
+                        report("progress", done, total, message)
+
+                    return device_ops.enrich_track_refs(
+                        self.device,
+                        batch,
+                        on_progress=on_progress,
+                    )
+
+                def on_done(result) -> None:
+                    self._end_transfer_job()
+                    try:
+                        self.win.progress["value"] = 100
+                    except Exception:
+                        pass
+                    msg = (
+                        f"Updated {result.updated} of {len(batch)} "
+                        f"(failed {result.failed})."
+                    )
+                    if result.aborted:
+                        msg = (
+                            f"Aborted after fatal error at id={result.failed_id}. "
+                            f"Updated {result.updated} before stop. "
+                            "Disconnect/replug if the session looks stuck."
+                        )
+                        messagebox.showerror("Load tags aborted", msg)
+                    elif result.failed and result.updated == 0:
+                        messagebox.showwarning(
+                            "Load tags",
+                            f"Could not load tags for the selection "
+                            f"({result.failed} failed).",
+                        )
+                    apply_updates(list(result.refs), message=msg)
+                    logger.info(
+                        "List Tracks load tags: updated=%s failed=%s aborted=%s",
+                        result.updated,
+                        result.failed,
+                        result.aborted,
+                    )
+
+                def on_error(exc: BaseException) -> None:
+                    self._end_transfer_job()
+                    logger.exception("Load tags failed")
+                    messagebox.showerror("Load tags", str(exc))
+                    apply_updates([], message=f"Failed: {exc}")
+
+                self._bg.submit(
+                    work,
+                    on_done=on_done,
+                    on_error=on_error,
+                    on_progress=self._on_transfer_ui_event,
+                    name="list-tracks-enrich",
+                )
+
+            show_track_list_dialog(
+                self.win.root,
+                tracks,
+                on_load_tags=on_load_tags,
+            )
+
+        self._run_device_bg(
+            title="Tracks",
+            name="list-tracks",
+            work=lambda device: device_ops.list_tracks(device),
+            on_success=on_success,
+            busy_message="listing device tracks (file listing)…",
+        )
 
     def action_delete_track(self) -> None:
         """Experimental Device → Delete Track: pick from file listing, delete by id."""
-        if not self._require_device_ready():
-            return
-        try:
-            files = device_ops.list_files(self.device)
-        except Exception as e:
-            logger.exception("Delete track listing failed")
-            messagebox.showerror("Delete Track", str(e))
-            return
-        if not files:
+
+        def on_listed(files) -> None:
+            if not files:
+                messagebox.showinfo(
+                    "Delete Track",
+                    "No objects found on the device.",
+                )
+                return
+            logger.info(
+                "Delete Track (experimental): %d object(s) listed", len(files)
+            )
+
+            def _confirm(entry) -> str:
+                name = (entry.name or "").strip() or "(unnamed)"
+                return (
+                    f"Delete object id={entry.item_id}?\n\n"
+                    f"{name}\n"
+                    f"parent={entry.parent_id}  type={entry.filetype}\n\n"
+                    "This cannot be undone from the app."
+                )
+
+            entry = pick_file_entry_dialog(
+                self.win.root,
+                files,
+                title="Delete Track (experimental)",
+                prompt=(
+                    "select one to delete by object id. "
+                    "Folders and system objects are included; choose carefully."
+                ),
+                action_label="Delete…",
+                confirm_message=_confirm,
+            )
+            if entry is None:
+                return
+            try:
+                device_ops.delete_object(self.device, entry.item_id)
+            except TransportError as e:
+                logger.exception("Delete track failed id=%s", entry.item_id)
+                messagebox.showerror("Delete Track", str(e))
+                return
+            except Exception as e:
+                logger.exception("Delete track failed id=%s", entry.item_id)
+                messagebox.showerror("Delete Track", str(e))
+                return
+            name = (entry.name or "").strip() or "(unnamed)"
             messagebox.showinfo(
                 "Delete Track",
-                "No objects found on the device.",
-            )
-            return
-        logger.info("Delete Track (experimental): %d object(s) listed", len(files))
-
-        def _confirm(entry) -> str:
-            name = (entry.name or "").strip() or "(unnamed)"
-            return (
-                f"Delete object id={entry.item_id}?\n\n"
-                f"{name}\n"
-                f"parent={entry.parent_id}  type={entry.filetype}\n\n"
-                "This cannot be undone from the app."
+                f"Deleted object id={entry.item_id}\n{name}",
             )
 
-        entry = pick_file_entry_dialog(
-            self.win.root,
-            files,
-            title="Delete Track (experimental)",
-            prompt=(
-                "select one to delete by object id. "
-                "Folders and system objects are included; choose carefully."
-            ),
-            action_label="Delete…",
-            confirm_message=_confirm,
-        )
-        if entry is None:
-            return
-        try:
-            device_ops.delete_object(self.device, entry.item_id)
-        except TransportError as e:
-            logger.exception("Delete track failed id=%s", entry.item_id)
-            messagebox.showerror("Delete Track", str(e))
-            return
-        except Exception as e:
-            logger.exception("Delete track failed id=%s", entry.item_id)
-            messagebox.showerror("Delete Track", str(e))
-            return
-        name = (entry.name or "").strip() or "(unnamed)"
-        messagebox.showinfo(
-            "Delete Track",
-            f"Deleted object id={entry.item_id}\n{name}",
+        self._run_device_bg(
+            title="Delete Track",
+            name="delete-track-list",
+            work=lambda device: device_ops.list_files(device),
+            on_success=on_listed,
+            busy_message="listing device files for delete picker…",
         )
 
     def action_delete_all_tracks(self) -> None:
-        """Stub: lists storage ids only (same as previous incomplete behavior)."""
-        if not self._require_device_ready():
-            return
-        try:
-            alltracks = self.device.get_tracklisting()
-        except Exception as e:
-            logger.exception("Delete tracks listing failed")
-            messagebox.showerror("Delete", str(e))
-            return
-        for x in alltracks:
-            logger.debug("Track storage_id=%s", x.storage_id)
-        messagebox.showinfo(
-            "Delete All Tracks",
-            "Not fully implemented — listed track storage IDs to console only.",
+        """Experimental Device → Delete All Tracks: list tracks, confirm, batch delete."""
+
+        def on_listed(tracks) -> None:
+            if not tracks:
+                messagebox.showinfo(
+                    "Delete All Tracks",
+                    "No tracks found on the device.",
+                )
+                return
+
+            n = len(tracks)
+            logger.info(
+                "Delete All Tracks (experimental): %d track(s) listed", n
+            )
+            if not messagebox.askyesno(
+                "Delete All Tracks",
+                f"Delete all {n} track(s) from the device?\n\n"
+                "This deletes music/video tracks from the device track "
+                "listing (folders and photos are not deleted).\n\n"
+                "This cannot be undone from the app.",
+                icon=messagebox.WARNING,
+                default=messagebox.NO,
+            ):
+                return
+            # Second confirm for large libraries.
+            if n >= 10 and not messagebox.askyesno(
+                "Delete All Tracks — confirm",
+                f"Really permanently delete {n} tracks?",
+                icon=messagebox.WARNING,
+                default=messagebox.NO,
+            ):
+                return
+
+            if not self._begin_transfer_job():
+                return
+            device = self.device
+            batch = list(tracks)
+
+            def work():
+                gen = self._bg.generation
+                report = self._bg.progress_callback(gen)
+
+                def on_progress(done: int, total: int, current) -> None:
+                    label = ""
+                    if current is not None:
+                        label = (
+                            (current.name or current.title or "").strip()
+                            or f"id={current.item_id}"
+                        )
+                    report("progress", done, total, label)
+
+                return device_ops.delete_all_tracks(
+                    device,
+                    batch,
+                    on_progress=on_progress,
+                )
+
+            def on_done(result) -> None:
+                self._end_transfer_job()
+                try:
+                    self.win.progress["value"] = 100
+                except Exception:
+                    pass
+                if result.aborted:
+                    messagebox.showerror(
+                        "Delete All Tracks aborted",
+                        f"Deleted {result.deleted} of {result.total} track(s).\n"
+                        f"Stopped at object id={result.failed_id}.\n\n"
+                        "Session may be poisoned — disconnect/replug before "
+                        "retrying, or use Config → Stable Mode for transfers.",
+                    )
+                    return
+                messagebox.showinfo(
+                    "Delete All Tracks",
+                    f"Deleted {result.deleted} of {result.total} track(s).",
+                )
+
+            def on_error(exc: BaseException) -> None:
+                self._end_transfer_job()
+                logger.exception("Delete All Tracks failed")
+                messagebox.showerror("Delete All Tracks", str(exc))
+
+            self._bg.submit(
+                work,
+                on_done=on_done,
+                on_error=on_error,
+                on_progress=self._on_transfer_ui_event,
+                name="delete-all-tracks",
+            )
+
+        self._run_device_bg(
+            title="Delete All Tracks",
+            name="delete-all-list",
+            work=lambda device: device_ops.list_tracks(device),
+            on_success=on_listed,
+            busy_message="listing device tracks before delete (file listing)…",
         )
 
     def action_get_file_info(self) -> None:
         """Experimental Device → Get File Info: pick from listing, fetch metadata."""
-        if not self._require_device_ready():
-            return
-        try:
-            files = device_ops.list_files(self.device)
-        except Exception as e:
-            logger.exception("Get file info listing failed")
-            messagebox.showerror("File Info", str(e))
-            return
-        if not files:
-            messagebox.showinfo(
-                "File Info",
-                "No objects found on the device.",
+
+        def on_listed(files) -> None:
+            if not files:
+                messagebox.showinfo(
+                    "File Info",
+                    "No objects found on the device.",
+                )
+                return
+            logger.info(
+                "Get File Info (experimental): %d object(s) listed", len(files)
             )
-            return
-        logger.info("Get File Info (experimental): %d object(s) listed", len(files))
-        entry = pick_file_entry_dialog(
-            self.win.root,
-            files,
-            title="Get File Info (experimental)",
-            prompt="select one object to inspect by id (LIBMTP_Get_Filemetadata).",
-            action_label="Get Info",
-        )
-        if entry is None:
-            return
-        # Prefer a live Get_Filemetadata refresh; on ZEN some listed/playable
-        # handles still return NULL (proplist path). Listing already has every
-        # field File Info shows — fall back instead of claiming "not found".
-        meta = entry
-        source = "listing"
-        try:
-            meta = device_ops.get_file_metadata(self.device, entry.item_id)
-            source = "live"
-        except TransportError as e:
-            if e.fatal:
+            entry = pick_file_entry_dialog(
+                self.win.root,
+                files,
+                title="Get File Info (experimental)",
+                prompt=(
+                    "select one object to inspect by id "
+                    "(LIBMTP_Get_Filemetadata)."
+                ),
+                action_label="Get Info",
+            )
+            if entry is None:
+                return
+            # Prefer a live Get_Filemetadata refresh; on ZEN some listed/playable
+            # handles still return NULL (proplist path). Listing already has every
+            # field File Info shows — fall back instead of claiming "not found".
+            meta = entry
+            source = "listing"
+            try:
+                meta = device_ops.get_file_metadata(self.device, entry.item_id)
+                source = "live"
+            except TransportError as e:
+                if e.fatal:
+                    logger.exception("Get file info failed id=%s", entry.item_id)
+                    messagebox.showerror("File Info", str(e))
+                    return
+                logger.warning(
+                    "Get file info live refresh failed id=%s (%s); "
+                    "showing listing snapshot",
+                    entry.item_id,
+                    e,
+                )
+                meta = entry
+                source = "listing"
+            except Exception as e:
                 logger.exception("Get file info failed id=%s", entry.item_id)
                 messagebox.showerror("File Info", str(e))
                 return
-            logger.warning(
-                "Get file info live refresh failed id=%s (%s); "
-                "showing listing snapshot",
-                entry.item_id,
-                e,
+            logger.info(
+                "File Info id=%s name=%r parent=%s type=%s size=%s source=%s",
+                meta.item_id,
+                meta.name,
+                meta.parent_id,
+                meta.filetype,
+                meta.filesize,
+                source,
             )
-            meta = entry
-            source = "listing"
-        except Exception as e:
-            logger.exception("Get file info failed id=%s", entry.item_id)
-            messagebox.showerror("File Info", str(e))
-            return
-        logger.info(
-            "File Info id=%s name=%r parent=%s type=%s size=%s source=%s",
-            meta.item_id,
-            meta.name,
-            meta.parent_id,
-            meta.filetype,
-            meta.filesize,
-            source,
+            note = None
+            if source == "listing":
+                note = (
+                    "Source: file listing snapshot "
+                    "(live Get_Filemetadata failed for this id — common on ZEN "
+                    "when MTP property-list refresh fails; object is still listed)."
+                )
+            show_file_info_dialog(self.win.root, meta, note=note)
+
+        self._run_device_bg(
+            title="File Info",
+            name="get-file-info-list",
+            work=lambda device: device_ops.list_files(device),
+            on_success=on_listed,
+            busy_message="listing device files for File Info picker…",
         )
-        note = None
-        if source == "listing":
-            note = (
-                "Source: file listing snapshot "
-                "(live Get_Filemetadata failed for this id — common on ZEN "
-                "when MTP property-list refresh fails; object is still listed)."
-            )
-        show_file_info_dialog(self.win.root, meta, note=note)
 
     def action_get_track_info(self) -> None:
         """Experimental Device → Get Track Info: pick audio-ish object, fetch tags."""
-        if not self._require_device_ready():
-            return
-        try:
-            files = device_ops.list_files(self.device)
-        except Exception as e:
-            logger.exception("Get track info listing failed")
-            messagebox.showerror("Track Info", str(e))
-            return
-        # Prefer objects that look like tracks (audio/video filetypes or
-        # common extensions). Folders and non-media still appear if nothing
-        # matches — libmtp will reject non-tracks with ObjectNotFound.
-        candidates = [e for e in files if _looks_like_track(e)]
-        pool = candidates if candidates else list(files or [])
-        if not pool:
-            messagebox.showinfo(
-                "Track Info",
-                "No objects found on the device.",
+
+        def on_listed(files) -> None:
+            # Prefer objects that look like tracks (audio/video filetypes or
+            # common extensions). Folders and non-media still appear if nothing
+            # matches — libmtp will reject non-tracks with ObjectNotFound.
+            candidates = [e for e in files if looks_like_track(e)]
+            pool = candidates if candidates else list(files or [])
+            if not pool:
+                messagebox.showinfo(
+                    "Track Info",
+                    "No objects found on the device.",
+                )
+                return
+            logger.info(
+                "Get Track Info (experimental): %d candidate(s) of %d listed",
+                len(pool),
+                len(files or []),
             )
-            return
-        logger.info(
-            "Get Track Info (experimental): %d candidate(s) of %d listed",
-            len(pool),
-            len(files or []),
+            entry = pick_file_entry_dialog(
+                self.win.root,
+                pool,
+                title="Get Track Info (experimental)",
+                prompt=(
+                    "select one track to inspect "
+                    "(LIBMTP_Get_Trackmetadata — on-device tags; USB-heavy)."
+                ),
+                action_label="Get Track Info",
+            )
+            if entry is None:
+                return
+            try:
+                info = device_ops.get_track_metadata(self.device, entry.item_id)
+            except TransportError as e:
+                logger.exception("Get track info failed id=%s", entry.item_id)
+                messagebox.showerror("Track Info", str(e))
+                return
+            except Exception as e:
+                logger.exception("Get track info failed id=%s", entry.item_id)
+                messagebox.showerror("Track Info", str(e))
+                return
+            logger.info(
+                "Track Info id=%s name=%r title=%r artist=%r album=%r",
+                info.item_id,
+                info.name,
+                info.title,
+                info.artist,
+                info.album,
+            )
+            show_track_info_dialog(self.win.root, info)
+
+        self._run_device_bg(
+            title="Track Info",
+            name="get-track-info-list",
+            work=lambda device: device_ops.list_files(device),
+            on_success=on_listed,
+            busy_message="listing device files for Track Info picker…",
         )
-        entry = pick_file_entry_dialog(
-            self.win.root,
-            pool,
-            title="Get Track Info (experimental)",
-            prompt=(
-                "select one track to inspect "
-                "(LIBMTP_Get_Trackmetadata — on-device tags; USB-heavy)."
-            ),
-            action_label="Get Track Info",
-        )
-        if entry is None:
-            return
-        try:
-            info = device_ops.get_track_metadata(self.device, entry.item_id)
-        except TransportError as e:
-            logger.exception("Get track info failed id=%s", entry.item_id)
-            messagebox.showerror("Track Info", str(e))
-            return
-        except Exception as e:
-            logger.exception("Get track info failed id=%s", entry.item_id)
-            messagebox.showerror("Track Info", str(e))
-            return
-        logger.info(
-            "Track Info id=%s name=%r title=%r artist=%r album=%r",
-            info.item_id,
-            info.name,
-            info.title,
-            info.artist,
-            info.album,
-        )
-        show_track_info_dialog(self.win.root, info)
-
-
-# libmtp audio/video-ish filetypes we treat as track candidates in the picker.
-# Values match wrapper LIBMTP_Filetype (libmtp 1.1.x). Unknown/other still
-# allowed if the filtered list is empty.
-_TRACK_FILETYPES = frozenset(
-    {
-        1,  # WAV
-        2,  # MP3
-        3,  # WMA
-        4,  # OGG
-        5,  # AUDIBLE
-        6,  # MP4
-        7,  # UNDEF_AUDIO
-        8,  # WMV
-        9,  # AVI
-        10,  # MPEG
-        11,  # ASF
-        12,  # QT
-        13,  # UNDEF_VIDEO
-        30,  # AAC
-        32,  # FLAC
-        33,  # MP2
-        34,  # M4A
-    }
-)
-_TRACK_EXTS = (
-    ".mp3",
-    ".wma",
-    ".wav",
-    ".ogg",
-    ".flac",
-    ".aac",
-    ".m4a",
-    ".mp4",
-    ".m4b",
-    ".asf",
-    ".wmv",
-    ".avi",
-    ".mpg",
-    ".mpeg",
-)
-
-
-def _looks_like_track(entry) -> bool:
-    """Heuristic for Get Track Info picker (not a hard libmtp gate)."""
-    ft = int(getattr(entry, "filetype", 0) or 0)
-    if ft in _TRACK_FILETYPES:
-        return True
-    name = (getattr(entry, "name", None) or "").strip().lower()
-    return any(name.endswith(ext) for ext in _TRACK_EXTS)

@@ -5,6 +5,7 @@ from __future__ import annotations
 from mtpmanager.domain.models import (
     DeviceInfo,
     DeviceTrackInfo,
+    DeviceTrackRef,
     FileEntry,
     FolderEntry,
     Track,
@@ -51,6 +52,22 @@ def file_line(entry: FileEntry) -> str:
     return (
         f"{entry.item_id:8}  parent={entry.parent_id:<6}  "
         f"type={entry.filetype:<3}  {size_s:>8}  {entry.name}"
+    )
+
+
+def track_line(entry: DeviceTrackRef) -> str:
+    """One line for Device → List Tracks dialog / logs.
+
+    Prefer on-device artist/title when present; fall back to filename so
+    file-listing-only rows (no tags) are still readable.
+    """
+    name = (entry.name or "").strip() or "(unnamed)"
+    title = (entry.title or "").strip() or name
+    artist = (entry.artist or "").strip() or "—"
+    return (
+        f"{entry.item_id:8}  parent={entry.parent_id:<6}  "
+        f"type={entry.filetype:<3}  {artist[:24]:<24}  "
+        f"{title[:28]:<28}  {name}"
     )
 
 

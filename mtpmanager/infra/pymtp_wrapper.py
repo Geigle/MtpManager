@@ -13,6 +13,8 @@ libmtp (1.1.x) and Apple Silicon / Python 3:
   * create_folder / set_devicename pass Python str without c_char_p argtypes
     (arm64/Py3: often only the first character is stored on the device)
   * get_filelisting linked-list walk (NULL-safe) + filelisting callback argtypes
+  * get_tracklisting linked-list walk + snapshot + destroy_track_t per node
+    + optional LIBMTP_progressfunc_t (object-handle scan progress)
   * delete_object argtypes + device-pointer path (LIBMTP_Delete_Object)
   * get_file_metadata argtypes + device-pointer path (LIBMTP_Get_Filemetadata)
   * get_track_metadata argtypes + snapshot + destroy_track_t (LIBMTP_Get_Trackmetadata)
@@ -184,6 +186,15 @@ def _configure_libmtp_ctypes() -> None:
             ctypes.c_void_p,
         ]
         lib.LIBMTP_Get_Filelisting_With_Callback.restype = file_p
+
+    # LIBMTP_track_t *Get_Tracklisting_With_Callback(dev, progress_cb, user_data)
+    if hasattr(lib, "LIBMTP_Get_Tracklisting_With_Callback"):
+        lib.LIBMTP_Get_Tracklisting_With_Callback.argtypes = [
+            dev_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+        ]
+        lib.LIBMTP_Get_Tracklisting_With_Callback.restype = track_p
 
     # int LIBMTP_Delete_Object(LIBMTP_mtpdevice_t *, uint32_t object_id)
     if hasattr(lib, "LIBMTP_Delete_Object"):
@@ -407,6 +418,75 @@ def _get_filelisting(self, callback=None):
     return ret
 
 
+# LIBMTP_progressfunc_t: int (*)(uint64_t sent, uint64_t total, void const *data)
+# Return non-zero to cancel. Keep a module-level type so callbacks stay typed.
+_ProgressFunc = ctypes.CFUNCTYPE(
+    ctypes.c_int, ctypes.c_uint64, ctypes.c_uint64, ctypes.c_void_p
+)
+
+
+def _get_tracklisting(self, callback=None):
+    """Return track snapshots (Python 3 / NULL-safe); free each C track node.
+
+    Stock walks the linked list without a NULL-safe head check, leaves C
+    strings allocated, and uses an untyped progress callback. We snapshot
+    fields into Python and ``LIBMTP_destroy_track_t`` each node before
+    following ``next`` (libmtp docs: destroy one node at a time — does not
+    free the rest of the chain).
+
+    *callback*, if given, is ``callback(sent, total)`` where *sent*/*total*
+    are object-handle indices from libmtp (not yet the final track count).
+    The expensive work is inside this C call (per-track metadata GETs).
+    """
+    if self.device is None:
+        raise NotConnected
+
+    dev = _device_ptr(self.device)
+    if not dev:
+        raise NotConnected
+
+    # Keep the ctypes callback alive for the duration of the C call.
+    c_progress = None
+    if callback is not None:
+
+        def _c_progress(sent, total, _data):
+            try:
+                callback(int(sent), int(total))
+            except Exception:
+                pass
+            return 0  # continue
+
+        c_progress = _ProgressFunc(_c_progress)
+
+    head = self.mtp.LIBMTP_Get_Tracklisting_With_Callback(dev, c_progress, None)
+    # Reference c_progress so it cannot be collected mid-call on some Pythons.
+    _ = c_progress
+    if not _ptr_truthy(head):
+        return []
+
+    destroy = getattr(self.mtp, "LIBMTP_destroy_track_t", None)
+    ret: list = []
+    cur = head
+    while _ptr_truthy(cur):
+        try:
+            node = cur.contents
+        except (ValueError, TypeError):
+            break
+        snap = _snapshot_track(node)
+        ret.append(snap)
+        nxt = getattr(node, "next", None)
+        if destroy is not None:
+            try:
+                destroy(cur)
+            except Exception:
+                pass
+        if not _ptr_truthy(nxt):
+            break
+        cur = nxt
+
+    return ret
+
+
 def _create_folder(self, name, parent=0, storage=0):
     """Create a folder with a proper UTF-8 C string (Python 3 / arm64 safe).
 
@@ -591,6 +671,7 @@ _MTP.get_folder_list = _get_folder_list
 _MTP.get_parent_folders = _get_parent_folders
 _MTP.get_filelisting = _get_filelisting
 _MTP.create_folder = _create_folder
+_MTP.get_tracklisting = _get_tracklisting
 _MTP.set_devicename = _set_devicename
 _MTP.delete_object = _delete_object
 _MTP.get_file_metadata = _get_file_metadata

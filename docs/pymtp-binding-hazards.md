@@ -171,7 +171,7 @@ Assume stock pymtp methods are **guilty until proven** on device under Python 3.
 | **Progress callbacks** | Stock `Progressfunc` signature historically wrong / incomplete | Hang, crash, or ignored progress | C |
 | **Linked-list walks** (files, tracks, playlists, errors) | NULL `next`; no guard; Py2-era loops | Segfault or hang on empty list | E-adjacent |
 | **`get_errorstack` stock path** | Treats pointer as int (`if ret != 0`) | Wrong “failure” or never raises | C, F |
-| **Delete object / batch admin** | Usually int-only (safer) but still untyped device ptr | Intermittent fail after poisoned session | G, C |
+| **Delete object / batch admin** | ~~untyped device ptr~~ **patched**; batch uses track listing + fatal abort | Residual: intermittent fail after poisoned session | G residual |
 
 ### Medium likelihood (struct / libmtp skew)
 
@@ -188,9 +188,14 @@ Assume stock pymtp methods are **guilty until proven** on device under Python 3.
 | Surface | Risk |
 |---------|------|
 | **Album association after send** | libmtp “could not add to album” noise even when object landed (seen historically with sendtr) |
-| **Concurrent USB use** | Auto-connect poll + transfer + folder list on same session without locking | Race / poison |
+| **Concurrent USB use** | Auto-connect poll + transfer + folder list on same session without locking | Race / poison — mitigated when listings/transfers set `_transfer_busy` so poll skips |
 | **Disconnect while worker runs** | Main-thread vs bg poll | Stale session, double free class bugs |
 | **Upstream pymtp upgrade** | Different wheel / fork | Silently drop our monkey-patches if import path changes |
+| **Long track/file listing on UI thread** | ~~was~~ Device → List Tracks/Files (and picker listings) blocked Tk for 60s+ while libmtp walked USB; stderr `LIBMTP panic: unable to read in zero packet` looked like a hard hang | **Fixed:** `_run_device_bg` (indeterminate for files/folders/tracks list); panic can still print to terminal and still be non-fatal |
+| **Post-listing auto-connect kill** | ~~was~~ list_tracks ok, then poll `session_alive`/`get_device_info` on a recovering bus → disconnect → `Could not close session!` / endpoint errors | **Fixed:** USB quiet cooldown after jobs + soft-fail probes (2 strikes) + skip full info when profile already applied |
+| **Get_Tracklisting bulk unusable on ZEN** | Full `LIBMTP_Get_Tracklisting*` can run **hours** (progress only inside C; no partial Python list until return), historically returned **1** track after ~77s + zero-packet panic, while `get_filelisting` returns ~full library in ~1s | **Fixed (product path):** List Tracks / Delete All use **filelisting + media filter** only. Tags via on-demand `get_track_metadata` (Get Track Info / Load tags for selection). Wrapper `get_tracklisting` kept for diagnostics — do **not** re-wire as default bulk UX |
+| **File-only List Tracks empty tags** | Pure file-filter list has empty artist/title on 1000+ rows | **Mitigated:** `track_line` falls back title→filename; dialog **Load tags for selection** (small batches; warn >25); not full-library tracklisting |
+| **LIBMTP panic zero-packet noise** | `LIBMTP panic: unable to read in zero packet response` / `0xfffffff8` (LIBUSB_ERROR_OVERFLOW on optional ZLP) during long walks | **Non-fatal** stderr from C (LIBMTP_INFO); do not treat as hard failure or abort the session solely for this message |
 
 ---
 
@@ -242,12 +247,14 @@ Keep this table in sync when adding monkey-patches:
 | Folder Get/Find argtypes | Configured | C |
 | `get_filelisting` | Replaced (NULL-safe; progress=NULL) | E-adjacent, C |
 | Filelisting callback argtypes | Configured | C |
+| `get_tracklisting` | Replaced (NULL-safe; snapshot + destroy_track_t per node; optional progress callback) | E-adjacent, C |
+| Tracklisting callback argtypes | Configured | C |
 | `create_folder` | Replaced | D, C |
 | `set_devicename` | Replaced (was already OK via bytes at adapter) | D, C |
 | `send_file_from_file` | **Not fully replaced** (argtypes partial via Send_File) | C, D residual |
 | Playlist APIs | **Untouched** | D, C predicted |
 | Download to file | **Untouched** | D, C predicted |
-| `delete_object` | Replaced (argtypes + device ptr) | C, G residual |
+| `delete_object` | Replaced (argtypes + device ptr); batch Delete All aborts on fatal | C, G residual |
 | `get_file_metadata` | Replaced (argtypes + device ptr; NULL → dump + ObjectNotFound); UI listing fallback | C, J |
 | `get_track_metadata` | Replaced (argtypes + snapshot + destroy_track_t; NULL → dump + ObjectNotFound) | C |
 
