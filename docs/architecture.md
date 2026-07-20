@@ -9,7 +9,7 @@ MtpManager loads music onto picky MTP players (especially Creative ZEN Vision:M)
 ## Problem framing
 
 - Old players speak MTP poorly; host software often assumes modern devices or WMP-centric workflows.
-- Need: FLAC (etc.) → device formats (MP3/WMA), reliable track send, honest failure handling when the session dies.
+- Need: FLAC (etc.) → device formats (MP3/WMA/WAV on ZEN), reliable track send, honest failure handling when the session dies. Native formats are passed through without re-encode.
 - Hard lessons: nested remote paths, storage id 0, long object names, ignored subprocess status, and broken PyMTP bindings all look like “USB is haunted” until diagnosed. See debriefs under `docs/`.
 
 ---

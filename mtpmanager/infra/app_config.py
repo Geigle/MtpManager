@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 CONFIG_FILENAME = "config.json"
 CONFIG_VERSION = 1
-VALID_SEND_FORMATS = frozenset({"mp3", "wma"})
+VALID_SEND_FORMATS = frozenset({"mp3", "wma", "wav"})
 DEFAULT_SEND_FORMAT = "mp3"
 
 

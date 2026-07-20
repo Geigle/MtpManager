@@ -9,10 +9,10 @@ from __future__ import annotations
 
 import logging
 from concurrent.futures import Future, ThreadPoolExecutor
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass
 
-from mtpmanager.domain.library import is_format
+from mtpmanager.domain.device_profile import needs_transcode
 from mtpmanager.domain.models import Track, TrackMetadata
 from mtpmanager.infra.logging_setup import start_transfer_log, stop_transfer_log
 from mtpmanager.infra.mutagen_tags import read_metadata
@@ -80,20 +80,34 @@ def prepare_track(
     slot: int = 0,
     reread_tags_after_convert: bool = True,
     on_track_status: TrackStatusCallback | None = None,
+    device_formats: Collection[str] | None = None,
 ) -> PreparedTrack:
-    """Transcode into *slot* if needed; return path/meta for send (no send yet)."""
+    """Transcode into *slot* if needed; return path/meta for send (no send yet).
+
+    When *device_formats* is set, sources already in a native device format are
+    sent as-is (no re-encode), even if they differ from *target_format*.
+    """
     target_format = target_format.lower().lstrip(".")
     src = track.path
     meta = track.meta
     cleanup_path: str | None = None
 
-    if not is_format(src, target_format):
+    if needs_transcode(
+        src, target_format=target_format, device_formats=device_formats
+    ):
         _notify_status(on_track_status, track.path, "transcoding")
         src = transcoder.convert(src, target_format, slot=slot)
         cleanup_path = src
         if reread_tags_after_convert:
             converted = read_metadata(src)
             meta = _merge_meta_after_convert(meta, converted)
+    else:
+        logger.info(
+            "Passthrough (no transcode): %s (target=%s device_formats=%s)",
+            src,
+            target_format,
+            sorted(device_formats) if device_formats else None,
+        )
 
     return PreparedTrack(
         send_path=src,
@@ -122,9 +136,10 @@ def transfer_track(
     slot: int = 0,
     on_track_status: TrackStatusCallback | None = None,
     resolve_parent_folder: ParentFolderResolver | None = None,
+    device_formats: Collection[str] | None = None,
 ) -> None:
     """
-    Ensure track is in target_format (transcode if needed), then send via transport.
+    Ensure track is device-ready (transcode if needed), then send via transport.
     Temp files from the transcoder are always cleaned up.
     """
     prepared = prepare_track(
@@ -134,6 +149,7 @@ def transfer_track(
         slot=slot,
         reread_tags_after_convert=reread_tags_after_convert,
         on_track_status=on_track_status,
+        device_formats=device_formats,
     )
     try:
         _notify_status(on_track_status, track.path, "transferring")
@@ -161,6 +177,7 @@ def transfer_tracks(
     stop_on_fatal: bool = True,
     session_log: bool = True,
     resolve_parent_folder: ParentFolderResolver | None = None,
+    device_formats: Collection[str] | None = None,
 ) -> int:
     """Transfer many tracks with dual-slot convert/send pipeline.
 
@@ -170,6 +187,9 @@ def transfer_tracks(
 
     *on_track_status* receives ``(source_path, status)`` where status is one of
     ``transcoding``, ``transferring``, ``done``, or ``failed``.
+
+    *device_formats* lists extensions the player plays natively; those sources
+    skip ffmpeg even when they differ from *target_format*.
     """
     total = len(tracks)
     succeeded = 0
@@ -181,9 +201,11 @@ def transfer_tracks(
             logger.warning("Could not open transfer session log: %s", exc)
 
     logger.info(
-        "Batch transfer start: %d track(s) target_format=%s (dual-slot pipeline)",
+        "Batch transfer start: %d track(s) target_format=%s "
+        "device_formats=%s (dual-slot pipeline)",
         total,
         target_format,
+        sorted(device_formats) if device_formats else None,
     )
 
     prepared: PreparedTrack | None = None
@@ -214,6 +236,7 @@ def transfer_tracks(
             transcoder=transcoder,
             slot=slot,
             on_track_status=on_track_status,
+            device_formats=device_formats,
         )
 
     try:

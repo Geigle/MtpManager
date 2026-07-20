@@ -12,6 +12,8 @@ ZEN_VISION_M = DeviceProfile(
     model_needles=("vision:m", "vision m", "zen vision"),
     name_needles=(),
     graphic_filename="zen_vision_m.png",
+    # Official Creative formats for Vision:M: MP3, WMA, WAV (PCM).
+    supported_audio_formats=frozenset({"mp3", "wma", "wav"}),
 )
 
 GENERIC = DeviceProfile(
@@ -21,6 +23,8 @@ GENERIC = DeviceProfile(
     model_needles=(),
     name_needles=(),
     graphic_filename="generic_player.png",
+    # Conservative default when the player is unknown.
+    supported_audio_formats=frozenset({"mp3"}),
 )
 
 BUILTIN_PROFILES: tuple[DeviceProfile, ...] = (

@@ -136,12 +136,12 @@ def show_config_dialog(parent, *, send_format: str) -> str | None:
     body = Frame(dlg, padx=14, pady=12)
     body.pack(fill=BOTH, expand=True)
 
-    Label(body, text="Output format for sync / transfer:").pack(anchor="w")
+    Label(body, text="Output format when conversion is needed:").pack(anchor="w")
     fmt_var = StringVar(value=initial.upper())
     combo = ttk.Combobox(
         body,
         textvariable=fmt_var,
-        values=("MP3", "WMA"),
+        values=("MP3", "WMA", "WAV"),
         state="readonly",
         width=12,
     )
@@ -150,12 +150,14 @@ def show_config_dialog(parent, *, send_format: str) -> str | None:
     Label(
         body,
         text=(
+            "Tracks already in a device-supported format "
+            "(e.g. MP3/WMA/WAV on ZEN Vision:M) are sent as-is.\n\n"
             "Transfer engine is under Config → Stable Mode:\n"
             "off = PyMTP (default, Device menu + auto-connect);\n"
             "on = mtp-sendtr subprocess per track."
         ),
         justify=LEFT,
-        wraplength=320,
+        wraplength=340,
     ).pack(anchor="w", pady=(0, 12))
 
     result: list[str | None] = [None]

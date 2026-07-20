@@ -45,7 +45,11 @@ class FFmpegTranscoder:
 
         if target_format == "wma":
             output_details: dict = {"codec:a": "wmav2"}
+        elif target_format == "wav":
+            # PCM WAV — widely accepted by older DAP / MTP players.
+            output_details = {"codec:a": "pcm_s16le"}
         else:
+            # Default: MP3 (or other) via ffmpeg's extension-based muxer.
             output_details = {"qscale:a": "0"}
 
         logger.info(

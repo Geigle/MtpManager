@@ -114,6 +114,40 @@ class DualSlotPipelineTests(unittest.TestCase):
             self.assertEqual(prep.cleanup_path, prep.send_path)
             tr.cleanup(prep.cleanup_path)
 
+    def test_prepare_passthrough_device_native(self) -> None:
+        """WMA source with MP3 target should not re-encode on ZEN-like devices."""
+        with tempfile.TemporaryDirectory() as tmp:
+            src = os.path.join(tmp, "clip.wma")
+            Path(src).write_bytes(b"x")
+            tr = _FakeTranscoder(tmp)
+            prep = prepare_track(
+                _track(src, "T"),
+                target_format="mp3",
+                transcoder=tr,
+                reread_tags_after_convert=False,
+                device_formats=frozenset({"mp3", "wma", "wav"}),
+            )
+            self.assertEqual(tr.calls, [])
+            self.assertEqual(prep.send_path, src)
+            self.assertIsNone(prep.cleanup_path)
+
+    def test_prepare_converts_unsupported(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            src = os.path.join(tmp, "a.flac")
+            Path(src).write_bytes(b"x")
+            tr = _FakeTranscoder(tmp)
+            prep = prepare_track(
+                _track(src, "T"),
+                target_format="wav",
+                transcoder=tr,
+                reread_tags_after_convert=False,
+                device_formats=frozenset({"mp3", "wma", "wav"}),
+            )
+            self.assertEqual(len(tr.calls), 1)
+            self.assertEqual(tr.calls[0][1], "wav")
+            self.assertTrue(prep.send_path.endswith("TRANSCODE_0.wav"))
+            tr.cleanup(prep.cleanup_path)
+
     def test_batch_alternates_slots_and_keeps_file_during_send(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             paths = []

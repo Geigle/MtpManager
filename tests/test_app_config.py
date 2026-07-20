@@ -86,6 +86,13 @@ class AppConfigTests(unittest.TestCase):
             self.assertEqual(cfg.normalized_send_format(), "mp3")
             self.assertFalse(cfg.stable_mode)
 
+    def test_wav_is_valid_send_format(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "config.json"
+            save_app_config(AppConfig(send_format="wav"), path=dest)
+            loaded = load_app_config(path=dest)
+            self.assertEqual(loaded.normalized_send_format(), "wav")
+
 
 if __name__ == "__main__":
     unittest.main()

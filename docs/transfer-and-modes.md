@@ -73,9 +73,9 @@ After a heavy USB job the controller keeps a short **USB quiet window** (`_DEVIC
 
 ## Format targets and transcoding
 
-- User-facing targets: **MP3** and **WMA** (single-track actions; batch paths currently use MP3).
-- `domain/library.is_format(path, fmt)` — extension-based; if already target format, skip convert.
-- Otherwise `FFmpegTranscoder.convert` writes into a **dual-buffer slot**: `TRANSCODE_0.<ext>` / `TRANSCODE_1.<ext>` (`slot` 0 or 1). Batch `transfer_tracks` prepares track *i+1* on a helper thread into the alternate slot while track *i* is sent, so ffmpeg cannot clobber a file still in flight (CMD and PyMTP share this pipeline).
+- User-facing **fallback** targets (Config → Config…): **MP3**, **WMA**, **WAV**. Used when the source is *not* already playable on the matched device (or when no device profile is active).
+- **Device-native passthrough:** each `DeviceProfile` lists `supported_audio_formats`. For Creative ZEN Vision:M that is `mp3`, `wma`, `wav`. After USB detect + profile match, sources already in a native format are sent **as-is** (no ffmpeg), even if they differ from the configured target — avoids lossy→lossy re-encodes. Logic: `domain/device_profile.needs_transcode`; profiles in `domain/device_profiles.py`. Profile is applied only when a device is detected (`AppController._apply_device_profile`); no profile → convert only if extension ≠ target (no ZVM assumption).
+- Otherwise `FFmpegTranscoder.convert` writes into a **dual-buffer slot**: `TRANSCODE_0.<ext>` / `TRANSCODE_1.<ext>` (`slot` 0 or 1). Batch `transfer_tracks` prepares track *i+1* on a helper thread into the alternate slot while track *i* is sent, so ffmpeg cannot clobber a file still in flight (CMD and PyMTP share this pipeline). WAV target uses `pcm_s16le`; WMA uses `wmav2`.
 - After convert, tags are re-read and merged (prefer original tags; take stream length/bitrate from converted file when useful).
 - Temps are cleaned up after each successful send (or on abort).
 

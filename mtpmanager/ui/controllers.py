@@ -164,6 +164,17 @@ class AppController:
     def _target_format(self) -> str:
         return self._config.normalized_send_format()
 
+    def _device_audio_formats(self) -> frozenset[str] | None:
+        """Native playable formats from the USB-matched profile, if any.
+
+        Only set after a device is detected and profile-matched (e.g. ZEN
+        Vision:M). When no session/profile is active, returns None so prepare
+        only skips convert when the source already matches the Config target.
+        """
+        if self._active_profile is None:
+            return None
+        return self._active_profile.supported_audio_formats
+
     def on_config(self) -> None:
         """Open Config dialog; persist send format on Save."""
         new_fmt = show_config_dialog(
@@ -1433,9 +1444,10 @@ class AppController:
     def _transfer_one(self, track: Track, fmt: str) -> None:
         if not self._begin_transfer_job():
             return
-        # Capture transport on main thread (mode tab may change later).
+        # Capture transport / formats on main thread (mode may change later).
         transport = self._transport()
         transcoder = self.transcoder
+        device_formats = self._device_audio_formats()
         path = track.path
         self._mark_batch_queued([track])
 
@@ -1453,9 +1465,11 @@ class AppController:
                     report("track_status", src, status)
 
                 logger.info(
-                    "Single-track transfer start: path=%s target_format=%s",
+                    "Single-track transfer start: path=%s target_format=%s "
+                    "device_formats=%s",
                     path,
                     fmt,
+                    sorted(device_formats) if device_formats else None,
                 )
                 transfer_track(
                     track,
@@ -1465,6 +1479,7 @@ class AppController:
                     slot=0,
                     on_track_status=on_track_status,
                     resolve_parent_folder=self._parent_folder_resolver(),
+                    device_formats=device_formats,
                 )
                 logger.info("Single-track transfer done: path=%s", path)
             finally:
@@ -1503,6 +1518,7 @@ class AppController:
 
         transport = self._transport()
         transcoder = self.transcoder
+        device_formats = self._device_audio_formats()
         # Snapshot the list so library changes during transfer do not race.
         batch = list(tracks)
         self._mark_batch_queued(batch)
@@ -1525,6 +1541,7 @@ class AppController:
                 on_progress=on_progress,
                 on_track_status=on_track_status,
                 resolve_parent_folder=self._parent_folder_resolver(),
+                device_formats=device_formats,
             )
 
         def on_done(succeeded: int) -> None:
