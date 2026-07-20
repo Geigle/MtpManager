@@ -67,6 +67,7 @@ MENU_UPDATE_LIBRARY = "Update Library"
 # Transfer menu
 MENU_SYNC_ENTIRE = "Sync Entire Library"
 MENU_SYNC_FOLDER = "Sync Folder…"
+MENU_RESUME_SYNC = "Resume Sync"
 MENU_CANCEL_JOB = "Cancel Current Job"
 
 # Config menu
@@ -143,6 +144,7 @@ class MainWindow:
         self.menubar.add_cascade(label="Transfer", menu=self.menu_transfer)
         self.menu_transfer.add_command(label=MENU_SYNC_ENTIRE)
         self.menu_transfer.add_command(label=MENU_SYNC_FOLDER)
+        self.menu_transfer.add_command(label=MENU_RESUME_SYNC, state=DISABLED)
         self.menu_transfer.add_separator()
         self.menu_transfer.add_command(label=MENU_CANCEL_JOB, state=DISABLED)
 
@@ -375,13 +377,26 @@ class MainWindow:
         *,
         on_sync_entire,
         on_sync_folder,
+        on_resume_sync=None,
         on_cancel_job=None,
     ) -> None:
         self.menu_transfer.entryconfig(MENU_SYNC_ENTIRE, command=on_sync_entire)
         self.menu_transfer.entryconfig(MENU_SYNC_FOLDER, command=on_sync_folder)
+        if on_resume_sync is not None:
+            self.menu_transfer.entryconfig(MENU_RESUME_SYNC, command=on_resume_sync)
         if on_cancel_job is not None:
             self.menu_transfer.entryconfig(MENU_CANCEL_JOB, command=on_cancel_job)
             self._cancel_job_command = on_cancel_job
+
+    def set_resume_sync_enabled(self, enabled: bool) -> None:
+        """Enable Transfer → Resume Sync when a durable job can continue."""
+        try:
+            self.menu_transfer.entryconfig(
+                MENU_RESUME_SYNC,
+                state=NORMAL if enabled else DISABLED,
+            )
+        except Exception:
+            pass
 
     def set_config_menu_commands(
         self,

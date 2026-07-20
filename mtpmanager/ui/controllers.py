@@ -25,7 +25,7 @@ from mtpmanager.domain.library_sort import (
     sort_tracks_flat,
 )
 from mtpmanager.domain.device_media import looks_like_track
-from mtpmanager.domain.models import DeviceInfo, Track
+from mtpmanager.domain.models import DeviceInfo, Track, TrackMetadata
 from mtpmanager.infra.album_art import (
     DEFAULT_THUMB_SIZE,
     ensure_cached_thumb,
@@ -37,7 +37,14 @@ from mtpmanager.infra.device_assets import device_graphic_path
 from mtpmanager.infra.ffmpeg_transcode import FFmpegTranscoder
 from mtpmanager.infra.library_index import load_library_index, save_library_index
 from mtpmanager.infra.logging_setup import start_transfer_log, stop_transfer_log
+from mtpmanager.infra.mutagen_tags import read_metadata
 from mtpmanager.infra.pymtp_device import PymtpDevice
+from mtpmanager.infra.sync_job import (
+    SyncJobState,
+    load_sync_job,
+    new_sync_job,
+    save_sync_job,
+)
 from mtpmanager.ports.transport import TransportError
 from mtpmanager.ui.bg import TkBackgroundRunner
 from mtpmanager.ui.dialogs import (
@@ -79,6 +86,8 @@ class AppController:
         self._transfer_busy = False
         # Cooperative cancel for transfer / device batch jobs (checked between items).
         self._job_cancel = threading.Event()
+        # Durable multi-track sync plan (resume after failure / cancel).
+        self._active_sync_job: SyncJobState | None = None
         self._populate_after_id: str | None = None
         self._device_poll_after_id: str | None = None
         self._device_poll_gen = 0
@@ -113,6 +122,7 @@ class AppController:
         w.set_transfer_menu_commands(
             on_sync_entire=self.action_entire_library,
             on_sync_folder=self.action_sync_folder,
+            on_resume_sync=self.action_resume_sync,
             on_cancel_job=self.on_cancel_job,
         )
         w.set_config_menu_commands(
@@ -159,6 +169,8 @@ class AppController:
             persist=False,
             reason="startup",
         )
+        # Restore resumable sync job (if any) for Transfer → Resume Sync.
+        self._load_sync_job_for_resume()
 
 
     def _transport(self):
@@ -473,7 +485,18 @@ class AppController:
         if not matches:
             messagebox.showinfo("Sync", "No matching tracks found.")
             return
-        self._transfer_many(matches, self._target_format())
+        if kind == "artist":
+            label = f"Artist: {primary_artist(seed)}"
+            job_kind = "artist"
+        else:
+            label = f"Album: {seed.meta.album or 'Unknown Album'}"
+            job_kind = "album"
+        self._transfer_many(
+            matches,
+            self._target_format(),
+            kind=job_kind,
+            label=label,
+        )
 
     def on_sort_heading(self, col: str) -> None:
         """Column heading click: set primary sort (toggle reverse if same)."""
@@ -770,7 +793,10 @@ class AppController:
         """Handle progress / track-status events from the transfer worker."""
         if kind == "track_status":
             if len(rest) >= 2:
-                self._apply_track_status(str(rest[0]), str(rest[1]))
+                path = str(rest[0])
+                status = str(rest[1])
+                self._apply_track_status(path, status)
+                self._note_sync_job_track(path, status)
             return
         if kind == "progress":
             if len(rest) >= 3:
@@ -1263,6 +1289,14 @@ class AppController:
 
     def _transfer_recovery_hint(self, *, batch: bool = False) -> str:
         """User-facing next steps after a failed transfer (mode-aware)."""
+        resume_line = ""
+        job = self._active_sync_job
+        if batch and job is not None and job.is_resumable():
+            resume_line = (
+                f"Then Transfer → Resume Sync "
+                f"({job.succeeded}/{job.total} already sent)."
+            )
+
         if self.win.active_mode() == "experimental":
             lines = [
                 "PyMTP send failed and was not retried automatically.",
@@ -1271,7 +1305,7 @@ class AppController:
                 "1. Device → Disconnect "
                 "(unplug/replug the player if Disconnect errors).",
                 "2. Enable Config → Stable Mode.",
-                "3. Retry the transfer (uses mtp-sendtr).",
+                "3. Transfer → Resume Sync (or retry the same selection).",
                 "",
                 "Leave Stable Mode off only if you are debugging PyMTP/libmtp; "
                 "check ~/Library/Logs/MtpManager for the full error stack.",
@@ -1282,14 +1316,18 @@ class AppController:
                     "The batch was stopped so remaining tracks are not sent "
                     "into a dead session.",
                 )
+            if resume_line:
+                lines.insert(-2, resume_line)
             return "\n".join(lines)
 
         if batch:
-            return (
+            base = (
                 "Batch stopped so remaining tracks are not sent into a dead "
-                "MTP session. Unplug/replug the player, free space if needed, "
-                "then resume from the failed track."
+                "MTP session. Unplug/replug the player, free space if needed."
             )
+            if resume_line:
+                return f"{base}\n{resume_line}"
+            return f"{base}\nThen Transfer → Resume Sync from the failed track."
         return (
             "If the player froze or was unplugged, disconnect/reconnect it "
             "before trying again."
@@ -1557,7 +1595,134 @@ class AppController:
             name="transfer-one",
         )
 
-    def _transfer_many(self, tracks: list[Track], fmt: str = "mp3") -> None:
+    def _load_sync_job_for_resume(self) -> None:
+        """Load durable job from disk; enable Resume Sync when applicable."""
+        job = load_sync_job()
+        if job is None:
+            self._active_sync_job = None
+            self.win.set_resume_sync_enabled(False)
+            return
+        # Stale "running" after a crash → treat as failed so Resume is offered.
+        if job.status == "running" and job.is_resumable():
+            job.status = "failed"
+            job.last_error = job.last_error or "Interrupted (app quit or crash)"
+            try:
+                save_sync_job(job)
+            except OSError:
+                logger.exception("Could not update interrupted sync job")
+        self._active_sync_job = job
+        self.win.set_resume_sync_enabled(job.is_resumable())
+        if job.is_resumable():
+            logger.info("Resumable sync job: %s", job.summary_line())
+
+    def _persist_sync_job(self) -> None:
+        job = self._active_sync_job
+        if job is None:
+            return
+        try:
+            save_sync_job(job)
+        except OSError:
+            logger.exception("Failed to save sync job progress")
+
+    def _refresh_resume_menu(self) -> None:
+        job = self._active_sync_job
+        self.win.set_resume_sync_enabled(bool(job and job.is_resumable()))
+
+    def _note_sync_job_track(self, path: str, status: str) -> None:
+        """Update durable job progress from per-track status (main thread)."""
+        job = self._active_sync_job
+        if job is None or job.status == "completed":
+            return
+        if status == "done":
+            if job.mark_path_done(path):
+                self._persist_sync_job()
+        elif status == "failed":
+            job.mark_path_failed(path)
+            self._persist_sync_job()
+            self._refresh_resume_menu()
+
+    def _finish_sync_job_success(self) -> None:
+        job = self._active_sync_job
+        if job is None:
+            return
+        job.mark_completed()
+        self._persist_sync_job()
+        self._refresh_resume_menu()
+        logger.info("Sync job completed: %s", job.summary_line())
+
+    def _finish_sync_job_cancelled(self, exc: JobCancelled) -> None:
+        job = self._active_sync_job
+        if job is None:
+            return
+        # next_index already advanced for completed items via track_status.
+        job.mark_cancelled()
+        self._persist_sync_job()
+        self._refresh_resume_menu()
+        logger.info(
+            "Sync job cancelled: %s (session completed=%s)",
+            job.summary_line(),
+            exc.completed,
+        )
+
+    def _finish_sync_job_failed(self, exc: BaseException) -> None:
+        job = self._active_sync_job
+        if job is None:
+            return
+        path = ""
+        if isinstance(exc, TransportError):
+            path = (exc.path or "").strip()
+        if not path:
+            path = job.last_failed_path or (
+                job.paths[job.next_index]
+                if job.next_index < job.total
+                else ""
+            )
+        job.mark_path_failed(path, str(exc))
+        self._persist_sync_job()
+        self._refresh_resume_menu()
+        logger.info("Sync job failed: %s", job.summary_line())
+
+    def _tracks_for_paths(self, paths: list[str]) -> list[Track]:
+        """Map source paths to Track objects (library first, else re-read tags)."""
+        by_path = {t.path: t for t in self.library.tracks}
+        out: list[Track] = []
+        for p in paths:
+            if p in by_path:
+                out.append(by_path[p])
+                continue
+            if os.path.isfile(p):
+                try:
+                    meta = read_metadata(p)
+                except Exception:
+                    logger.warning("Could not read tags for resume path %s", p)
+                    meta = TrackMetadata()
+                out.append(Track(path=p, meta=meta))
+            else:
+                logger.warning("Resume: skipping missing path %s", p)
+        return out
+
+    def _skip_missing_job_head(self, job: SyncJobState) -> None:
+        """Advance past missing files at the resume head so we do not stall."""
+        by_path = {t.path for t in self.library.tracks}
+        while job.next_index < job.total:
+            p = job.paths[job.next_index]
+            if p in by_path or os.path.isfile(p):
+                break
+            logger.warning("Resume: advance past missing %s", p)
+            job.next_index += 1
+            job.updated_at = job.updated_at  # touch via mark later
+        if job.next_index >= job.total:
+            job.mark_completed()
+
+    def _transfer_many(
+        self,
+        tracks: list[Track],
+        fmt: str = "mp3",
+        *,
+        kind: str = "batch",
+        label: str = "",
+        resume_job: SyncJobState | None = None,
+    ) -> None:
         if not tracks:
             messagebox.showinfo("Transfer", "No tracks to transfer.")
             return
@@ -1569,7 +1734,30 @@ class AppController:
         device_formats = self._device_audio_formats()
         # Snapshot the list so library changes during transfer do not race.
         batch = list(tracks)
+        mode = self.win.active_mode()
+
+        if resume_job is not None:
+            job = resume_job
+            job.mark_running()
+            # Remaining batch must align with job.paths[job.next_index:].
+            self._active_sync_job = job
+        else:
+            job = new_sync_job(
+                paths=[t.path for t in batch],
+                kind=kind,
+                label=label or kind,
+                target_format=fmt,
+                mode=mode,
+            )
+            self._active_sync_job = job
+        self._persist_sync_job()
+        self.win.set_resume_sync_enabled(False)
         self._mark_batch_queued(batch)
+        logger.info(
+            "Sync job start: %s (batch_now=%d)",
+            job.summary_line(),
+            len(batch),
+        )
 
         def work() -> int:
             gen = self._bg.generation
@@ -1594,21 +1782,28 @@ class AppController:
             )
 
         def on_done(succeeded: int) -> None:
+            self._finish_sync_job_success()
             self._end_transfer_job()
             logger.info("Background batch finished: succeeded=%s", succeeded)
 
         def on_error(exc: BaseException) -> None:
-            self._end_transfer_job()
             if isinstance(exc, JobCancelled):
+                self._finish_sync_job_cancelled(exc)
+                self._end_transfer_job()
                 self._handle_job_cancelled(exc, title="Transfer cancelled")
                 return
+            self._finish_sync_job_failed(exc)
+            self._end_transfer_job()
             if isinstance(exc, TransportError):
                 self._log_transport_error("Batch transfer aborted", exc)
                 title = "Transfer aborted" if exc.fatal else "Transfer failed"
                 self._show_transfer_error(title, exc, batch=True)
-            else:
-                logger.exception("Batch transfer failed")
-                messagebox.showerror("Transfer failed", str(exc))
+                job_now = self._active_sync_job
+                if job_now and job_now.is_resumable():
+                    logger.info("Resume available: %s", job_now.summary_line())
+                return
+            logger.exception("Batch transfer failed")
+            messagebox.showerror("Transfer failed", str(exc))
 
         self._bg.submit(
             work,
@@ -1665,10 +1860,18 @@ class AppController:
             "Sync Entire Library",
             f"Send all {n} track(s) as {fmt} using "
             f"{'Stable (mtp-sendtr)' if self.win.active_mode() == 'stable' else 'PyMTP'}?\n\n"
-            "This may take a long time.",
+            "This may take a long time.\n"
+            "Progress is saved; use Transfer → Resume Sync after a failure.",
         ):
             return
-        self._transfer_many(list(self.library.tracks), self._target_format())
+        tracks = list(self.library.tracks)
+        tracks.sort(key=lambda t: t.path)
+        self._transfer_many(
+            tracks,
+            self._target_format(),
+            kind="entire_library",
+            label="Entire library",
+        )
 
     def action_sync_folder(self) -> None:
         """Pick a directory, scan it, transfer every track (global format)."""
@@ -1690,7 +1893,85 @@ class AppController:
         if not album_lib.tracks:
             messagebox.showinfo("Sync Folder", "No music files found.")
             return
-        self._transfer_many(list(album_lib.tracks), self._target_format())
+        tracks = list(album_lib.tracks)
+        tracks.sort(key=lambda t: t.path)
+        self._transfer_many(
+            tracks,
+            self._target_format(),
+            kind="folder",
+            label=f"Folder: {path}",
+        )
+
+    def action_resume_sync(self) -> None:
+        """Transfer → Resume Sync: continue durable job from last failure."""
+        if not self._require_sync_ready():
+            return
+        job = self._active_sync_job or load_sync_job()
+        if job is None or not job.is_resumable():
+            messagebox.showinfo(
+                "Resume Sync",
+                "No interrupted sync job to resume.\n\n"
+                "Start a multi-track sync (Entire Library, Folder, Album, "
+                "or Artist); progress is saved if it fails or is cancelled.",
+            )
+            self.win.set_resume_sync_enabled(False)
+            return
+
+        self._skip_missing_job_head(job)
+        if not job.is_resumable():
+            self._active_sync_job = job
+            self._persist_sync_job()
+            self._refresh_resume_menu()
+            messagebox.showinfo(
+                "Resume Sync",
+                "Nothing left to send for the saved job "
+                f"({job.succeeded}/{job.total} already done).",
+            )
+            return
+
+        remaining_paths = job.remaining_paths()
+        tracks = self._tracks_for_paths(remaining_paths)
+        if not tracks:
+            messagebox.showinfo(
+                "Resume Sync",
+                "Saved job has remaining paths, but none are available on disk.",
+            )
+            return
+
+        # If some middle paths were missing, remaining_paths may be longer than
+        # tracks; align by only sending resolved tracks and leave job.paths as-is
+        # (mark_path_done advances by path).
+        fmt = job.target_format or self._target_format()
+        mode_label = (
+            "Stable (mtp-sendtr)"
+            if self.win.active_mode() == "stable"
+            else "PyMTP"
+        )
+        if not messagebox.askyesno(
+            "Resume Sync",
+            f"{job.summary_line()}\n\n"
+            f"Resume {len(tracks)} remaining track(s) as {fmt.upper()} "
+            f"using {mode_label}?\n\n"
+            "Starts at the last failed / next unsent track.",
+        ):
+            return
+
+        # Ensure next_index points at first path we will actually send.
+        first = tracks[0].path
+        try:
+            idx = job.paths.index(first)
+            if idx > job.next_index:
+                job.next_index = idx
+        except ValueError:
+            pass
+        self._active_sync_job = job
+        self._transfer_many(
+            tracks,
+            fmt,
+            kind=job.kind or "resume",
+            label=job.label or "Resume",
+            resume_job=job,
+        )
 
     def action_create_folder(self) -> None:
         if not self._require_device_ready():

@@ -176,6 +176,15 @@ Single-track and batch sends run on a **worker thread** via `ui/bg.TkBackgroundR
 
 Cancel is **cooperative**: the current track send / object delete is allowed to finish; remaining items are skipped and the UI reports how many completed (`JobCancelled` / `DeleteAllResult.cancelled`). In-flight ffmpeg convert of the *next* track is abandoned when the batch stops.
 
+### Resume Sync
+
+Multi-track syncs (Entire Library, Folder, Album, Artist) write a durable plan to `{data_dir}/sync_job.json` (`infra/sync_job.py`): ordered source paths, `next_index` (first not-yet-successful path), status, target format, and last error.
+
+- After each successful send, `next_index` advances and the file is updated.
+- On fatal failure or cancel, status becomes `failed` / `cancelled` and **Transfer → Resume Sync** enables.
+- Resume rebuilds tracks from the remaining paths (library tags, or re-read from disk) and continues from `next_index` (retries the failed track).
+- A full successful run marks the job `completed` (Resume disabled). An app quit mid-job is treated as failed on next launch if paths remain.
+
 The transfer **worker** still blocks on each `transport.send_track` (subprocess or libmtp); the dual-slot prep thread overlaps **ffmpeg convert** of the next track only.
 
 ### Listbox transfer highlighting
