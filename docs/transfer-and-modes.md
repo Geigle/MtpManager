@@ -168,6 +168,14 @@ Non-fatal continues are supported by the API (`stop_on_fatal=False`) but product
 
 Single-track and batch sends run on a **worker thread** via `ui/bg.TkBackgroundRunner` (same pattern as library scan). Progress events are queued to the main thread for the progress bar. Library menu / transfers refuse to start while the other is busy.
 
+**Cancel** is available while a transfer/device batch job runs (`_begin_transfer_job`):
+
+- Bottom bar **Cancel** button (right of the progress bar)
+- **Transfer → Cancel Current Job**
+- **Escape**
+
+Cancel is **cooperative**: the current track send / object delete is allowed to finish; remaining items are skipped and the UI reports how many completed (`JobCancelled` / `DeleteAllResult.cancelled`). In-flight ffmpeg convert of the *next* track is abandoned when the batch stops.
+
 The transfer **worker** still blocks on each `transport.send_track` (subprocess or libmtp); the dual-slot prep thread overlaps **ffmpeg convert** of the next track only.
 
 ### Listbox transfer highlighting

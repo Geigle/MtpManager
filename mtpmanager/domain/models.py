@@ -134,3 +134,4 @@ class DeleteAllResult:
     deleted: int
     failed_id: int | None = None
     aborted: bool = False
+    cancelled: bool = False

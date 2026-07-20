@@ -12,6 +12,11 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass
 
+from mtpmanager.app.cancellation import (
+    CancelCheck,
+    JobCancelled,
+    raise_if_cancelled,
+)
 from mtpmanager.domain.device_profile import needs_transcode
 from mtpmanager.domain.models import Track, TrackMetadata
 from mtpmanager.infra.logging_setup import start_transfer_log, stop_transfer_log
@@ -81,12 +86,14 @@ def prepare_track(
     reread_tags_after_convert: bool = True,
     on_track_status: TrackStatusCallback | None = None,
     device_formats: Collection[str] | None = None,
+    should_cancel: CancelCheck | None = None,
 ) -> PreparedTrack:
     """Transcode into *slot* if needed; return path/meta for send (no send yet).
 
     When *device_formats* is set, sources already in a native device format are
     sent as-is (no re-encode), even if they differ from *target_format*.
     """
+    raise_if_cancelled(should_cancel)
     target_format = target_format.lower().lstrip(".")
     src = track.path
     meta = track.meta
@@ -137,11 +144,16 @@ def transfer_track(
     on_track_status: TrackStatusCallback | None = None,
     resolve_parent_folder: ParentFolderResolver | None = None,
     device_formats: Collection[str] | None = None,
+    should_cancel: CancelCheck | None = None,
 ) -> None:
     """
     Ensure track is device-ready (transcode if needed), then send via transport.
     Temp files from the transcoder are always cleaned up.
+
+    *should_cancel* is checked before prepare and before send (cannot abort an
+    in-flight MTP/ffmpeg call).
     """
+    raise_if_cancelled(should_cancel, total=1)
     prepared = prepare_track(
         track,
         target_format=target_format,
@@ -150,8 +162,10 @@ def transfer_track(
         reread_tags_after_convert=reread_tags_after_convert,
         on_track_status=on_track_status,
         device_formats=device_formats,
+        should_cancel=should_cancel,
     )
     try:
+        raise_if_cancelled(should_cancel, total=1)
         _notify_status(on_track_status, track.path, "transferring")
         parent_id = _resolve_parent(resolve_parent_folder, prepared.meta)
         transport.send_track(
@@ -178,6 +192,7 @@ def transfer_tracks(
     session_log: bool = True,
     resolve_parent_folder: ParentFolderResolver | None = None,
     device_formats: Collection[str] | None = None,
+    should_cancel: CancelCheck | None = None,
 ) -> int:
     """Transfer many tracks with dual-slot convert/send pipeline.
 
@@ -190,6 +205,10 @@ def transfer_tracks(
 
     *device_formats* lists extensions the player plays natively; those sources
     skip ffmpeg even when they differ from *target_format*.
+
+    *should_cancel*: when true between tracks, remaining items are skipped and
+    :class:`~mtpmanager.app.cancellation.JobCancelled` is raised (the track
+    already in flight still finishes).
     """
     total = len(tracks)
     succeeded = 0
@@ -237,11 +256,34 @@ def transfer_tracks(
             slot=slot,
             on_track_status=on_track_status,
             device_formats=device_formats,
+            should_cancel=should_cancel,
+        )
+
+    def _user_cancel(*, at_index: int) -> None:
+        nonlocal prepared
+        remaining = max(0, total - at_index)
+        logger.info(
+            "Batch cancelled by user: succeeded=%d/%d remaining_not_started=%d",
+            succeeded,
+            total,
+            remaining,
+        )
+        _cancel_next()
+        _cleanup(prepared)
+        prepared = None
+        if on_progress and total:
+            on_progress(succeeded, total, "")
+        raise JobCancelled(
+            f"Cancelled after {succeeded} of {total} track(s)",
+            completed=succeeded,
+            total=total,
         )
 
     try:
         if total == 0:
             return 0
+
+        raise_if_cancelled(should_cancel, total=total)
 
         with ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="mtpmanager-prep"
@@ -249,6 +291,11 @@ def transfer_tracks(
             prepared = _prepare(tracks[0], 0)
 
             for i, track in enumerate(tracks):
+                # Between items: honor cancel before starting the next send.
+                if should_cancel is not None and should_cancel():
+                    _user_cancel(at_index=i)
+                    return succeeded  # unreachable; _user_cancel raises
+
                 if on_progress:
                     on_progress(i, total, track.path)
                 logger.info("%d/%d - %s", i + 1, total, track.path)
@@ -310,6 +357,14 @@ def transfer_tracks(
                 if next_future is not None:
                     try:
                         prepared = next_future.result()
+                    except JobCancelled:
+                        next_future = None
+                        # Prep thread saw cancel; report progress so far.
+                        raise JobCancelled(
+                            f"Cancelled after {succeeded} of {total} track(s)",
+                            completed=succeeded,
+                            total=total,
+                        )
                     except Exception:
                         next_future = None
                         raise

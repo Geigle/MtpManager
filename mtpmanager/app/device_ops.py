@@ -6,6 +6,7 @@ import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
+from mtpmanager.app.cancellation import CancelCheck
 from mtpmanager.domain.device_media import apply_track_info
 from mtpmanager.domain.models import (
     DeleteAllResult,
@@ -189,12 +190,16 @@ def delete_all_tracks(
     *,
     on_progress: DeleteProgressCallback | None = None,
     stop_on_fatal: bool = True,
+    should_cancel: CancelCheck | None = None,
 ) -> DeleteAllResult:
     """Delete every track on the device (or the provided snapshot).
 
     Uses the track listing (music/video) so folders/photos are left alone.
     On fatal ``TransportError``, aborts remaining deletes - the MTP session
     is likely poisoned (same policy as transfer batches).
+
+    *should_cancel*: when true between deletes, remaining items are skipped
+    (the delete already in flight still finishes).
     """
     batch = list(tracks) if tracks is not None else list_tracks(device)
     # Stable unique positive ids (listing can theoretically repeat).
@@ -219,7 +224,27 @@ def delete_all_tracks(
         except Exception:
             logger.debug("delete_all on_progress failed", exc_info=True)
 
+    def _cancelled() -> bool:
+        if should_cancel is None:
+            return False
+        try:
+            return bool(should_cancel())
+        except Exception:
+            return False
+
     for t in ordered:
+        if _cancelled():
+            logger.info(
+                "delete_all_tracks cancelled by user deleted=%s/%s",
+                deleted,
+                total,
+            )
+            _progress(deleted, None)
+            return DeleteAllResult(
+                total=total,
+                deleted=deleted,
+                cancelled=True,
+            )
         _progress(deleted, t)
         oid = int(t.item_id)
         label = (t.name or t.title or "").strip() or f"id={oid}"

@@ -81,7 +81,20 @@ class TkBackgroundRunner:
                 result = fn()
                 self._q.put((gen, "done", result))
             except BaseException as exc:
-                logger.exception("Background job failed (gen=%s name=%s)", gen, name)
+                # JobCancelled is expected UX, not a failure — log quietly.
+                from mtpmanager.app.cancellation import JobCancelled
+
+                if isinstance(exc, JobCancelled):
+                    logger.info(
+                        "Background job cancelled (gen=%s name=%s): %s",
+                        gen,
+                        name,
+                        exc,
+                    )
+                else:
+                    logger.exception(
+                        "Background job failed (gen=%s name=%s)", gen, name
+                    )
                 self._q.put((gen, "error", exc))
 
         threading.Thread(target=worker, name=f"{name}-{gen}", daemon=True).start()

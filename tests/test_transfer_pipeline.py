@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from mtpmanager.app.cancellation import JobCancelled
 from mtpmanager.app.transfer import prepare_track, transfer_tracks
 from mtpmanager.domain.models import Track, TrackMetadata
 from mtpmanager.infra.ffmpeg_transcode import FFmpegTranscoder, NUM_SLOTS
@@ -253,6 +254,45 @@ class DualSlotPipelineTests(unittest.TestCase):
             i_xfer = events.index(("a.flac", "transferring"))
             i_done = events.index(("a.flac", "done"))
             self.assertLess(i_xfer, i_done)
+
+    def test_batch_cancel_stops_remaining(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = []
+            for name in ("a.flac", "b.flac", "c.flac"):
+                p = os.path.join(tmp, name)
+                Path(p).write_bytes(b"x")
+                paths.append(p)
+            tracks = [
+                _track(paths[0], "One"),
+                _track(paths[1], "Two"),
+                _track(paths[2], "Three"),
+            ]
+            tr = _FakeTranscoder(tmp)
+            cancel_after_first = {"n": 0}
+
+            def should_cancel() -> bool:
+                # Cancel once the first track has been sent.
+                return cancel_after_first["n"] >= 1
+
+            class _CountingTransport(_RecordingTransport):
+                def send_track(self, path, meta, *, parent_id=None):
+                    super().send_track(path, meta, parent_id=parent_id)
+                    cancel_after_first["n"] += 1
+
+            transport = _CountingTransport()
+            with self.assertRaises(JobCancelled) as ctx:
+                transfer_tracks(
+                    tracks,
+                    target_format="mp3",
+                    transport=transport,
+                    transcoder=tr,
+                    session_log=False,
+                    should_cancel=should_cancel,
+                )
+            self.assertEqual(ctx.exception.completed, 1)
+            self.assertEqual(ctx.exception.total, 3)
+            self.assertEqual(len(transport.sent), 1)
+            self.assertEqual(transport.sent[0][1], "One")
 
 
 if __name__ == "__main__":

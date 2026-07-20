@@ -10,6 +10,7 @@ from tkinter import (
     BOTH,
     BOTTOM,
     BooleanVar,
+    Button,
     DISABLED,
     END,
     LEFT,
@@ -66,6 +67,7 @@ MENU_UPDATE_LIBRARY = "Update Library"
 # Transfer menu
 MENU_SYNC_ENTIRE = "Sync Entire Library"
 MENU_SYNC_FOLDER = "Sync Folder…"
+MENU_CANCEL_JOB = "Cancel Current Job"
 
 # Config menu
 MENU_STABLE_MODE = "Stable Mode"
@@ -141,6 +143,8 @@ class MainWindow:
         self.menubar.add_cascade(label="Transfer", menu=self.menu_transfer)
         self.menu_transfer.add_command(label=MENU_SYNC_ENTIRE)
         self.menu_transfer.add_command(label=MENU_SYNC_FOLDER)
+        self.menu_transfer.add_separator()
+        self.menu_transfer.add_command(label=MENU_CANCEL_JOB, state=DISABLED)
 
         self.menu_device = Menu(self.menubar, tearoff=0)
         self.menubar.add_cascade(label="Device", menu=self.menu_device)
@@ -202,6 +206,27 @@ class MainWindow:
         self.lbl_library_count = Label(library_toolbar, text="0 tracks")
         self.lbl_library_count.pack(side=LEFT, padx=(6, 8), pady=4)
 
+        # Pack bottom bar *before* the expanding body so it always keeps a
+        # visible strip (Tk expand can otherwise starve a late BOTTOM pack).
+        bottomframe = Frame(self.root)
+        bottomframe["borderwidth"] = 3
+        bottomframe["relief"] = "sunken"
+        bottomframe.pack(side=BOTTOM, fill=X)
+
+        # Progress + Cancel (always mapped; Cancel enabled only while a job runs).
+        self.progress_row = Frame(bottomframe)
+        self.progress_row.pack(side=TOP, fill=X, padx=4, pady=4)
+        self.btn_cancel_job = Button(
+            self.progress_row,
+            text="Cancel",
+            width=12,
+            state=DISABLED,
+        )
+        # Pack Cancel first on the right so the progress bar cannot cover it.
+        self.btn_cancel_job.pack(side=RIGHT, padx=(8, 2), pady=2)
+        self.progress = ttk.Progressbar(self.progress_row, length=200)
+        self.progress.pack(side=LEFT, fill=X, expand=True, padx=(2, 0), pady=2)
+
         body = Frame(self.root)
         body.pack(side=TOP, fill=BOTH, expand=True)
 
@@ -214,11 +239,6 @@ class MainWindow:
         rightframe["borderwidth"] = 3
         rightframe["relief"] = "sunken"
         rightframe.pack(side=RIGHT, fill=BOTH, expand=True)
-
-        bottomframe = Frame(self.root)
-        bottomframe["borderwidth"] = 3
-        bottomframe["relief"] = "sunken"
-        bottomframe.pack(side=BOTTOM, fill=X)
 
         # Left panel: PyMTP device session is front-and-center; Stable Mode
         # replaces this with help text (toggle under Config).
@@ -317,9 +337,7 @@ class MainWindow:
         self._prepare_context_menu = None
         self._tracks_interactive = True
         self._mode: Mode = "experimental"
-
-        self.progress = ttk.Progressbar(bottomframe)
-        self.progress.pack(side=BOTTOM, fill=X)
+        self._cancel_job_command = None
 
         self.apply_mode_ui("experimental")
 
@@ -357,9 +375,13 @@ class MainWindow:
         *,
         on_sync_entire,
         on_sync_folder,
+        on_cancel_job=None,
     ) -> None:
         self.menu_transfer.entryconfig(MENU_SYNC_ENTIRE, command=on_sync_entire)
         self.menu_transfer.entryconfig(MENU_SYNC_FOLDER, command=on_sync_folder)
+        if on_cancel_job is not None:
+            self.menu_transfer.entryconfig(MENU_CANCEL_JOB, command=on_cancel_job)
+            self._cancel_job_command = on_cancel_job
 
     def set_config_menu_commands(
         self,
@@ -660,6 +682,42 @@ class MainWindow:
         if not sel:
             return None
         return sel[0]
+
+    def set_cancel_job_command(self, command) -> None:
+        """Wire Cancel (progress-bar button + Transfer menu + Escape)."""
+        self._cancel_job_command = command
+        self.btn_cancel_job.configure(command=command)
+        try:
+            self.menu_transfer.entryconfig(MENU_CANCEL_JOB, command=command)
+        except Exception:
+            pass
+        # Escape cancels when a job is running (no-op if Cancel is disabled).
+        self.root.bind("<Escape>", self._on_escape_cancel)
+
+    def _on_escape_cancel(self, _event=None):
+        if self._cancel_job_command is None:
+            return
+        try:
+            state = str(self.btn_cancel_job.cget("state"))
+        except Exception:
+            return
+        if state == str(NORMAL) or state == "normal":
+            self._cancel_job_command()
+
+    def set_cancel_job_enabled(self, enabled: bool) -> None:
+        """Enable Cancel (button + Transfer menu) while a job is running."""
+        state = NORMAL if enabled else DISABLED
+        try:
+            self.btn_cancel_job.configure(
+                state=state,
+                text="Cancel",
+            )
+        except Exception:
+            pass
+        try:
+            self.menu_transfer.entryconfig(MENU_CANCEL_JOB, state=state)
+        except Exception:
+            pass
 
     def apply_mode_actions(self) -> None:
         """Enable Device menu only when PyMTP (non-Stable) is active."""

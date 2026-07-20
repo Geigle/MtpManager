@@ -79,6 +79,28 @@ class DeleteAllTracksTests(unittest.TestCase):
         self.assertEqual(result.deleted, 0)
         self.assertFalse(result.aborted)
 
+    def test_cancel_stops_remaining(self) -> None:
+        tracks = [_ref(1), _ref(2), _ref(3)]
+        dev = _FakeDevice(tracks)
+        cancel = {"flag": False}
+
+        def should_cancel() -> bool:
+            # Cancel after first delete completes (checked before each item).
+            return cancel["flag"]
+
+        class _CancelAfterOne(_FakeDevice):
+            def delete_object(self, object_id: int) -> None:
+                super().delete_object(object_id)
+                cancel["flag"] = True
+
+        dev = _CancelAfterOne(tracks)
+        result = delete_all_tracks(dev, tracks, should_cancel=should_cancel)
+        self.assertTrue(result.cancelled)
+        self.assertFalse(result.aborted)
+        self.assertEqual(result.deleted, 1)
+        self.assertEqual(result.total, 3)
+        self.assertEqual(dev.deleted, [1])
+
 
 if __name__ == "__main__":
     unittest.main()

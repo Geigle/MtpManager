@@ -10,6 +10,7 @@ from tkinter import filedialog, messagebox
 
 from mtpmanager.app import device_ops
 from mtpmanager.app.artist_folders import ensure_album_folder, ensure_artist_folder
+from mtpmanager.app.cancellation import JobCancelled
 from mtpmanager.app.scan_library import scan_library
 from mtpmanager.app.transfer import transfer_track, transfer_tracks
 from mtpmanager.domain.device_profile import DeviceProfile, match_device_profile
@@ -76,6 +77,8 @@ class AppController:
         self._bg = TkBackgroundRunner(window.root)
         self._library_busy = False
         self._transfer_busy = False
+        # Cooperative cancel for transfer / device batch jobs (checked between items).
+        self._job_cancel = threading.Event()
         self._populate_after_id: str | None = None
         self._device_poll_after_id: str | None = None
         self._device_poll_gen = 0
@@ -110,6 +113,7 @@ class AppController:
         w.set_transfer_menu_commands(
             on_sync_entire=self.action_entire_library,
             on_sync_folder=self.action_sync_folder,
+            on_cancel_job=self.on_cancel_job,
         )
         w.set_config_menu_commands(
             on_config=self.on_config,
@@ -144,6 +148,7 @@ class AppController:
         )
         w.set_prepare_context_menu(self._prepare_context_menu)
         w.set_sort_heading_handler(self.on_sort_heading)
+        w.set_cancel_job_command(self.on_cancel_job)
         # Context menu: Button-3 (most platforms), Button-2, Control-click (macOS).
         w.tree.bind("<Button-3>", w.popup_track_context)
         w.tree.bind("<Button-2>", w.popup_track_context)
@@ -1320,10 +1325,14 @@ class AppController:
         if self._transfer_busy or self._bg.busy:
             messagebox.showinfo(
                 "Busy",
-                "A background job is already running. Wait for it to finish.",
+                "A background job is already running.\n\n"
+                "Wait for it to finish, or click Cancel to stop after the "
+                "current item.",
             )
             return False
         self._transfer_busy = True
+        self._job_cancel.clear()
+        self.win.set_cancel_job_enabled(True)
         self._clear_transfer_highlights()
         # Hold auto-connect off the bus for the whole job + cooldown tail.
         self._mark_usb_quiet(_DEVICE_USB_COOLDOWN_S)
@@ -1335,11 +1344,46 @@ class AppController:
 
     def _end_transfer_job(self) -> None:
         self._transfer_busy = False
+        self._job_cancel.clear()
+        self.win.set_cancel_job_enabled(False)
+        try:
+            self.win.btn_cancel_job.configure(text="Cancel")
+        except Exception:
+            pass
         self._clear_transfer_highlights()
         self._stop_busy_progress()
         # Listing/transfer just finished — pause auto-connect USB probes.
         self._device_probe_fails = 0
         self._mark_usb_quiet()
+
+    def on_cancel_job(self) -> None:
+        """Progress-bar Cancel: stop after the current track/delete finishes."""
+        if not self._transfer_busy:
+            return
+        if self._job_cancel.is_set():
+            return
+        self._job_cancel.set()
+        logger.info("User requested cancel of current background job")
+        try:
+            self.win.btn_cancel_job.configure(text="Cancelling…", state=DISABLED)
+        except Exception:
+            pass
+
+    def _should_cancel_job(self) -> bool:
+        return self._job_cancel.is_set()
+
+    def _handle_job_cancelled(self, exc: JobCancelled, *, title: str) -> None:
+        """User-facing feedback after cooperative cancel (main thread)."""
+        completed = exc.completed
+        total = exc.total
+        if total > 0:
+            detail = f"Stopped after {completed} of {total} item(s)."
+        elif completed:
+            detail = f"Stopped after {completed} item(s)."
+        else:
+            detail = "Stopped before any items finished."
+        logger.info("%s: %s", title, detail)
+        messagebox.showinfo(title, f"{title}.\n\n{detail}")
 
     def _mark_usb_quiet(self, seconds: float = _DEVICE_USB_COOLDOWN_S) -> None:
         """Defer auto-connect probes until *seconds* after now (monotonic)."""
@@ -1480,6 +1524,7 @@ class AppController:
                     on_track_status=on_track_status,
                     resolve_parent_folder=self._parent_folder_resolver(),
                     device_formats=device_formats,
+                    should_cancel=self._should_cancel_job,
                 )
                 logger.info("Single-track transfer done: path=%s", path)
             finally:
@@ -1494,6 +1539,9 @@ class AppController:
 
         def on_error(exc: BaseException) -> None:
             self._end_transfer_job()
+            if isinstance(exc, JobCancelled):
+                self._handle_job_cancelled(exc, title="Transfer cancelled")
+                return
             if isinstance(exc, TransportError):
                 self._log_transport_error("Single-track transfer failed", exc)
                 self._show_transfer_error("Transfer failed", exc, batch=False)
@@ -1542,6 +1590,7 @@ class AppController:
                 on_track_status=on_track_status,
                 resolve_parent_folder=self._parent_folder_resolver(),
                 device_formats=device_formats,
+                should_cancel=self._should_cancel_job,
             )
 
         def on_done(succeeded: int) -> None:
@@ -1550,6 +1599,9 @@ class AppController:
 
         def on_error(exc: BaseException) -> None:
             self._end_transfer_job()
+            if isinstance(exc, JobCancelled):
+                self._handle_job_cancelled(exc, title="Transfer cancelled")
+                return
             if isinstance(exc, TransportError):
                 self._log_transport_error("Batch transfer aborted", exc)
                 title = "Transfer aborted" if exc.fatal else "Transfer failed"
@@ -1940,6 +1992,7 @@ class AppController:
                     device,
                     batch,
                     on_progress=on_progress,
+                    should_cancel=self._should_cancel_job,
                 )
 
             def on_done(result) -> None:
@@ -1948,6 +2001,13 @@ class AppController:
                     self.win.progress["value"] = 100
                 except Exception:
                     pass
+                if result.cancelled:
+                    messagebox.showinfo(
+                        "Delete All Tracks cancelled",
+                        f"Stopped after deleting {result.deleted} of "
+                        f"{result.total} track(s).",
+                    )
+                    return
                 if result.aborted:
                     messagebox.showerror(
                         "Delete All Tracks aborted",
@@ -1964,6 +2024,11 @@ class AppController:
 
             def on_error(exc: BaseException) -> None:
                 self._end_transfer_job()
+                if isinstance(exc, JobCancelled):
+                    self._handle_job_cancelled(
+                        exc, title="Delete All Tracks cancelled"
+                    )
+                    return
                 logger.exception("Delete All Tracks failed")
                 messagebox.showerror("Delete All Tracks", str(exc))
 
