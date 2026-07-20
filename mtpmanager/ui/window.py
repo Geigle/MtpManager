@@ -70,6 +70,7 @@ MENU_SYNC_FOLDER = "Sync Folder…"
 # Config menu
 MENU_STABLE_MODE = "Stable Mode"
 MENU_ARTIST_FOLDERS = "Store tracks in artist folder (experimental)"
+MENU_ALBUM_FOLDERS = "Store tracks in album folder (experimental)"
 MENU_CONFIG = "Config…"
 
 # Device menu (PyMTP / default)
@@ -148,6 +149,7 @@ class MainWindow:
 
         self.var_stable_mode = BooleanVar(value=False)
         self.var_artist_folders = BooleanVar(value=False)
+        self.var_album_folders = BooleanVar(value=False)
         self.menu_config = Menu(self.menubar, tearoff=0)
         self.menubar.add_cascade(label="Config", menu=self.menu_config)
         self.menu_config.add_checkbutton(
@@ -161,6 +163,13 @@ class MainWindow:
             variable=self.var_artist_folders,
             onvalue=True,
             offvalue=False,
+        )
+        self.menu_config.add_checkbutton(
+            label=MENU_ALBUM_FOLDERS,
+            variable=self.var_album_folders,
+            onvalue=True,
+            offvalue=False,
+            state=DISABLED,
         )
         self.menu_config.add_separator()
         self.menu_config.add_command(label=MENU_CONFIG)
@@ -358,6 +367,7 @@ class MainWindow:
         on_config,
         on_stable_mode_toggle=None,
         on_artist_folders_toggle=None,
+        on_album_folders_toggle=None,
     ) -> None:
         self.menu_config.entryconfig(MENU_CONFIG, command=on_config)
         if on_stable_mode_toggle is not None:
@@ -368,6 +378,17 @@ class MainWindow:
             self.menu_config.entryconfig(
                 MENU_ARTIST_FOLDERS, command=on_artist_folders_toggle
             )
+        if on_album_folders_toggle is not None:
+            self.menu_config.entryconfig(
+                MENU_ALBUM_FOLDERS, command=on_album_folders_toggle
+            )
+
+    def set_album_folders_menu_enabled(self, enabled: bool) -> None:
+        """Enable/disable album-folder checkbutton (requires artist folders)."""
+        self.menu_config.entryconfig(
+            MENU_ALBUM_FOLDERS,
+            state=NORMAL if enabled else DISABLED,
+        )
 
     def set_device_menu_commands(
         self,

@@ -1,11 +1,13 @@
-"""Unit tests for experimental artist folder ensure (no device)."""
+"""Unit tests for experimental artist/album folder ensure (no device)."""
 
 from __future__ import annotations
 
 import unittest
 
 from mtpmanager.app.artist_folders import (
+    album_folder_name,
     artist_folder_name,
+    ensure_album_folder,
     ensure_artist_folder,
     find_child_folder,
 )
@@ -40,6 +42,12 @@ class ArtistFolderTests(unittest.TestCase):
             title="T",
         )
         self.assertEqual(artist_folder_name(meta), "Main Band")
+
+    def test_album_folder_name(self) -> None:
+        meta = TrackMetadata(album="Meteora & More")
+        self.assertEqual(album_folder_name(meta), "Meteora More")
+        empty = TrackMetadata(album="")
+        self.assertEqual(album_folder_name(empty), "Unknown Album")
 
     def test_find_child_folder(self) -> None:
         dev = _FakeDevice(
@@ -77,6 +85,46 @@ class ArtistFolderTests(unittest.TestCase):
         meta = TrackMetadata(artist="Relient K")
         fid = ensure_artist_folder(dev, meta)
         self.assertEqual(fid, 445)
+        self.assertEqual(dev.created, [])
+
+    def test_ensure_album_creates_artist_then_album(self) -> None:
+        dev = _FakeDevice([FolderEntry(100, "Music", 0)])
+        meta = TrackMetadata(
+            artist="Linkin Park",
+            albumartist="Linkin Park",
+            album="Meteora",
+        )
+        cache: dict[str, int] = {}
+        album_id = ensure_album_folder(dev, meta, cache=cache)
+        self.assertEqual(len(dev.created), 2)
+        self.assertEqual(dev.created[0], ("Linkin Park", DEFAULT_MUSIC_FOLDER_ID))
+        artist_id = next(
+            e.folder_id for e in dev.folders if e.name == "Linkin Park"
+        )
+        self.assertEqual(dev.created[1], ("Meteora", artist_id))
+        self.assertEqual(album_id, next(
+            e.folder_id for e in dev.folders if e.name == "Meteora"
+        ))
+        # Reuse cache: no more creates.
+        again = ensure_album_folder(dev, meta, cache=cache)
+        self.assertEqual(again, album_id)
+        self.assertEqual(len(dev.created), 2)
+
+    def test_ensure_album_reuses_existing_tree(self) -> None:
+        dev = _FakeDevice(
+            [
+                FolderEntry(100, "Music", 0),
+                FolderEntry(300, "Linkin Park", 100),
+                FolderEntry(301, "Meteora", 300),
+            ]
+        )
+        meta = TrackMetadata(
+            artist="Linkin Park",
+            albumartist="Linkin Park",
+            album="Meteora",
+        )
+        fid = ensure_album_folder(dev, meta)
+        self.assertEqual(fid, 301)
         self.assertEqual(dev.created, [])
 
 

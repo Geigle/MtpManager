@@ -9,7 +9,7 @@ import time
 from tkinter import filedialog, messagebox
 
 from mtpmanager.app import device_ops
-from mtpmanager.app.artist_folders import ensure_artist_folder
+from mtpmanager.app.artist_folders import ensure_album_folder, ensure_artist_folder
 from mtpmanager.app.scan_library import scan_library
 from mtpmanager.app.transfer import transfer_track, transfer_tracks
 from mtpmanager.domain.device_profile import DeviceProfile, match_device_profile
@@ -115,8 +115,13 @@ class AppController:
             on_config=self.on_config,
             on_stable_mode_toggle=self.on_stable_mode_toggle,
             on_artist_folders_toggle=self.on_artist_folders_toggle,
+            on_album_folders_toggle=self.on_album_folders_toggle,
         )
-        w.var_artist_folders.set(bool(self._config.store_tracks_in_artist_folder))
+        artist_on = bool(self._config.store_tracks_in_artist_folder)
+        album_on = bool(self._config.store_tracks_in_album_folder) and artist_on
+        w.var_artist_folders.set(artist_on)
+        w.var_album_folders.set(album_on)
+        w.set_album_folders_menu_enabled(artist_on)
         w.set_device_menu_commands(
             on_connect=self.on_connect,
             on_disconnect=self.on_disconnect,
@@ -180,12 +185,13 @@ class AppController:
         """Config → Stable Mode checkbutton: switch transport and persist."""
         stable = bool(self.win.var_stable_mode.get())
         mode = "stable" if stable else "experimental"
-        if stable and self._config.store_tracks_in_artist_folder:
-            # Artist folders need PyMTP create_folder + an open session.
-            self._config.store_tracks_in_artist_folder = False
-            self.win.var_artist_folders.set(False)
-            logger.info(
-                "Disabled store_tracks_in_artist_folder (incompatible with Stable Mode)"
+        if stable and (
+            self._config.store_tracks_in_artist_folder
+            or self._config.store_tracks_in_album_folder
+        ):
+            # Artist/album folders need PyMTP create_folder + an open session.
+            self._clear_artist_album_folder_prefs(
+                reason="incompatible with Stable Mode"
             )
         self._apply_transfer_mode(mode, persist=True, reason="config_menu")
 
@@ -203,13 +209,63 @@ class AppController:
             self.win.var_artist_folders.set(False)
             return
         self._config.store_tracks_in_artist_folder = enabled
+        if not enabled:
+            # Album folders require artist folders.
+            self._config.store_tracks_in_album_folder = False
+            self.win.var_album_folders.set(False)
+        self.win.set_album_folders_menu_enabled(enabled)
         try:
             save_app_config(self._config)
         except OSError as e:
             logger.exception("Failed to save store_tracks_in_artist_folder")
             messagebox.showerror("Config", f"Could not save settings:\n{e}")
             return
-        logger.info("Config store_tracks_in_artist_folder=%s", enabled)
+        logger.info(
+            "Config store_tracks_in_artist_folder=%s store_tracks_in_album_folder=%s",
+            enabled,
+            self._config.store_tracks_in_album_folder,
+        )
+
+    def on_album_folders_toggle(self) -> None:
+        """Config → Store tracks in album folder (experimental)."""
+        enabled = bool(self.win.var_album_folders.get())
+        if enabled and not self._config.store_tracks_in_artist_folder:
+            messagebox.showinfo(
+                "Album folders",
+                "Store tracks in album folder requires "
+                "Config → Store tracks in artist folder.\n\n"
+                "It creates Music/<Artist>/<Album> on the device and sends "
+                "tracks into that folder id.",
+            )
+            self.win.var_album_folders.set(False)
+            return
+        if enabled and self._config.stable_mode:
+            messagebox.showinfo(
+                "Album folders",
+                "Store tracks in album folder needs PyMTP "
+                "(uncheck Config → Stable Mode).\n\n"
+                "It creates Music/<Artist>/<Album> on the device and sends "
+                "tracks into that folder id.",
+            )
+            self.win.var_album_folders.set(False)
+            return
+        self._config.store_tracks_in_album_folder = enabled
+        try:
+            save_app_config(self._config)
+        except OSError as e:
+            logger.exception("Failed to save store_tracks_in_album_folder")
+            messagebox.showerror("Config", f"Could not save settings:\n{e}")
+            return
+        logger.info("Config store_tracks_in_album_folder=%s", enabled)
+
+    def _clear_artist_album_folder_prefs(self, *, reason: str) -> None:
+        """Turn off artist/album folder options and update the Config menu."""
+        self._config.store_tracks_in_artist_folder = False
+        self._config.store_tracks_in_album_folder = False
+        self.win.var_artist_folders.set(False)
+        self.win.var_album_folders.set(False)
+        self.win.set_album_folders_menu_enabled(False)
+        logger.info("Disabled artist/album folder prefs (%s)", reason)
 
     def _parent_folder_resolver(self):
         """Return a resolve_parent_folder callback, or None when feature is off."""
@@ -222,8 +278,11 @@ class AppController:
 
         cache: dict[str, int] = {}
         device = self.device
+        use_album = bool(self._config.store_tracks_in_album_folder)
 
         def resolve(meta) -> int | None:
+            if use_album:
+                return ensure_album_folder(device, meta, cache=cache)
             return ensure_artist_folder(device, meta, cache=cache)
 
         return resolve
@@ -240,9 +299,13 @@ class AppController:
             mode = "experimental"
         prev = self.win.active_mode()
         self._config.stable_mode = mode == "stable"
-        if mode == "stable" and self._config.store_tracks_in_artist_folder:
-            self._config.store_tracks_in_artist_folder = False
-            self.win.var_artist_folders.set(False)
+        if mode == "stable" and (
+            self._config.store_tracks_in_artist_folder
+            or self._config.store_tracks_in_album_folder
+        ):
+            self._clear_artist_album_folder_prefs(
+                reason="incompatible with Stable Mode"
+            )
         self.win.apply_mode_ui(mode)  # type: ignore[arg-type]
         if persist:
             try:
