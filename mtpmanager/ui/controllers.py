@@ -6,7 +6,7 @@ import logging
 import os
 import threading
 import time
-from tkinter import filedialog, messagebox
+from tkinter import DISABLED, NORMAL, filedialog, messagebox
 
 from mtpmanager.app import device_ops
 from mtpmanager.app.artist_folders import ensure_album_folder, ensure_artist_folder
@@ -122,6 +122,7 @@ class AppController:
         w.set_transfer_menu_commands(
             on_sync_entire=self.action_entire_library,
             on_sync_folder=self.action_sync_folder,
+            on_sync_selected=self.action_sync_selected,
             on_resume_sync=self.action_resume_sync,
             on_cancel_job=self.on_cancel_job,
         )
@@ -155,14 +156,24 @@ class AppController:
             on_sync_artist=self.action_all_from_artist,
             on_sync_artist_group=self.action_sync_artist_group,
             on_sync_album_group=self.action_sync_album_group,
+            on_sync_selected=self.action_sync_selected,
         )
         w.set_prepare_context_menu(self._prepare_context_menu)
         w.set_sort_heading_handler(self.on_sort_heading)
         w.set_cancel_job_command(self.on_cancel_job)
-        # Context menu: Button-3 (most platforms), Button-2, Control-click (macOS).
+        # Context menu: Button-3 (most platforms), Button-2.
+        # Do not bind Control-Button-1 here — extended selectmode uses
+        # Ctrl+click (Windows/Linux) / Cmd+click (macOS) for multi-select.
+        # On macOS, Control-click is still available as a secondary context
+        # gesture via the platform binding when present; prefer right-click.
         w.tree.bind("<Button-3>", w.popup_track_context)
         w.tree.bind("<Button-2>", w.popup_track_context)
-        w.tree.bind("<Control-Button-1>", w.popup_track_context)
+        import sys as _sys
+
+        if _sys.platform == "darwin":
+            # macOS: Control-click = context menu; multi-toggle is Command-click.
+            w.tree.bind("<Control-Button-1>", w.popup_track_context)
+        w.tree.bind("<<TreeviewSelect>>", self._on_tree_selection_changed)
         # Apply persisted mode (PyMTP default; Stable only if config says so).
         self._apply_transfer_mode(
             self._config.active_mode(),
@@ -437,15 +448,75 @@ class AppController:
             return None
         track = self._track_by_iid.get(iid)
         if track is None:
+            # Multi-select may include only groups — try first track in selection.
+            tracks = self._tracks_from_selected_iids(quiet=True)
+            if len(tracks) == 1:
+                return tracks[0]
             messagebox.showinfo("Index", "Select a track (not a group heading).")
             return None
         return track
 
+    def _tracks_from_selected_iids(self, *, quiet: bool = False) -> list[Track]:
+        """Resolve tree multi-selection to Track list (group headers expand)."""
+        iids = self.win.selected_tree_iids()
+        if not iids:
+            return []
+        return self._tracks_from_iids(iids)
+
+    def _tracks_from_iids(self, iids: list[str]) -> list[Track]:
+        """Map row iids to tracks; group headers include all descendant tracks."""
+        tracks: list[Track] = []
+        seen: set[str] = set()
+
+        def add_from_iid(iid: str) -> None:
+            track = self._track_by_iid.get(iid)
+            if track is not None:
+                if track.path not in seen:
+                    tracks.append(track)
+                    seen.add(track.path)
+                return
+            for child in self.win.tree.get_children(iid):
+                add_from_iid(child)
+
+        for iid in iids:
+            add_from_iid(iid)
+        tracks.sort(key=lambda t: t.path)
+        return tracks
+
+    def _on_tree_selection_changed(self, _event=None) -> None:
+        """Refresh Transfer → Sync Selected enablement from multi-select."""
+        if self._library_busy or not self.win._tracks_interactive:
+            self.win.set_sync_selected_enabled(False)
+            return
+        tracks = self._tracks_from_selected_iids(quiet=True)
+        self.win.set_sync_selected_enabled(bool(tracks), count=len(tracks))
+
     def _prepare_context_menu(self, row_iid: str, tags) -> None:
-        """Update group menu labels and remember seed track for header actions."""
+        """Update group/multi-select menu labels before popup."""
         tagset = set(tags)
         seed = self._group_seed_by_iid.get(row_iid)
         self._context_group_seed = seed
+
+        # Multi-select bulk action (track rows and expanded groups).
+        selected_tracks = self._tracks_from_selected_iids(quiet=True)
+        n = len(selected_tracks)
+        try:
+            if n >= 1:
+                label = (
+                    f"Sync {n} selected track{'s' if n != 1 else ''}"
+                )
+                self.win.menu_track_ctx.entryconfig(
+                    0,  # CTX_SYNC_SELECTED is first
+                    label=label,
+                    state=NORMAL if n >= 1 else DISABLED,
+                )
+            else:
+                self.win.menu_track_ctx.entryconfig(
+                    0, label="Sync selected tracks", state=DISABLED
+                )
+        except Exception:
+            pass
+
         if seed is None:
             return
         if "group_artist" in tagset:
@@ -1815,10 +1886,53 @@ class AppController:
 
 
     def action_sync_this_track(self) -> None:
+        # If multiple tracks are selected, treat as bulk selection sync.
+        selected = self._tracks_from_selected_iids(quiet=True)
+        if len(selected) > 1:
+            self.action_sync_selected()
+            return
         track = self._selected_track()
         if track is None:
             return
         self._transfer_one(track, self._target_format())
+
+    def action_sync_selected(self) -> None:
+        """Sync multi-selected tracks (Shift/Ctrl/Cmd selection) as one job."""
+        if not self._require_sync_ready():
+            return
+        tracks = self._tracks_from_selected_iids(quiet=True)
+        if not tracks:
+            messagebox.showinfo(
+                "Sync Selected",
+                "Select one or more tracks first.\n\n"
+                "• Click a track to select it\n"
+                "• Shift+click for a range\n"
+                "• Ctrl+click (Windows/Linux) or ⌘+click (macOS) to toggle\n"
+                "• Group headers include all tracks under that group",
+            )
+            return
+        if len(tracks) == 1:
+            self._transfer_one(tracks[0], self._target_format())
+            return
+        n = len(tracks)
+        fmt = self._target_format().upper()
+        mode = (
+            "Stable (mtp-sendtr)"
+            if self.win.active_mode() == "stable"
+            else "PyMTP"
+        )
+        if not messagebox.askyesno(
+            "Sync Selected Tracks",
+            f"Send {n} selected track(s) as {fmt} using {mode}?\n\n"
+            "Progress is saved; use Transfer → Resume Sync after a failure.",
+        ):
+            return
+        self._transfer_many(
+            tracks,
+            self._target_format(),
+            kind="selection",
+            label=f"Selection ({n} tracks)",
+        )
 
     def action_all_from_artist(self) -> None:
         track = self._selected_track()

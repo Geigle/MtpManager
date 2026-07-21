@@ -67,6 +67,7 @@ MENU_UPDATE_LIBRARY = "Update Library"
 # Transfer menu
 MENU_SYNC_ENTIRE = "Sync Entire Library"
 MENU_SYNC_FOLDER = "Sync Folder…"
+MENU_SYNC_SELECTED = "Sync Selected Tracks"
 MENU_RESUME_SYNC = "Resume Sync"
 MENU_CANCEL_JOB = "Cancel Current Job"
 
@@ -90,6 +91,7 @@ MENU_GET_TRACK_INFO = "Get Track Info (experimental)"
 MENU_DELETE_ALL = "Delete All Tracks…"
 
 # Track context menu
+CTX_SYNC_SELECTED = "Sync selected tracks"
 CTX_SYNC_TRACK = "Sync this track"
 CTX_SYNC_ALBUM = "Sync Album"
 CTX_SYNC_ARTIST = "Sync all from Artist"
@@ -144,6 +146,7 @@ class MainWindow:
         self.menubar.add_cascade(label="Transfer", menu=self.menu_transfer)
         self.menu_transfer.add_command(label=MENU_SYNC_ENTIRE)
         self.menu_transfer.add_command(label=MENU_SYNC_FOLDER)
+        self.menu_transfer.add_command(label=MENU_SYNC_SELECTED, state=DISABLED)
         self.menu_transfer.add_command(label=MENU_RESUME_SYNC, state=DISABLED)
         self.menu_transfer.add_separator()
         self.menu_transfer.add_command(label=MENU_CANCEL_JOB, state=DISABLED)
@@ -182,6 +185,8 @@ class MainWindow:
 
         # Track / group context menus (commands wired by controller).
         self.menu_track_ctx = Menu(self.root, tearoff=0)
+        self.menu_track_ctx.add_command(label=CTX_SYNC_SELECTED, state=DISABLED)
+        self.menu_track_ctx.add_separator()
         self.menu_track_ctx.add_command(label=CTX_SYNC_TRACK)
         self.menu_track_ctx.add_command(label=CTX_SYNC_ALBUM)
         self.menu_track_ctx.add_command(label=CTX_SYNC_ARTIST)
@@ -284,7 +289,8 @@ class MainWindow:
             tree_frame,
             columns=TREE_COLS,
             show="tree headings",
-            selectmode="browse",
+            # extended: Shift+click range, Ctrl/Cmd+click toggle multi-select.
+            selectmode="extended",
             yscrollcommand=yscroll.set,
             xscrollcommand=xscroll.set,
         )
@@ -377,16 +383,34 @@ class MainWindow:
         *,
         on_sync_entire,
         on_sync_folder,
+        on_sync_selected=None,
         on_resume_sync=None,
         on_cancel_job=None,
     ) -> None:
         self.menu_transfer.entryconfig(MENU_SYNC_ENTIRE, command=on_sync_entire)
         self.menu_transfer.entryconfig(MENU_SYNC_FOLDER, command=on_sync_folder)
+        if on_sync_selected is not None:
+            self.menu_transfer.entryconfig(
+                MENU_SYNC_SELECTED, command=on_sync_selected
+            )
         if on_resume_sync is not None:
             self.menu_transfer.entryconfig(MENU_RESUME_SYNC, command=on_resume_sync)
         if on_cancel_job is not None:
             self.menu_transfer.entryconfig(MENU_CANCEL_JOB, command=on_cancel_job)
             self._cancel_job_command = on_cancel_job
+
+    def set_sync_selected_enabled(self, enabled: bool, *, count: int = 0) -> None:
+        """Enable Transfer → Sync Selected when one or more tracks are selected."""
+        state = NORMAL if enabled else DISABLED
+        label = MENU_SYNC_SELECTED
+        if enabled and count > 0:
+            label = f"Sync Selected Tracks ({count})"
+        try:
+            self.menu_transfer.entryconfig(
+                MENU_SYNC_SELECTED, state=state, label=label
+            )
+        except Exception:
+            pass
 
     def set_resume_sync_enabled(self, enabled: bool) -> None:
         """Enable Transfer → Resume Sync when a durable job can continue."""
@@ -468,7 +492,12 @@ class MainWindow:
         on_sync_artist,
         on_sync_artist_group,
         on_sync_album_group,
+        on_sync_selected=None,
     ) -> None:
+        if on_sync_selected is not None:
+            self.menu_track_ctx.entryconfig(
+                CTX_SYNC_SELECTED, command=on_sync_selected
+            )
         self.menu_track_ctx.entryconfig(CTX_SYNC_TRACK, command=on_sync_track)
         self.menu_track_ctx.entryconfig(CTX_SYNC_ALBUM, command=on_sync_album)
         self.menu_track_ctx.entryconfig(CTX_SYNC_ARTIST, command=on_sync_artist)
@@ -594,7 +623,7 @@ class MainWindow:
         """Allow interaction, or mark the tree as dead/unreachable."""
         self._tracks_interactive = usable
         if usable:
-            self.tree.configure(selectmode="browse")
+            self.tree.configure(selectmode="extended")
             # Drop dead tag from all items
             for iid in self._all_iids():
                 tags = [t for t in self.tree.item(iid, "tags") if t != "dead"]
@@ -649,7 +678,10 @@ class MainWindow:
             self.tree.item(iid, tags=tags)
 
     def popup_track_context(self, event) -> str | None:
-        """Select the row under the pointer and show the appropriate context menu.
+        """Show context menu for the row under the pointer.
+
+        If the row is already part of a multi-selection, keep the selection
+        (so bulk Sync Selected works). Otherwise select only that row.
 
         Track rows get the full sync menu. Artist/album group headers get a
         single “Sync all from …” / “Sync album …” item. Year groups have none.
@@ -662,7 +694,10 @@ class MainWindow:
             if not row:
                 return "break"
             tags = set(self.tree.item(row, "tags"))
-            self.tree.selection_set(row)
+            # Preserve multi-select when right-clicking inside the selection.
+            current = self.tree.selection()
+            if row not in current:
+                self.tree.selection_set(row)
             self.tree.focus(row)
             self.tree.see(row)
 
@@ -693,10 +728,18 @@ class MainWindow:
         self._prepare_context_menu = handler
 
     def selected_tree_iid(self) -> str | None:
+        """Primary selected row (focus preferred, else first in selection)."""
+        focus = self.tree.focus()
+        if focus and self.tree.exists(focus):
+            return focus
         sel = self.tree.selection()
         if not sel:
             return None
         return sel[0]
+
+    def selected_tree_iids(self) -> list[str]:
+        """All selected row iids (multi-select)."""
+        return list(self.tree.selection())
 
     def set_cancel_job_command(self, command) -> None:
         """Wire Cancel (progress-bar button + Transfer menu + Escape)."""

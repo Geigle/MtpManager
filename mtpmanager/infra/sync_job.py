@@ -17,16 +17,6 @@ logger = logging.getLogger(__name__)
 SYNC_JOB_FILENAME = "sync_job.json"
 SYNC_JOB_VERSION = 1
 
-JobStatus = Literal["running", "completed", "failed", "cancelled"]
-JobKind = Literal[
-    "entire_library",
-    "folder",
-    "album",
-    "artist",
-    "batch",
-    "resume",
-]
-
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")

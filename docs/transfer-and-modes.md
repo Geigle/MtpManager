@@ -59,8 +59,9 @@ End-to-end send path, Stable vs Experimental behavior, and where to change thing
 
 | Entry point | Actions |
 |-------------|---------|
-| Right-click track | **Sync this track**, **Sync Album**, **Sync all from Artist** (global format + active mode transport) |
-| **Transfer** menu | **Sync Entire Library** (confirm); **Sync Folder…** (picker + scan + batch) |
+| Track list multi-select | **extended** selectmode: **Shift+click** range, **Ctrl+click** (Windows/Linux) or **⌘+click** (macOS) toggle. Group headers expand to their tracks. |
+| Right-click track | **Sync N selected tracks** (when multi-select), **Sync this track**, **Sync Album**, **Sync all from Artist** (global format + active mode transport). Right-click inside a multi-selection keeps the selection. |
+| **Transfer** menu | **Sync Entire Library**; **Sync Folder…**; **Sync Selected Tracks** (multi-select batch); **Resume Sync**; **Cancel Current Job** |
 | **Device** menu | Connect, Disconnect, Device Info (only place to edit device name — applied on close if changed), Create Folder…, List Folders, List Files (experimental), List Tracks (experimental; fast `get_filelisting` + media filter; optional **Load tags for selection** via `get_track_metadata`), Delete Track (experimental; pick from file listing → `delete_object`), Get File Info (experimental; pick → `get_file_metadata`, listing fallback on ZEN), Get Track Info (experimental; pick audio-ish → `get_track_metadata` tags), Delete All Tracks… (experimental; same fast list path + confirm + batch `delete_object`, fatal abort) — Experimental only |
 
 Device admin prompts use dialogs (`ui/dialogs.py`); there is no main-window path/name entry.
@@ -178,7 +179,7 @@ Cancel is **cooperative**: the current track send / object delete is allowed to 
 
 ### Resume Sync
 
-Multi-track syncs (Entire Library, Folder, Album, Artist) write a durable plan to `{data_dir}/sync_job.json` (`infra/sync_job.py`): ordered source paths, `next_index` (first not-yet-successful path), status, target format, and last error.
+Multi-track syncs (Entire Library, Folder, Album, Artist, **Selected tracks**) write a durable plan to `{data_dir}/sync_job.json` (`infra/sync_job.py`): ordered source paths, `next_index` (first not-yet-successful path), status, target format, and last error.
 
 - After each successful send, `next_index` advances and the file is updated.
 - On fatal failure or cancel, status becomes `failed` / `cancelled` and **Transfer → Resume Sync** enables.
