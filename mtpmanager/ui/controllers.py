@@ -1258,6 +1258,8 @@ class AppController:
             self._device_index_seed_inflight = False
             self._device_index_seeded = True
             self._mark_usb_quiet(_DEVICE_USB_COOLDOWN_S)
+            # Clear seed label so it does not linger after indexing.
+            self.win.set_progress_status("")
             logger.info(
                 "Device index seeded serial=%s files=%s", serial, n
             )
@@ -1265,6 +1267,7 @@ class AppController:
         def on_error(exc: BaseException) -> None:
             self._device_index_seed_inflight = False
             # Leave seeded=False so a later Refresh / reconnect can retry.
+            self.win.set_progress_status("")
             logger.warning(
                 "Device index seed failed serial=%s: %s", serial, exc
             )
