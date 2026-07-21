@@ -89,6 +89,7 @@ MENU_DELETE_TRACK = "Delete Track (experimental)"
 MENU_GET_FILE_INFO = "Get File Info (experimental)"
 MENU_GET_TRACK_INFO = "Get Track Info (experimental)"
 MENU_DELETE_ALL = "Delete All Tracks…"
+MENU_REFRESH_DEVICE_INDEX = "Refresh Device Index…"
 
 # Track context menu
 CTX_SYNC_SELECTED = "Sync selected tracks"
@@ -108,6 +109,7 @@ _DEVICE_MENU_LABELS = (
     MENU_LIST_FOLDERS,
     MENU_LIST_FILES,
     MENU_LIST_TRACKS,
+    MENU_REFRESH_DEVICE_INDEX,
     MENU_DELETE_TRACK,
     MENU_GET_FILE_INFO,
     MENU_GET_TRACK_INFO,
@@ -474,6 +476,7 @@ class MainWindow:
         on_get_file_info,
         on_get_track_info=None,
         on_delete_all,
+        on_refresh_device_index=None,
     ) -> None:
         self.menu_device.entryconfig(MENU_CONNECT, command=on_connect)
         self.menu_device.entryconfig(MENU_DISCONNECT, command=on_disconnect)
@@ -484,6 +487,10 @@ class MainWindow:
             self.menu_device.entryconfig(MENU_LIST_FILES, command=on_list_files)
         if on_list_tracks is not None:
             self.menu_device.entryconfig(MENU_LIST_TRACKS, command=on_list_tracks)
+        if on_refresh_device_index is not None:
+            self.menu_device.entryconfig(
+                MENU_REFRESH_DEVICE_INDEX, command=on_refresh_device_index
+            )
         if on_delete_track is not None:
             self.menu_device.entryconfig(MENU_DELETE_TRACK, command=on_delete_track)
         self.menu_device.entryconfig(MENU_GET_FILE_INFO, command=on_get_file_info)

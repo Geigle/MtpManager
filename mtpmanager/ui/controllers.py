@@ -26,7 +26,6 @@ from mtpmanager.domain.library_sort import (
 )
 from mtpmanager.domain.device_media import (
     enrich_refs_from_host,
-    guid_stems_from_files,
     looks_like_track,
 )
 from mtpmanager.domain.models import DeviceInfo, Track, TrackMetadata
@@ -39,12 +38,22 @@ from mtpmanager.infra.album_art import (
 from mtpmanager.infra.app_config import AppConfig, load_app_config, save_app_config
 from mtpmanager.infra.cmd_transport import CmdTransport
 from mtpmanager.infra.device_assets import device_graphic_path
+from mtpmanager.infra.device_index import (
+    device_list_is_complete,
+    device_serial_key,
+    guid_stems_on_device,
+    list_cached_files,
+    list_cached_track_refs,
+    record_send,
+    remove_by_item_id,
+    replace_device_listing,
+    upsert_device,
+)
 from mtpmanager.infra.ffmpeg_transcode import FFmpegTranscoder
 from mtpmanager.infra.library_index import (
     get_tracks_by_guids,
     load_library_index,
     save_library_index,
-    upsert_device_object,
 )
 from mtpmanager.infra.logging_setup import start_transfer_log, stop_transfer_log
 from mtpmanager.infra.mutagen_tags import read_metadata
@@ -116,6 +125,10 @@ class AppController:
         self._device_probe_fails = 0
         # When False, experimental poll is stopped until Device → Connect.
         self._device_auto_reconnect = True
+        # Durable device inventory key + session seed flag (list_files once).
+        self._device_serial: str | None = None
+        self._device_index_seeded = False
+        self._device_index_seed_inflight = False
         self._active_profile: DeviceProfile | None = None
         self._sort_primary = SortPrimary.ARTIST
         self._sort_reverse = False
@@ -167,6 +180,7 @@ class AppController:
             on_get_track_info=self.action_get_track_info,
             on_get_file_info=self.action_get_file_info,
             on_delete_all=self.action_delete_all_tracks,
+            on_refresh_device_index=self.action_refresh_device_index,
         )
         w.set_track_context_commands(
             on_sync_track=self.action_sync_this_track,
@@ -1094,6 +1108,10 @@ class AppController:
                 # Only re-apply art/log when profile missing or first connect.
                 if info is not None and self._active_profile is None:
                     self._apply_device_profile(info)
+                    self._note_device_session(info)
+                elif not self._device_index_seeded and self.device.is_connected():
+                    # Already had profile; still need one-time index seed.
+                    self._note_device_session(info)
             elif status == "soft_fail":
                 self._device_probe_fails += 1
                 if self._device_probe_fails < _DEVICE_PROBE_FAIL_LIMIT:
@@ -1116,16 +1134,16 @@ class AppController:
                         pass
                     self._device_probe_fails = 0
                     self._logged_no_device = False
-                    self._clear_device_profile()
+                    self._clear_device_session()
             elif status == "gone":
                 logger.info("Experimental auto-connect: device disconnected")
                 self._device_probe_fails = 0
                 self._logged_no_device = False  # allow one "no device" log on next fails
-                self._clear_device_profile()
+                self._clear_device_session()
             else:
                 self._device_probe_fails = 0
                 self._note_no_device()
-                self._clear_device_profile()
+                self._clear_device_session()
             self._schedule_device_poll(local_gen)
 
         def on_error(_exc: BaseException) -> None:
@@ -1137,7 +1155,7 @@ class AppController:
             ):
                 return
             self._note_no_device()
-            self._clear_device_profile()
+            self._clear_device_session()
             self._schedule_device_poll(local_gen)
 
         def runner() -> None:
@@ -1173,9 +1191,80 @@ class AppController:
         self._active_profile = None
         self.win.set_device_graphic(None)
 
+    def _clear_device_session(self) -> None:
+        """Clear profile + in-memory serial seed flags (DB inventory kept)."""
+        self._clear_device_profile()
+        self._device_serial = None
+        self._device_index_seeded = False
+        self._device_index_seed_inflight = False
+
+    def _note_device_session(self, info: DeviceInfo | None) -> None:
+        """Remember serial and seed device file index once per session."""
+        serial = device_serial_key(info)
+        self._device_serial = serial
+        if info is not None:
+            try:
+                upsert_device(
+                    serial,
+                    name=info.name or "",
+                    manufacturer=info.manufacturer or "",
+                    model=info.model or "",
+                )
+            except Exception:
+                logger.debug("upsert_device failed", exc_info=True)
+        if not self._device_index_seeded and not self._device_index_seed_inflight:
+            self._start_device_index_seed(serial)
+
+    def _start_device_index_seed(self, serial: str, *, force: bool = False) -> None:
+        """Background list_files once → replace SQLite device_files for *serial*."""
+        if self._device_index_seed_inflight:
+            return
+        if self._device_index_seeded and not force:
+            return
+        if not self.device.is_connected():
+            return
+        if (self._library_busy or self._transfer_busy) and not force:
+            # Retry after USB work settles (poll / reconnect may call again).
+            logger.info(
+                "Device index seed deferred (busy) serial=%s", serial
+            )
+            return
+
+        self._device_index_seed_inflight = True
+        device = self.device
+
+        def work():
+            files = device_ops.list_files(device)
+            n = replace_device_listing(serial, files, source="list")
+            return n
+
+        def on_done(n: int) -> None:
+            self._device_index_seed_inflight = False
+            self._device_index_seeded = True
+            self._mark_usb_quiet(_DEVICE_USB_COOLDOWN_S)
+            logger.info(
+                "Device index seeded serial=%s files=%s", serial, n
+            )
+
+        def on_error(exc: BaseException) -> None:
+            self._device_index_seed_inflight = False
+            # Leave seeded=False so a later Refresh / reconnect can retry.
+            logger.warning(
+                "Device index seed failed serial=%s: %s", serial, exc
+            )
+            self._mark_usb_quiet(_DEVICE_USB_COOLDOWN_S)
+
+        self.win.set_progress_status("Indexing device files…")
+        self._bg.submit(
+            work,
+            on_done=on_done,
+            on_error=on_error,
+            name="device-index-seed",
+        )
+
     def _disconnect_for_stable(self) -> None:
         """Drop PyMTP session so Stable mtp-sendtr can claim the device."""
-        self._clear_device_profile()
+        self._clear_device_session()
         if not self.device.is_connected():
             return
         try:
@@ -1190,6 +1279,8 @@ class AppController:
         Opens the session and loads **identity only** (name / manufacturer /
         model) for the left-panel profile. Battery and storage are not queried
         here — use Device → Device Info for full diagnostics.
+
+        Also starts a one-shot device file index seed (list_files → SQLite).
         """
         self._device_auto_reconnect = True
         try:
@@ -1198,12 +1289,14 @@ class AppController:
             try:
                 info = device_ops.get_device_identity(self.device)
                 self._apply_device_profile(info)
+                self._note_device_session(info)
             except Exception:
                 # Session is up; missing identity must not undo connect.
                 logger.exception(
                     "Connected but could not load device identity "
                     "(name/manufacturer/model)"
                 )
+                self._note_device_session(None)
         except Exception as e:
             logger.exception("Connect failed")
             messagebox.showerror("Connect", str(e))
@@ -1216,7 +1309,7 @@ class AppController:
         self._device_auto_reconnect = False
         self._stop_device_poll()
         device_ops.disconnect(self.device)
-        self._clear_device_profile()
+        self._clear_device_session()
         self._logged_no_device = False
         logger.info("Device → Disconnect: auto-reconnect paused")
 
@@ -1835,38 +1928,40 @@ class AppController:
             self._refresh_resume_menu()
 
     def _device_guid_stems_for_skip(self) -> set[str] | None:
-        """Return GUID stems already on the device when listing is available.
+        """GUID stems from durable SQLite device index (no live list_files).
 
-        Requires an open Experimental PyMTP session (list_files). Stable Mode
-        with no session returns None (skip-if-present disabled for that run).
+        Uses ``self._device_serial`` when set (Experimental session). Stable
+        Mode without a prior serial may still skip if we know a serial from
+        config/session; otherwise returns empty set (send everything).
         """
-        if not self.device.is_connected():
-            logger.info(
-                "Skip-if-present: no device session (connect Experimental to enable)"
-            )
-            return None
+        serial = self._device_serial
+        if not serial:
+            # No known device key — do not skip (safe default).
+            logger.info("Skip-if-present: no device serial (cache unused)")
+            return set()
         try:
-            files = self.device.list_files()
-            stems = guid_stems_from_files(files)
+            stems = guid_stems_on_device(serial)
             logger.info(
-                "Skip-if-present: listed %d object(s), %d GUID stem(s)",
-                len(files),
+                "Skip-if-present: cache serial=%s guid_stems=%d complete=%s",
+                serial,
                 len(stems),
+                device_list_is_complete(serial),
             )
             return stems
         except Exception:
             logger.warning(
-                "Skip-if-present: list_files failed; sending without skip",
+                "Skip-if-present: cache read failed; sending without skip",
                 exc_info=True,
             )
-            return None
+            return set()
 
     def _on_after_send(
         self, guid: str, send_path: str, object_id: int | None
     ) -> None:
-        """Record best-effort device_objects row after a successful send."""
+        """Record device_files row after a successful send (incremental cache)."""
         if not is_track_guid(guid):
             return
+        serial = self._device_serial or device_serial_key()
         _, ext = os.path.splitext(send_path)
         remote = build_remote_path(
             TrackMetadata(),
@@ -1876,16 +1971,16 @@ class AppController:
         )
         _, basename = split_remote_path(remote)
         try:
-            upsert_device_object(
-                guid,
+            record_send(
+                serial,
                 remote_name=basename,
+                guid=guid,
                 item_id=object_id,
                 parent_id=DEFAULT_MUSIC_FOLDER_ID,
                 storage_id=DEFAULT_STORAGE_ID,
-                sent=True,
             )
         except Exception:
-            logger.debug("device_objects upsert failed", exc_info=True)
+            logger.debug("device_index record_send failed", exc_info=True)
 
     @staticmethod
     def _enrich_device_tracks_from_index(refs: list):
@@ -2318,32 +2413,23 @@ class AppController:
         )
 
     def action_read_file_list(self) -> None:
-        """Experimental Device → List Files (full MTP file listing)."""
-
-        def on_success(files) -> None:
-            logger.info("List Files (experimental): %d object(s)", len(files))
-            for entry in files[:50]:
-                logger.debug(
-                    "File id=%s parent=%s type=%s size=%s name=%r",
-                    entry.item_id,
-                    entry.parent_id,
-                    entry.filetype,
-                    entry.filesize,
-                    entry.name,
-                )
-            if len(files) > 50:
-                logger.debug(
-                    "… %d more file(s) not logged at DEBUG", len(files) - 50
-                )
-            show_file_list_dialog(self.win.root, files)
-
-        self._run_device_bg(
-            title="Files",
-            name="list-files",
-            work=lambda device: device_ops.list_files(device),
-            on_success=on_success,
-            busy_message="listing device files in background…",
+        """Experimental Device → List Files (from durable device index cache)."""
+        if not self._require_device_ready():
+            return
+        serial = self._device_serial or device_serial_key()
+        files = list_cached_files(serial)
+        if not files and not device_list_is_complete(serial):
+            messagebox.showinfo(
+                "List Files",
+                "Device file index is empty.\n\n"
+                "Connect seeds the index once, or use Device → "
+                "Refresh Device Index… to run list_files now.",
+            )
+            return
+        logger.info(
+            "List Files (cache): %d object(s) serial=%s", len(files), serial
         )
+        show_file_list_dialog(self.win.root, files)
 
     def action_read_track_list(self) -> None:
         """Experimental Device → List Tracks (fast file listing + optional tags)."""
@@ -2456,322 +2542,336 @@ class AppController:
                 on_load_tags=on_load_tags,
             )
 
-        def list_and_join(device):
-            refs = device_ops.list_tracks(device)
-            return AppController._enrich_device_tracks_from_index(refs)
-
-        self._run_device_bg(
-            title="Tracks",
-            name="list-tracks",
-            work=list_and_join,
-            on_success=on_success,
-            busy_message="listing device tracks (file listing)…",
-        )
+        if not self._require_device_ready():
+            return
+        serial = self._device_serial or device_serial_key()
+        refs = list_cached_track_refs(serial)
+        if not refs and not device_list_is_complete(serial):
+            messagebox.showinfo(
+                "List Tracks",
+                "Device file index is empty.\n\n"
+                "Connect seeds the index once, or use Device → "
+                "Refresh Device Index… to run list_files now.",
+            )
+            return
+        tracks = self._enrich_device_tracks_from_index(refs)
+        on_success(tracks)
 
     def action_delete_track(self) -> None:
-        """Experimental Device → Delete Track: pick from file listing, delete by id."""
-
-        def on_listed(files) -> None:
-            if not files:
-                messagebox.showinfo(
-                    "Delete Track",
-                    "No objects found on the device.",
-                )
-                return
-            logger.info(
-                "Delete Track (experimental): %d object(s) listed", len(files)
-            )
-
-            def _confirm(entry) -> str:
-                name = (entry.name or "").strip() or "(unnamed)"
-                return (
-                    f"Delete object id={entry.item_id}?\n\n"
-                    f"{name}\n"
-                    f"parent={entry.parent_id}  type={entry.filetype}\n\n"
-                    "This cannot be undone from the app."
-                )
-
-            entry = pick_file_entry_dialog(
-                self.win.root,
-                files,
-                title="Delete Track (experimental)",
-                prompt=(
-                    "select one to delete by object id. "
-                    "Folders and system objects are included; choose carefully."
-                ),
-                action_label="Delete…",
-                confirm_message=_confirm,
-            )
-            if entry is None:
-                return
-            try:
-                device_ops.delete_object(self.device, entry.item_id)
-            except TransportError as e:
-                logger.exception("Delete track failed id=%s", entry.item_id)
-                messagebox.showerror("Delete Track", str(e))
-                return
-            except Exception as e:
-                logger.exception("Delete track failed id=%s", entry.item_id)
-                messagebox.showerror("Delete Track", str(e))
-                return
-            name = (entry.name or "").strip() or "(unnamed)"
+        """Experimental Device → Delete Track: pick from cache, delete by id."""
+        if not self._require_device_ready():
+            return
+        serial = self._device_serial or device_serial_key()
+        files = list_cached_files(serial)
+        if not files:
             messagebox.showinfo(
                 "Delete Track",
-                f"Deleted object id={entry.item_id}\n{name}",
+                "Device file index is empty.\n\n"
+                "Connect or Refresh Device Index first.",
+            )
+            return
+        logger.info(
+            "Delete Track (cache): %d object(s) serial=%s", len(files), serial
+        )
+
+        def _confirm(entry) -> str:
+            name = (entry.name or "").strip() or "(unnamed)"
+            return (
+                f"Delete object id={entry.item_id}?\n\n"
+                f"{name}\n"
+                f"parent={entry.parent_id}  type={entry.filetype}\n\n"
+                "This cannot be undone from the app."
             )
 
-        self._run_device_bg(
-            title="Delete Track",
-            name="delete-track-list",
-            work=lambda device: device_ops.list_files(device),
-            on_success=on_listed,
-            busy_message="listing device files for delete picker…",
+        entry = pick_file_entry_dialog(
+            self.win.root,
+            files,
+            title="Delete Track (experimental)",
+            prompt=(
+                "select one to delete by object id. "
+                "Folders and system objects are included; choose carefully."
+            ),
+            action_label="Delete…",
+            confirm_message=_confirm,
+        )
+        if entry is None:
+            return
+        try:
+            device_ops.delete_object(self.device, entry.item_id)
+        except TransportError as e:
+            logger.exception("Delete track failed id=%s", entry.item_id)
+            messagebox.showerror("Delete Track", str(e))
+            return
+        except Exception as e:
+            logger.exception("Delete track failed id=%s", entry.item_id)
+            messagebox.showerror("Delete Track", str(e))
+            return
+        try:
+            remove_by_item_id(serial, entry.item_id)
+        except Exception:
+            logger.debug("device_index remove after delete failed", exc_info=True)
+        name = (entry.name or "").strip() or "(unnamed)"
+        messagebox.showinfo(
+            "Delete Track",
+            f"Deleted object id={entry.item_id}\n{name}",
         )
 
     def action_delete_all_tracks(self) -> None:
-        """Experimental Device → Delete All Tracks: list tracks, confirm, batch delete."""
-
-        def on_listed(tracks) -> None:
-            if not tracks:
-                messagebox.showinfo(
-                    "Delete All Tracks",
-                    "No tracks found on the device.",
-                )
-                return
-
-            n = len(tracks)
-            logger.info(
-                "Delete All Tracks (experimental): %d track(s) listed", n
-            )
-            if not messagebox.askyesno(
+        """Experimental Device → Delete All Tracks: cache list, confirm, batch delete."""
+        if not self._require_device_ready():
+            return
+        serial = self._device_serial or device_serial_key()
+        tracks = list_cached_track_refs(serial)
+        if not tracks:
+            messagebox.showinfo(
                 "Delete All Tracks",
-                f"Delete all {n} track(s) from the device?\n\n"
-                "This deletes music/video tracks from the device track "
-                "listing (folders and photos are not deleted).\n\n"
-                "This cannot be undone from the app.",
-                icon=messagebox.WARNING,
-                default=messagebox.NO,
-            ):
-                return
-            # Second confirm for large libraries.
-            if n >= 10 and not messagebox.askyesno(
-                "Delete All Tracks — confirm",
-                f"Really permanently delete {n} tracks?",
-                icon=messagebox.WARNING,
-                default=messagebox.NO,
-            ):
-                return
+                "No tracks in the device index.\n\n"
+                "Connect or Refresh Device Index first.",
+            )
+            return
 
-            if not self._begin_transfer_job():
-                return
-            device = self.device
-            batch = list(tracks)
+        n = len(tracks)
+        logger.info(
+            "Delete All Tracks (cache): %d track(s) serial=%s", n, serial
+        )
+        if not messagebox.askyesno(
+            "Delete All Tracks",
+            f"Delete all {n} track(s) from the device?\n\n"
+            "This deletes music/video tracks from the device track "
+            "listing (folders and photos are not deleted).\n\n"
+            "This cannot be undone from the app.",
+            icon=messagebox.WARNING,
+            default=messagebox.NO,
+        ):
+            return
+        # Second confirm for large libraries.
+        if n >= 10 and not messagebox.askyesno(
+            "Delete All Tracks — confirm",
+            f"Really permanently delete {n} tracks?",
+            icon=messagebox.WARNING,
+            default=messagebox.NO,
+        ):
+            return
 
-            def work():
-                gen = self._bg.generation
-                report = self._bg.progress_callback(gen)
+        if not self._begin_transfer_job():
+            return
+        device = self.device
+        batch = list(tracks)
 
-                def on_progress(done: int, total: int, current) -> None:
-                    label = ""
-                    if current is not None:
-                        label = (
-                            (current.name or current.title or "").strip()
-                            or f"id={current.item_id}"
-                        )
-                    report("progress", done, total, label)
+        def work():
+            gen = self._bg.generation
+            report = self._bg.progress_callback(gen)
 
-                return device_ops.delete_all_tracks(
-                    device,
-                    batch,
-                    on_progress=on_progress,
-                    should_cancel=self._should_cancel_job,
-                )
-
-            def on_done(result) -> None:
-                self._end_transfer_job()
-                try:
-                    self.win.progress["value"] = 100
-                except Exception:
-                    pass
-                if result.cancelled:
-                    messagebox.showinfo(
-                        "Delete All Tracks cancelled",
-                        f"Stopped after deleting {result.deleted} of "
-                        f"{result.total} track(s).",
+            def on_progress(done: int, total: int, current) -> None:
+                label = ""
+                if current is not None:
+                    label = (
+                        (current.name or current.title or "").strip()
+                        or f"id={current.item_id}"
                     )
-                    return
-                if result.aborted:
-                    messagebox.showerror(
-                        "Delete All Tracks aborted",
-                        f"Deleted {result.deleted} of {result.total} track(s).\n"
-                        f"Stopped at object id={result.failed_id}.\n\n"
-                        "Session may be poisoned — disconnect/replug before "
-                        "retrying, or use Config → Stable Mode for transfers.",
-                    )
-                    return
-                messagebox.showinfo(
-                    "Delete All Tracks",
-                    f"Deleted {result.deleted} of {result.total} track(s).",
-                )
+                report("progress", done, total, label)
 
-            def on_error(exc: BaseException) -> None:
-                self._end_transfer_job()
-                if isinstance(exc, JobCancelled):
-                    self._handle_job_cancelled(
-                        exc, title="Delete All Tracks cancelled"
-                    )
-                    return
-                logger.exception("Delete All Tracks failed")
-                messagebox.showerror("Delete All Tracks", str(exc))
-
-            self._bg.submit(
-                work,
-                on_done=on_done,
-                on_error=on_error,
-                on_progress=self._on_transfer_ui_event,
-                name="delete-all-tracks",
+            return device_ops.delete_all_tracks(
+                device,
+                batch,
+                on_progress=on_progress,
+                should_cancel=self._should_cancel_job,
             )
 
-        self._run_device_bg(
-            title="Delete All Tracks",
-            name="delete-all-list",
-            work=lambda device: device_ops.list_tracks(device),
-            on_success=on_listed,
-            busy_message="listing device tracks before delete (file listing)…",
+        def on_done(result) -> None:
+            self._end_transfer_job()
+            try:
+                self.win.progress["value"] = 100
+            except Exception:
+                pass
+            for oid in getattr(result, "deleted_ids", ()) or ():
+                try:
+                    remove_by_item_id(serial, int(oid))
+                except Exception:
+                    logger.debug(
+                        "device_index remove after delete-all failed id=%s",
+                        oid,
+                        exc_info=True,
+                    )
+            if result.cancelled:
+                messagebox.showinfo(
+                    "Delete All Tracks cancelled",
+                    f"Stopped after deleting {result.deleted} of "
+                    f"{result.total} track(s).",
+                )
+                return
+            if result.aborted:
+                messagebox.showerror(
+                    "Delete All Tracks aborted",
+                    f"Deleted {result.deleted} of {result.total} track(s).\n"
+                    f"Stopped at object id={result.failed_id}.\n\n"
+                    "Session may be poisoned — disconnect/replug before "
+                    "retrying, or use Config → Stable Mode for transfers.",
+                )
+                return
+            messagebox.showinfo(
+                "Delete All Tracks",
+                f"Deleted {result.deleted} of {result.total} track(s).",
+            )
+
+        def on_error(exc: BaseException) -> None:
+            self._end_transfer_job()
+            if isinstance(exc, JobCancelled):
+                self._handle_job_cancelled(
+                    exc, title="Delete All Tracks cancelled"
+                )
+                return
+            logger.exception("Delete All Tracks failed")
+            messagebox.showerror("Delete All Tracks", str(exc))
+
+        self._bg.submit(
+            work,
+            on_done=on_done,
+            on_error=on_error,
+            on_progress=self._on_transfer_ui_event,
+            name="delete-all-tracks",
+        )
+
+    def action_refresh_device_index(self) -> None:
+        """Device → Refresh Device Index: one live list_files → SQLite replace."""
+        if not self._require_device_ready():
+            return
+        serial = self._device_serial or device_serial_key()
+        if self._device_index_seed_inflight:
+            messagebox.showinfo(
+                "Refresh Device Index",
+                "A device index job is already running.",
+            )
+            return
+        self._device_index_seeded = False
+        self._start_device_index_seed(serial, force=True)
+        messagebox.showinfo(
+            "Refresh Device Index",
+            "Refreshing device file index in the background "
+            f"(serial={serial}).\n\n"
+            "List Files / skip-if-present will use the new snapshot when done.",
         )
 
     def action_get_file_info(self) -> None:
-        """Experimental Device → Get File Info: pick from listing, fetch metadata."""
-
-        def on_listed(files) -> None:
-            if not files:
-                messagebox.showinfo(
-                    "File Info",
-                    "No objects found on the device.",
-                )
-                return
-            logger.info(
-                "Get File Info (experimental): %d object(s) listed", len(files)
+        """Experimental Device → Get File Info: pick from cache, fetch metadata."""
+        if not self._require_device_ready():
+            return
+        serial = self._device_serial or device_serial_key()
+        files = list_cached_files(serial)
+        if not files:
+            messagebox.showinfo(
+                "File Info",
+                "Device file index is empty.\n\n"
+                "Connect or Refresh Device Index first.",
             )
-            entry = pick_file_entry_dialog(
-                self.win.root,
-                files,
-                title="Get File Info (experimental)",
-                prompt=(
-                    "select one object to inspect by id "
-                    "(LIBMTP_Get_Filemetadata)."
-                ),
-                action_label="Get Info",
-            )
-            if entry is None:
-                return
-            # Prefer a live Get_Filemetadata refresh; on ZEN some listed/playable
-            # handles still return NULL (proplist path). Listing already has every
-            # field File Info shows — fall back instead of claiming "not found".
-            meta = entry
-            source = "listing"
-            try:
-                meta = device_ops.get_file_metadata(self.device, entry.item_id)
-                source = "live"
-            except TransportError as e:
-                if e.fatal:
-                    logger.exception("Get file info failed id=%s", entry.item_id)
-                    messagebox.showerror("File Info", str(e))
-                    return
-                logger.warning(
-                    "Get file info live refresh failed id=%s (%s); "
-                    "showing listing snapshot",
-                    entry.item_id,
-                    e,
-                )
-                meta = entry
-                source = "listing"
-            except Exception as e:
+            return
+        logger.info(
+            "Get File Info (cache): %d object(s) serial=%s", len(files), serial
+        )
+        entry = pick_file_entry_dialog(
+            self.win.root,
+            files,
+            title="Get File Info (experimental)",
+            prompt=(
+                "select one object to inspect by id "
+                "(LIBMTP_Get_Filemetadata)."
+            ),
+            action_label="Get Info",
+        )
+        if entry is None:
+            return
+        # Prefer a live Get_Filemetadata refresh; on ZEN some listed/playable
+        # handles still return NULL (proplist path). Cache already has every
+        # field File Info shows — fall back instead of claiming "not found".
+        meta = entry
+        source = "cache"
+        try:
+            meta = device_ops.get_file_metadata(self.device, entry.item_id)
+            source = "live"
+        except TransportError as e:
+            if e.fatal:
                 logger.exception("Get file info failed id=%s", entry.item_id)
                 messagebox.showerror("File Info", str(e))
                 return
-            logger.info(
-                "File Info id=%s name=%r parent=%s type=%s size=%s source=%s",
-                meta.item_id,
-                meta.name,
-                meta.parent_id,
-                meta.filetype,
-                meta.filesize,
-                source,
+            logger.warning(
+                "Get file info live refresh failed id=%s (%s); "
+                "showing cache snapshot",
+                entry.item_id,
+                e,
             )
-            note = None
-            if source == "listing":
-                note = (
-                    "Source: file listing snapshot "
-                    "(live Get_Filemetadata failed for this id — common on ZEN "
-                    "when MTP property-list refresh fails; object is still listed)."
-                )
-            show_file_info_dialog(self.win.root, meta, note=note)
-
-        self._run_device_bg(
-            title="File Info",
-            name="get-file-info-list",
-            work=lambda device: device_ops.list_files(device),
-            on_success=on_listed,
-            busy_message="listing device files for File Info picker…",
+            meta = entry
+            source = "cache"
+        except Exception as e:
+            logger.exception("Get file info failed id=%s", entry.item_id)
+            messagebox.showerror("File Info", str(e))
+            return
+        logger.info(
+            "File Info id=%s name=%r parent=%s type=%s size=%s source=%s",
+            meta.item_id,
+            meta.name,
+            meta.parent_id,
+            meta.filetype,
+            meta.filesize,
+            source,
         )
+        note = None
+        if source == "cache":
+            note = (
+                "Source: device index cache "
+                "(live Get_Filemetadata failed for this id — common on ZEN "
+                "when MTP property-list refresh fails; object is still listed)."
+            )
+        show_file_info_dialog(self.win.root, meta, note=note)
 
     def action_get_track_info(self) -> None:
-        """Experimental Device → Get Track Info: pick audio-ish object, fetch tags."""
-
-        def on_listed(files) -> None:
-            # Prefer objects that look like tracks (audio/video filetypes or
-            # common extensions). Folders and non-media still appear if nothing
-            # matches — libmtp will reject non-tracks with ObjectNotFound.
-            candidates = [e for e in files if looks_like_track(e)]
-            pool = candidates if candidates else list(files or [])
-            if not pool:
-                messagebox.showinfo(
-                    "Track Info",
-                    "No objects found on the device.",
-                )
-                return
-            logger.info(
-                "Get Track Info (experimental): %d candidate(s) of %d listed",
-                len(pool),
-                len(files or []),
+        """Experimental Device → Get Track Info: pick from cache, fetch tags."""
+        if not self._require_device_ready():
+            return
+        serial = self._device_serial or device_serial_key()
+        files = list_cached_files(serial)
+        candidates = [e for e in files if looks_like_track(e)]
+        pool = candidates if candidates else list(files or [])
+        if not pool:
+            messagebox.showinfo(
+                "Track Info",
+                "No objects in the device index.\n\n"
+                "Connect or Refresh Device Index first.",
             )
-            entry = pick_file_entry_dialog(
-                self.win.root,
-                pool,
-                title="Get Track Info (experimental)",
-                prompt=(
-                    "select one track to inspect "
-                    "(LIBMTP_Get_Trackmetadata — on-device tags; USB-heavy)."
-                ),
-                action_label="Get Track Info",
-            )
-            if entry is None:
-                return
-            try:
-                info = device_ops.get_track_metadata(self.device, entry.item_id)
-            except TransportError as e:
-                logger.exception("Get track info failed id=%s", entry.item_id)
-                messagebox.showerror("Track Info", str(e))
-                return
-            except Exception as e:
-                logger.exception("Get track info failed id=%s", entry.item_id)
-                messagebox.showerror("Track Info", str(e))
-                return
-            logger.info(
-                "Track Info id=%s name=%r title=%r artist=%r album=%r",
-                info.item_id,
-                info.name,
-                info.title,
-                info.artist,
-                info.album,
-            )
-            show_track_info_dialog(self.win.root, info)
-
-        self._run_device_bg(
-            title="Track Info",
-            name="get-track-info-list",
-            work=lambda device: device_ops.list_files(device),
-            on_success=on_listed,
-            busy_message="listing device files for Track Info picker…",
+            return
+        logger.info(
+            "Get Track Info (cache): %d candidate(s) of %d serial=%s",
+            len(pool),
+            len(files or []),
+            serial,
         )
+        entry = pick_file_entry_dialog(
+            self.win.root,
+            pool,
+            title="Get Track Info (experimental)",
+            prompt=(
+                "select one track to inspect "
+                "(LIBMTP_Get_Trackmetadata — on-device tags; USB-heavy)."
+            ),
+            action_label="Get Track Info",
+        )
+        if entry is None:
+            return
+        try:
+            info = device_ops.get_track_metadata(self.device, entry.item_id)
+        except TransportError as e:
+            logger.exception("Get track info failed id=%s", entry.item_id)
+            messagebox.showerror("Track Info", str(e))
+            return
+        except Exception as e:
+            logger.exception("Get track info failed id=%s", entry.item_id)
+            messagebox.showerror("Track Info", str(e))
+            return
+        logger.info(
+            "Track Info id=%s name=%r title=%r artist=%r album=%r",
+            info.item_id,
+            info.name,
+            info.title,
+            info.artist,
+            info.album,
+        )
+        show_track_info_dialog(self.win.root, info)

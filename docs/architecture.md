@@ -87,7 +87,7 @@ PyMTP is the default (aspirational) path. Stable Mode is an opt-in Config toggle
      → (optional) FFmpegTranscoder → Transport.send_track
 ```
 
-Chrome: **Library** menubar (Select root / Update); full-width **status toolbar** (path + count); left panel is PyMTP device session (or Stable Mode help when that toggle is on). Details: [transfer-and-modes.md](./transfer-and-modes.md). Durable library index (`library_index.db` SQLite: root, paths, tags, per-track GUID) and `config.json` live under the app data dir (`infra/app_paths.py` + `infra/library_index.py` + `infra/app_config.py`). Sends use GUID ObjectFileNames under Music 100; List Tracks joins `list_files` basenames to the host DB (see decisions D11/D12).
+Chrome: **Library** menubar (Select root / Update); full-width **status toolbar** (path + count); left panel is PyMTP device session (or Stable Mode help when that toggle is on). Details: [transfer-and-modes.md](./transfer-and-modes.md). Durable library index (`library_index.db` SQLite: root, paths, tags, per-track GUID) and `config.json` live under the app data dir (`infra/app_paths.py` + `infra/library_index.py` + `infra/app_config.py`). Sends use GUID ObjectFileNames under Music 100. Device inventory is SQLite (`device_index`: seed on connect, update on send/delete); List Tracks joins cached basenames to host track tags (see decisions D11–D13).
 
 Remote object naming for **both** transports is centralized in `infra/remote_naming.py` ([device-contract.md](./device-contract.md)).
 

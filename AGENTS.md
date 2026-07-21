@@ -55,6 +55,7 @@ Do **not**:
 | Album art thumbs | `infra/album_art.py` (mutagen + Pillow; album header rows only) |
 | Library index (SQLite + GUID) | `infra/library_index.py`, `domain/track_id.py`, `infra/app_paths.py` |
 | Device list join / skip-if-present | `domain/device_media.py`, `app/transfer.py`, controllers list/sync |
+| Durable device inventory (list_files once) | `infra/device_index.py` + connect seed / Refresh menu in controllers |
 | Device profiles / graphics | `domain/device_profile.py`, `domain/device_profiles.py`, `assets/devices/` |
 | App config (send format, …) | `infra/app_config.py` (`config.json` under data dir) |
 | Track listing / media filter (ZEN) | `domain/device_media.py` + `pymtp_device.list_tracks` (filelisting + media filter) + on-demand tags via `device_ops.enrich_track_refs` / `get_track_metadata` + `tests/test_device_media.py` |

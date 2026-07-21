@@ -137,3 +137,5 @@ class DeleteAllResult:
     failed_id: int | None = None
     aborted: bool = False
     cancelled: bool = False
+    # Object ids successfully removed (in order); for device_index cache.
+    deleted_ids: tuple[int, ...] = ()

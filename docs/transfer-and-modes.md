@@ -47,8 +47,9 @@ End-to-end send path, Stable vs Experimental behavior, and where to change thing
 | **Update Library** | Background re-scan of stored root → rewrite index; **disabled** when no root, root unreachable, or a library job is running |
 
 - **Startup:** schedule index restore after the UI is up (`after(0, …)`). Worker loads `{data_dir}/library_index.db` (migrates legacy `library_index.json` once if needed); main thread fills the listbox. If `root_path` is still a directory, missing files are dropped. If the root is **unreachable**, still show index entries greyed/disabled and leave **Update Library** disabled.
-- **Send names:** ObjectFileName is `{guid}{ext}` under Music folder 100; full tags still go on the wire. When Experimental is connected, multi-track sync **skips** tracks whose GUID stem is already on the device (`list_files`).
-- **List Tracks:** file listing + join host SQLite by GUID basename for artist/title display (no bulk device tag fetch).
+- **Send names:** ObjectFileName is `{guid}{ext}` under Music folder 100; full tags still go on the wire. Multi-track sync **skips** tracks whose GUID stem is in the durable device index (SQLite) — **not** a live `list_files` per job.
+- **Device index:** one `list_files` seed after Experimental connect (or Device → **Refresh Device Index…**); successful send/delete update the cache. List Files / List Tracks / delete pickers read the cache by default.
+- **List Tracks display:** cache rows + join host SQLite by GUID basename for artist/title (no bulk device tag fetch).
 - **Non-blocking:** scan and index restore run on a daemon thread (`TkBackgroundRunner`). The previous library stays until the job finishes; a newer job discards stale results. Listbox population is chunked so large libraries do not freeze the event loop.
 - While busy, Library menu actions are disabled and the toolbar count shows `Loading index…` / `Scanning…`.
 - Transfers that need the library refuse to run while busy or while the root is unreachable.

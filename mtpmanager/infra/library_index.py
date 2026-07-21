@@ -24,12 +24,14 @@ from mtpmanager.infra.app_paths import default_data_dir
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 INDEX_FILENAME = "library_index.db"
 LEGACY_JSON_FILENAME = "library_index.json"
 
 _META_FIELD_NAMES = tuple(f.name for f in fields(TrackMetadata))
 
+# Host library tables only. Device inventory lives in device_index.py
+# (devices / device_files) on the same DB file.
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS library_meta (
   id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -59,16 +61,6 @@ CREATE TABLE IF NOT EXISTS tracks (
 
 CREATE INDEX IF NOT EXISTS idx_tracks_path ON tracks(path);
 CREATE INDEX IF NOT EXISTS idx_tracks_artist_album ON tracks(artist, album);
-
-CREATE TABLE IF NOT EXISTS device_objects (
-  guid TEXT PRIMARY KEY REFERENCES tracks(guid) ON DELETE CASCADE,
-  item_id INTEGER,
-  parent_id INTEGER NOT NULL DEFAULT 100,
-  storage_id INTEGER NOT NULL DEFAULT 65537,
-  remote_name TEXT NOT NULL,
-  last_seen_at TEXT,
-  last_sent_at TEXT
-);
 """
 
 
@@ -102,6 +94,13 @@ def _connect(db_path: Path) -> sqlite3.Connection:
 
 def _init_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(_SCHEMA_SQL)
+    # Device inventory tables (same DB); safe no-op if already present.
+    try:
+        from mtpmanager.infra.device_index import _ensure_schema as _device_schema
+
+        _device_schema(conn)
+    except Exception:
+        logger.debug("device_index schema ensure skipped", exc_info=True)
     # user_version for future migrations
     ver = conn.execute("PRAGMA user_version").fetchone()[0]
     if int(ver or 0) < SCHEMA_VERSION:
@@ -385,71 +384,6 @@ def get_tracks_by_guids(
     finally:
         if conn is not None:
             conn.close()
-
-
-def upsert_device_object(
-    guid: str,
-    *,
-    remote_name: str,
-    item_id: int | None = None,
-    parent_id: int = 100,
-    storage_id: int = 0x00010001,
-    sent: bool = False,
-    path: Path | None = None,
-) -> None:
-    """Record last-known device object for a library GUID (best-effort)."""
-    if not is_track_guid(guid):
-        return
-    dest = path if path is not None else index_path()
-    if not dest.is_file():
-        return
-    now = _utc_now()
-    try:
-        conn = _connect(dest)
-        _init_schema(conn)
-        # Only if track exists
-        exists = conn.execute(
-            "SELECT 1 FROM tracks WHERE guid = ?", (guid,)
-        ).fetchone()
-        if exists is None:
-            conn.close()
-            return
-        with conn:
-            conn.execute(
-                """
-                INSERT INTO device_objects (
-                  guid, item_id, parent_id, storage_id, remote_name,
-                  last_seen_at, last_sent_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(guid) DO UPDATE SET
-                  item_id = COALESCE(excluded.item_id, device_objects.item_id),
-                  parent_id = excluded.parent_id,
-                  storage_id = excluded.storage_id,
-                  remote_name = excluded.remote_name,
-                  last_seen_at = excluded.last_seen_at,
-                  last_sent_at = CASE
-                    WHEN excluded.last_sent_at IS NOT NULL
-                    THEN excluded.last_sent_at
-                    ELSE device_objects.last_sent_at
-                  END
-                """,
-                (
-                    guid,
-                    item_id,
-                    int(parent_id),
-                    int(storage_id),
-                    remote_name,
-                    now,
-                    now if sent else None,
-                ),
-            )
-    except sqlite3.Error as e:
-        logger.debug("upsert_device_object failed: %s", e)
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
 
 
 def index_exists(*, path: Path | None = None) -> bool:

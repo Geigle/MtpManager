@@ -171,3 +171,17 @@ Debriefs remain the forensic narrative; this file is what we keep doing.
 **Consequences:** On-device file browser shows GUIDs. Skip-if-present requires a connected PyMTP session for `list_files` (Stable Mode without session does not skip). Foreign (non-GUID) files remain visible by raw name.
 
 **Source:** [device-contract.md](./device-contract.md); `domain/track_id.py`, `remote_naming.build_remote_path(..., guid=)`, `device_media.enrich_refs_from_host`.
+
+---
+
+## D13 — Durable device file index; list_files only on connect/refresh
+
+**Context:** Skip-if-present called `list_files` at the start of every sync job. Full `get_filelisting` walks are USB-heavy and appear to poison ZEN sessions when repeated. Admin List Files/Tracks did the same walk every menu click.
+
+**Decision:** Persist device inventory in SQLite (`devices` + `device_files` in `library_index.db`, keyed by device serial). **Seed once** after Experimental connect (background `list_files` → replace rows). **Skip-if-present** and **List Files / List Tracks / delete pickers** read the cache only. **Update incrementally** on successful send (`record_send`) and successful delete (`remove_by_item_id`). **Device → Refresh Device Index…** forces one live listing. No per-sync `list_files`.
+
+**Rationale:** One listing per connect is enough for app-driven sync/delete; external device changes need explicit refresh.
+
+**Consequences:** Cache can go stale if another tool writes the player; user Refresh or reconnect. Stable Mode without a serial may not skip. MTP `item_id` remains best-effort (volatile across rebuilds); skip keys on GUID stem / ObjectFileName.
+
+**Source:** `infra/device_index.py`; `ui/controllers.py` connect seed + skip path; `tests/test_device_index.py`.

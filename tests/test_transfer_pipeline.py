@@ -344,6 +344,38 @@ class DualSlotPipelineTests(unittest.TestCase):
             self.assertEqual(transport.sent[0][1], "Two")
             self.assertIn("skipped", events)
             self.assertIn("done", events)
+            # Skipped track must not have been transcoded (only b.flac converted).
+            self.assertEqual(len(tr.calls), 1)
+            self.assertEqual(tr.calls[0][0], paths[1])
+
+    def test_skip_all_on_device_no_transcode(self) -> None:
+        from mtpmanager.domain.track_id import new_track_guid
+
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = []
+            guids = []
+            for name in ("a.flac", "b.flac"):
+                p = os.path.join(tmp, name)
+                Path(p).write_bytes(b"x")
+                paths.append(p)
+                guids.append(new_track_guid())
+            tracks = [
+                _track(paths[0], "One", guid=guids[0]),
+                _track(paths[1], "Two", guid=guids[1]),
+            ]
+            tr = _FakeTranscoder(tmp)
+            transport = _RecordingTransport()
+            n = transfer_tracks(
+                tracks,
+                target_format="mp3",
+                transport=transport,
+                transcoder=tr,
+                session_log=False,
+                device_guid_stems=set(guids),
+            )
+            self.assertEqual(n, 2)
+            self.assertEqual(transport.sent, [])
+            self.assertEqual(tr.calls, [])
 
 
 if __name__ == "__main__":

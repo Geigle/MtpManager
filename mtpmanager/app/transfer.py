@@ -39,13 +39,18 @@ AfterSendCallback = Callable[[str, str, int | None], None]
 
 @dataclass(frozen=True)
 class PreparedTrack:
-    """Local path + metadata ready for transport.send_track."""
+    """Local path + metadata ready for transport.send_track.
+
+    When *already_on_device* is True, prepare/transcode was skipped and
+    *send_path* is empty — the batch pipeline only records a skip.
+    """
 
     send_path: str
     meta: TrackMetadata
     cleanup_path: str | None
     source_path: str
     guid: str = ""
+    already_on_device: bool = False
 
 
 def _merge_meta_after_convert(
@@ -177,12 +182,16 @@ def transfer_track(
     in-flight MTP/ffmpeg call).
 
     *device_guid_stems*: set of 32-hex GUIDs already present on the device
-    (from list_files). Matching tracks are skipped without send.
+    (durable device index). Matching tracks skip transcode and send.
     """
     raise_if_cancelled(should_cancel, total=1)
     guid_hint = track.guid if is_track_guid(track.guid) else ""
     if guid_hint and _guid_already_on_device(guid_hint, device_guid_stems):
-        logger.info("Skip (already on device): guid=%s path=%s", guid_hint, track.path)
+        logger.info(
+            "Skip (already on device, no transcode): guid=%s path=%s",
+            guid_hint,
+            track.path,
+        )
         _notify_status(on_track_status, track.path, "skipped")
         return
 
@@ -197,14 +206,6 @@ def transfer_track(
         should_cancel=should_cancel,
     )
     try:
-        if _guid_already_on_device(prepared.guid, device_guid_stems):
-            logger.info(
-                "Skip (already on device): guid=%s path=%s",
-                prepared.guid,
-                track.path,
-            )
-            _notify_status(on_track_status, track.path, "skipped")
-            return
         raise_if_cancelled(should_cancel, total=1)
         _notify_status(on_track_status, track.path, "transferring")
         parent_id = _resolve_parent(
@@ -258,8 +259,8 @@ def transfer_tracks(
     *device_formats* lists extensions the player plays natively; those sources
     skip ffmpeg even when they differ from *target_format*.
 
-    *device_guid_stems*: GUIDs already on the device (list_files stems); matching
-    tracks are not re-sent.
+    *device_guid_stems*: GUIDs already on the device (durable index); matching
+    tracks skip both transcode and send.
 
     *should_cancel*: when true between tracks, remaining items are skipped and
     :class:`~mtpmanager.app.cancellation.JobCancelled` is raised (the track
@@ -300,12 +301,29 @@ def transfer_tracks(
             if next_future.done() and not next_future.cancelled():
                 nxt = next_future.result()
                 _cleanup(nxt)
-                _notify_status(on_track_status, nxt.source_path, "failed")
+                if not nxt.already_on_device:
+                    _notify_status(on_track_status, nxt.source_path, "failed")
         except Exception:
             pass
         next_future = None
 
     def _prepare(track: Track, slot: int) -> PreparedTrack:
+        # Skip ffmpeg entirely when the host GUID is already on the device.
+        guid_hint = track.guid if is_track_guid(track.guid) else ""
+        if guid_hint and _guid_already_on_device(guid_hint, device_guid_stems):
+            logger.info(
+                "Skip prepare (already on device, no transcode): guid=%s path=%s",
+                guid_hint,
+                track.path,
+            )
+            return PreparedTrack(
+                send_path="",
+                meta=track.meta,
+                cleanup_path=None,
+                source_path=track.path,
+                guid=guid_hint,
+                already_on_device=True,
+            )
         return prepare_track(
             track,
             target_format=target_format,
@@ -364,9 +382,11 @@ def transfer_tracks(
 
                 assert prepared is not None
                 try:
-                    if _guid_already_on_device(prepared.guid, device_guid_stems):
+                    if prepared.already_on_device or _guid_already_on_device(
+                        prepared.guid, device_guid_stems
+                    ):
                         logger.info(
-                            "Skip (already on device): guid=%s path=%s",
+                            "Skip (already on device, no transcode): guid=%s path=%s",
                             prepared.guid,
                             track.path,
                         )

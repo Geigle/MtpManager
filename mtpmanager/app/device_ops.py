@@ -221,6 +221,7 @@ def delete_all_tracks(
 
     total = len(ordered)
     deleted = 0
+    deleted_ids: list[int] = []
     logger.info("delete_all_tracks start total=%s", total)
 
     def _progress(done: int, current: DeviceTrackRef | None) -> None:
@@ -251,6 +252,7 @@ def delete_all_tracks(
                 total=total,
                 deleted=deleted,
                 cancelled=True,
+                deleted_ids=tuple(deleted_ids),
             )
         _progress(deleted, t)
         oid = int(t.item_id)
@@ -274,9 +276,11 @@ def delete_all_tracks(
                     deleted=deleted,
                     failed_id=oid,
                     aborted=True,
+                    deleted_ids=tuple(deleted_ids),
                 )
             raise
         deleted += 1
+        deleted_ids.append(oid)
         logger.info(
             "delete_all_tracks deleted id=%s label=%r (%s/%s)",
             oid,
@@ -287,7 +291,11 @@ def delete_all_tracks(
 
     _progress(deleted, None)
     logger.info("delete_all_tracks done deleted=%s/%s", deleted, total)
-    return DeleteAllResult(total=total, deleted=deleted, aborted=False)
+    return DeleteAllResult(
+        total=total,
+        deleted=deleted,
+        deleted_ids=tuple(deleted_ids),
+    )
 
 
 def send_test_file(device: DevicePort, path: str) -> None:
