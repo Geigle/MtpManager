@@ -88,6 +88,8 @@ class AppController:
         self._job_cancel = threading.Event()
         # Durable multi-track sync plan (resume after failure / cancel).
         self._active_sync_job: SyncJobState | None = None
+        # Path → Track for the active batch (progress status label).
+        self._batch_track_by_path: dict[str, Track] = {}
         self._populate_after_id: str | None = None
         self._device_poll_after_id: str | None = None
         self._device_poll_gen = 0
@@ -836,12 +838,68 @@ class AppController:
         self.library = library
         self._rebuild_track_tree()
 
+    def _track_for_progress_path(self, path: str) -> Track | None:
+        """Resolve a source path to Track for the progress status line."""
+        if not path:
+            return None
+        track = self._batch_track_by_path.get(path)
+        if track is not None:
+            return track
+        iid = self._iid_by_path.get(path)
+        if iid:
+            return self._track_by_iid.get(iid)
+        for t in self.library.tracks:
+            if t.path == path:
+                return t
+        return None
+
+    def _format_sync_status_line(
+        self, path: str, done: int, total: int
+    ) -> str:
+        """Build ``Artist/Album/Title - current/N`` for the progress bar."""
+        track = self._track_for_progress_path(path)
+        if track is not None:
+            artist = primary_artist(track) or track.meta.artist or "Unknown Artist"
+            album = (track.meta.album or "").strip() or "Unknown Album"
+            title = (track.meta.title or "").strip() or "Unknown Title"
+            head = f"{artist}/{album}/{title}"
+        elif path:
+            head = os.path.basename(path)
+        else:
+            head = "…"
+
+        job = self._active_sync_job
+        if job is not None and job.total > 0 and path:
+            try:
+                current = job.paths.index(path) + 1
+                n = job.total
+            except ValueError:
+                current = min(max(done + 1, 1), total) if total else 0
+                n = total
+        else:
+            if total <= 0:
+                return head
+            if path:
+                current = min(max(done + 1, 1), total)
+            else:
+                current = total
+            n = total
+        return f"{head} - {current}/{n}"
+
     def _progress(self, done: int, total: int, path: str) -> None:
         if total <= 0:
             return
         pct = round((done / total) * 100)
+        if done >= total and not path:
+            pct = 100
         try:
             self.win.progress["value"] = pct
+            if path or done < total:
+                self.win.set_progress_status(
+                    self._format_sync_status_line(path, done, total)
+                )
+            elif done >= total:
+                self.win.set_progress_status("Done")
             self.win.root.update_idletasks()
         except Exception:
             pass
@@ -854,6 +912,7 @@ class AppController:
 
     def _mark_batch_queued(self, tracks: list[Track]) -> None:
         """Highlight every track in a bulk operation as queued (green)."""
+        self._batch_track_by_path = {t.path: t for t in tracks}
         for t in tracks:
             self._apply_track_status(t.path, "queued")
 
@@ -868,13 +927,28 @@ class AppController:
                 status = str(rest[1])
                 self._apply_track_status(path, status)
                 self._note_sync_job_track(path, status)
+                # Keep status line current during transcode/transfer phases.
+                if status in ("transcoding", "transferring") and path:
+                    job = self._active_sync_job
+                    total = job.total if job and job.total else len(
+                        self._batch_track_by_path
+                    ) or 1
+                    done = 0
+                    if job and path in job.paths:
+                        try:
+                            done = job.paths.index(path)
+                        except ValueError:
+                            done = job.succeeded
+                    self.win.set_progress_status(
+                        self._format_sync_status_line(path, done, total)
+                    )
             return
         if kind == "progress":
             if len(rest) >= 3:
                 self._progress(int(rest[0]), int(rest[1]), str(rest[2]))
             return
         if kind == "status":
-            # Long USB listing: show text in the library count slot.
+            # Long USB listing: show text in the library count slot and bar.
             if rest:
                 msg = str(rest[0]).strip()
                 if msg:
@@ -882,6 +956,7 @@ class AppController:
                         self.win.lbl_library_count.configure(text=msg)
                     except Exception:
                         pass
+                    self.win.set_progress_status(msg)
             return
 
 
@@ -1449,6 +1524,7 @@ class AppController:
             self.win.progress["value"] = 0
         except Exception:
             pass
+        self.win.set_progress_status("")
         return True
 
     def _end_transfer_job(self) -> None:
@@ -1461,6 +1537,8 @@ class AppController:
             pass
         self._clear_transfer_highlights()
         self._stop_busy_progress()
+        self._batch_track_by_path = {}
+        self.win.set_progress_status("")
         # Listing/transfer just finished — pause auto-connect USB probes.
         self._device_probe_fails = 0
         self._mark_usb_quiet()
@@ -1624,6 +1702,8 @@ class AppController:
                     fmt,
                     sorted(device_formats) if device_formats else None,
                 )
+                self._batch_track_by_path = {track.path: track}
+                report("progress", 0, 1, track.path)
                 transfer_track(
                     track,
                     target_format=fmt,
@@ -1635,6 +1715,7 @@ class AppController:
                     device_formats=device_formats,
                     should_cancel=self._should_cancel_job,
                 )
+                report("progress", 1, 1, "")
                 logger.info("Single-track transfer done: path=%s", path)
             finally:
                 stop_transfer_log(session_handler)

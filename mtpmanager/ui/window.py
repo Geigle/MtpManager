@@ -220,9 +220,18 @@ class MainWindow:
         bottomframe["relief"] = "sunken"
         bottomframe.pack(side=BOTTOM, fill=X)
 
+        # Status line above progress (current track during sync / device jobs).
+        self.lbl_progress_status = Label(
+            bottomframe,
+            text="",
+            anchor="w",
+            justify=LEFT,
+        )
+        self.lbl_progress_status.pack(side=TOP, fill=X, padx=8, pady=(4, 0))
+
         # Progress + Cancel (always mapped; Cancel enabled only while a job runs).
         self.progress_row = Frame(bottomframe)
-        self.progress_row.pack(side=TOP, fill=X, padx=4, pady=4)
+        self.progress_row.pack(side=TOP, fill=X, padx=4, pady=(2, 4))
         self.btn_cancel_job = Button(
             self.progress_row,
             text="Cancel",
@@ -740,6 +749,13 @@ class MainWindow:
     def selected_tree_iids(self) -> list[str]:
         """All selected row iids (multi-select)."""
         return list(self.tree.selection())
+
+    def set_progress_status(self, text: str) -> None:
+        """Update the status line above the progress bar (sync track, etc.)."""
+        try:
+            self.lbl_progress_status.configure(text=text or "")
+        except Exception:
+            pass
 
     def set_cancel_job_command(self, command) -> None:
         """Wire Cancel (progress-bar button + Transfer menu + Escape)."""
