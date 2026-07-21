@@ -665,7 +665,7 @@ class MainWindow:
             for t in self.tree.item(iid, "tags")
             if not str(t).startswith("xfer_")
         ]
-        if status in (None, "done", "failed", ""):
+        if status in (None, "done", "failed", "skipped", ""):
             self.tree.item(iid, tags=tags)
             return
         if status == "transferring":

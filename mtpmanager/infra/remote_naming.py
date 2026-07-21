@@ -4,6 +4,9 @@ Creative ZEN Vision:M (and similar players) need:
 - Music folder parent id (100 on this device)
 - Explicit storage id (0x00010001), not 0
 - Short, sanitized object basenames (well under 64 chars; no & \\ / : * ? " < > |)
+
+Experiment (GUID mode): ObjectFileName is ``{32hex-guid}{ext}`` under folder 100.
+Full title/artist/album still go in MTP tag fields; only the wire name is a GUID.
 """
 
 from __future__ import annotations
@@ -12,6 +15,11 @@ import re
 from types import MappingProxyType
 
 from mtpmanager.domain.models import TrackMetadata
+from mtpmanager.domain.track_id import (
+    is_track_guid,
+    normalize_guid,
+    remote_basename as guid_remote_basename,
+)
 
 # Empirical send hygiene: keep basenames short. Track 8 of Doom hit exactly 64
 # chars (no ext, contained &) with the old long remote basename and failed at
@@ -80,8 +88,13 @@ def build_remote_path(
     *,
     music_folder_id: int = DEFAULT_MUSIC_FOLDER_ID,
     max_basename: int = MAX_REMOTE_BASENAME,
+    guid: str | None = None,
 ) -> str:
     """Build a short remote path under the device Music folder.
+
+    When *guid* is a valid 32-char hex track id, the object name is
+    ``{guid}{ext}`` (flat inventory key for list_files + host DB join).
+    Otherwise falls back to the legacy short title form (tests / rare paths).
 
     mtp-sendtr uses dirname(remote) as parent id and basename as object name.
     Nested Artist/Album paths are *not* created (parse_path only looks up
@@ -92,6 +105,15 @@ def build_remote_path(
     ext = file_extension if file_extension.startswith(".") else f".{file_extension}"
     if ext == ".":
         ext = ".mp3"
+
+    g = normalize_guid(guid) if guid else None
+    if g is not None and is_track_guid(g):
+        basename = guid_remote_basename(g, ext)
+        if len(basename) > max_basename:
+            # Should never happen for 32hex + short ext; keep contract hard.
+            basename = basename[:max_basename]
+        return f"{int(music_folder_id)}/{basename}"
+
     # Leave room for extension inside the device name limit.
     body_max = max(8, max_basename - len(ext))
 

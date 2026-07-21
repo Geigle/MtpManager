@@ -35,6 +35,8 @@ class TrackMetadata:
 class Track:
     path: str
     meta: TrackMetadata
+    # Stable host identity (32-char hex). Empty until assigned by scan/index.
+    guid: str = ""
 
 
 @dataclass(frozen=True)

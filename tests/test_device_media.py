@@ -6,11 +6,20 @@ import unittest
 
 from mtpmanager.domain.device_media import (
     apply_track_info,
+    enrich_refs_from_host,
+    guid_stems_from_files,
     looks_like_track,
     merge_track_refs,
     track_refs_from_files,
 )
-from mtpmanager.domain.models import DeviceTrackInfo, DeviceTrackRef, FileEntry
+from mtpmanager.domain.models import (
+    DeviceTrackInfo,
+    DeviceTrackRef,
+    FileEntry,
+    Track,
+    TrackMetadata,
+)
+from mtpmanager.domain.track_id import new_track_guid
 
 
 def _file(
@@ -154,6 +163,40 @@ class TrackLineFallbackTests(unittest.TestCase):
         )
         self.assertIn("Real Title", with_title)
         self.assertIn("Band", with_title)
+
+
+class GuidJoinTests(unittest.TestCase):
+    def test_guid_stems_from_files(self) -> None:
+        g = new_track_guid()
+        files = [
+            _file(1, f"{g}.mp3", filetype=2),
+            _file(2, "08 Title.mp3", filetype=2),
+            _file(3, f"{g.upper()}.WMA", filetype=3),
+        ]
+        stems = guid_stems_from_files(files)
+        self.assertEqual(stems, {g})
+
+    def test_enrich_refs_from_host(self) -> None:
+        g = new_track_guid()
+        refs = track_refs_from_files(
+            [
+                _file(1, f"{g}.mp3", filetype=2),
+                _file(2, "foreign.mp3", filetype=2),
+            ]
+        )
+        by_guid = {
+            g: Track(
+                path="/x.mp3",
+                meta=TrackMetadata(title="Host Title", artist="Host Artist"),
+                guid=g,
+            )
+        }
+        out = enrich_refs_from_host(refs, by_guid)
+        by_id = {r.item_id: r for r in out}
+        self.assertEqual(by_id[1].title, "Host Title")
+        self.assertEqual(by_id[1].artist, "Host Artist")
+        self.assertEqual(by_id[2].title, "")
+        self.assertEqual(by_id[2].name, "foreign.mp3")
 
 
 if __name__ == "__main__":

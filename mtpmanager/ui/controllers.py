@@ -24,8 +24,13 @@ from mtpmanager.domain.library_sort import (
     iter_track_cells,
     sort_tracks_flat,
 )
-from mtpmanager.domain.device_media import looks_like_track
+from mtpmanager.domain.device_media import (
+    enrich_refs_from_host,
+    guid_stems_from_files,
+    looks_like_track,
+)
 from mtpmanager.domain.models import DeviceInfo, Track, TrackMetadata
+from mtpmanager.domain.track_id import guid_from_remote_name, is_track_guid
 from mtpmanager.infra.album_art import (
     DEFAULT_THUMB_SIZE,
     ensure_cached_thumb,
@@ -35,10 +40,21 @@ from mtpmanager.infra.app_config import AppConfig, load_app_config, save_app_con
 from mtpmanager.infra.cmd_transport import CmdTransport
 from mtpmanager.infra.device_assets import device_graphic_path
 from mtpmanager.infra.ffmpeg_transcode import FFmpegTranscoder
-from mtpmanager.infra.library_index import load_library_index, save_library_index
+from mtpmanager.infra.library_index import (
+    get_tracks_by_guids,
+    load_library_index,
+    save_library_index,
+    upsert_device_object,
+)
 from mtpmanager.infra.logging_setup import start_transfer_log, stop_transfer_log
 from mtpmanager.infra.mutagen_tags import read_metadata
 from mtpmanager.infra.pymtp_device import PymtpDevice
+from mtpmanager.infra.remote_naming import (
+    DEFAULT_MUSIC_FOLDER_ID,
+    DEFAULT_STORAGE_ID,
+    build_remote_path,
+    split_remote_path,
+)
 from mtpmanager.infra.sync_job import (
     SyncJobState,
     load_sync_job,
@@ -1726,6 +1742,7 @@ class AppController:
                 )
                 self._batch_track_by_path = {track.path: track}
                 report("progress", 0, 1, track.path)
+                stems = self._device_guid_stems_for_skip()
                 transfer_track(
                     track,
                     target_format=fmt,
@@ -1736,6 +1753,8 @@ class AppController:
                     resolve_parent_folder=self._parent_folder_resolver(),
                     device_formats=device_formats,
                     should_cancel=self._should_cancel_job,
+                    device_guid_stems=stems,
+                    on_after_send=self._on_after_send,
                 )
                 report("progress", 1, 1, "")
                 logger.info("Single-track transfer done: path=%s", path)
@@ -1807,13 +1826,81 @@ class AppController:
         job = self._active_sync_job
         if job is None or job.status == "completed":
             return
-        if status == "done":
+        if status in ("done", "skipped"):
             if job.mark_path_done(path):
                 self._persist_sync_job()
         elif status == "failed":
             job.mark_path_failed(path)
             self._persist_sync_job()
             self._refresh_resume_menu()
+
+    def _device_guid_stems_for_skip(self) -> set[str] | None:
+        """Return GUID stems already on the device when listing is available.
+
+        Requires an open Experimental PyMTP session (list_files). Stable Mode
+        with no session returns None (skip-if-present disabled for that run).
+        """
+        if not self.device.is_connected():
+            logger.info(
+                "Skip-if-present: no device session (connect Experimental to enable)"
+            )
+            return None
+        try:
+            files = self.device.list_files()
+            stems = guid_stems_from_files(files)
+            logger.info(
+                "Skip-if-present: listed %d object(s), %d GUID stem(s)",
+                len(files),
+                len(stems),
+            )
+            return stems
+        except Exception:
+            logger.warning(
+                "Skip-if-present: list_files failed; sending without skip",
+                exc_info=True,
+            )
+            return None
+
+    def _on_after_send(
+        self, guid: str, send_path: str, object_id: int | None
+    ) -> None:
+        """Record best-effort device_objects row after a successful send."""
+        if not is_track_guid(guid):
+            return
+        _, ext = os.path.splitext(send_path)
+        remote = build_remote_path(
+            TrackMetadata(),
+            ext or ".mp3",
+            music_folder_id=DEFAULT_MUSIC_FOLDER_ID,
+            guid=guid,
+        )
+        _, basename = split_remote_path(remote)
+        try:
+            upsert_device_object(
+                guid,
+                remote_name=basename,
+                item_id=object_id,
+                parent_id=DEFAULT_MUSIC_FOLDER_ID,
+                storage_id=DEFAULT_STORAGE_ID,
+                sent=True,
+            )
+        except Exception:
+            logger.debug("device_objects upsert failed", exc_info=True)
+
+    @staticmethod
+    def _enrich_device_tracks_from_index(refs: list):
+        """Join List Tracks basenames to host SQLite tags (GUID ObjectFileNames)."""
+        guids = []
+        for r in refs:
+            g = guid_from_remote_name(getattr(r, "name", None))
+            if g:
+                guids.append(g)
+        if not guids:
+            return refs
+        by_guid = get_tracks_by_guids(guids)
+        if not by_guid:
+            return refs
+        return enrich_refs_from_host(refs, by_guid)
 
     def _finish_sync_job_success(self) -> None:
         job = self._active_sync_job
@@ -1943,6 +2030,7 @@ class AppController:
             def on_track_status(src: str, status: str) -> None:
                 report("track_status", src, status)
 
+            stems = self._device_guid_stems_for_skip()
             return transfer_tracks(
                 batch,
                 target_format=fmt,
@@ -1953,6 +2041,8 @@ class AppController:
                 resolve_parent_folder=self._parent_folder_resolver(),
                 device_formats=device_formats,
                 should_cancel=self._should_cancel_job,
+                device_guid_stems=stems,
+                on_after_send=self._on_after_send,
             )
 
         def on_done(succeeded: int) -> None:
@@ -2366,10 +2456,14 @@ class AppController:
                 on_load_tags=on_load_tags,
             )
 
+        def list_and_join(device):
+            refs = device_ops.list_tracks(device)
+            return AppController._enrich_device_tracks_from_index(refs)
+
         self._run_device_bg(
             title="Tracks",
             name="list-tracks",
-            work=lambda device: device_ops.list_tracks(device),
+            work=list_and_join,
             on_success=on_success,
             busy_message="listing device tracks (file listing)…",
         )

@@ -143,3 +143,31 @@ Debriefs remain the forensic narrative; this file is what we keep doing.
 **Consequences:** Downstream forks/redistribution must honor GPL-3.0-or-later. Do not relicense to a more restrictive proprietary model without replacing GPL dependencies.
 
 **Source:** Root README License section; `LICENSE`; PyMTP / libmtp licensing.
+
+---
+
+## D11 — SQLite library index with stable per-track GUID
+
+**Context:** The JSON index (`library_index.json`) was a path+tags cache only. Device inventory could not be joined to the host library without relying on fragile bulk MTP track tags or inventing nested folders (which poisoned ZEN sessions).
+
+**Decision:** Persist the library as SQLite `{data_dir}/library_index.db` (stdlib `sqlite3`): `library_meta` (root, scanned_at), `tracks` (guid PK, path unique, full tag columns), optional `device_objects` (last-seen basename / item id). Assign a **32-char hex GUID** (UUID4 without hyphens) per track; preserve across rescans by absolute path. One-shot migrate from legacy JSON when the DB is missing. API remains `save_library_index` / `load_library_index` in `infra/library_index.py`.
+
+**Rationale:** Durable identity independent of MTP object ids; room for host↔device mapping without a general media-library product.
+
+**Consequences:** Host rename of a file gets a new GUID (possible duplicate on device until cleaned). Index is app-private; on-device GUID names are vendor-locked to this app for inventory. No new pip deps.
+
+**Source:** Experiment on GUID flat naming; `tests/test_library_index.py`.
+
+---
+
+## D12 — GUID ObjectFileName under Music 100; host DB for inventory
+
+**Context:** Nested artist/album folders and bulk device tag listing failed on Creative ZEN Vision:M. Title-based basenames cannot be reliably matched after send without device metadata.
+
+**Decision:** Send ObjectFileName as `{guid}{ext}` under parent **100** (flat Music). Full title/artist/album still written as MTP tags (D7 tag channel). Ignore experimental artist/album folder parents when a GUID is present. Device **List Tracks** uses `list_files` + media filter, then joins basename stems to SQLite for display. Multi-track sync **skips** tracks whose GUID stem is already on the device when Experimental listing is available.
+
+**Rationale:** Minimizes folder object churn; inventory works with the fast filelisting path; tags still help players that index them.
+
+**Consequences:** On-device file browser shows GUIDs. Skip-if-present requires a connected PyMTP session for `list_files` (Stable Mode without session does not skip). Foreign (non-GUID) files remain visible by raw name.
+
+**Source:** [device-contract.md](./device-contract.md); `domain/track_id.py`, `remote_naming.build_remote_path(..., guid=)`, `device_media.enrich_refs_from_host`.

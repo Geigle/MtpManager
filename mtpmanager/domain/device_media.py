@@ -2,9 +2,16 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 
-from mtpmanager.domain.models import DeviceTrackInfo, DeviceTrackRef, FileEntry
+from mtpmanager.domain.models import (
+    DeviceTrackInfo,
+    DeviceTrackRef,
+    FileEntry,
+    Track,
+    TrackMetadata,
+)
+from mtpmanager.domain.track_id import guid_from_remote_name
 
 # libmtp audio/video-ish filetypes (wrapper LIBMTP_Filetype / libmtp 1.1.x).
 TRACK_FILETYPES = frozenset(
@@ -112,6 +119,64 @@ def apply_track_info(ref: DeviceTrackRef, info: DeviceTrackInfo) -> DeviceTrackR
         storage_id=int(info.storage_id or ref.storage_id or 0),
         filetype=int(info.filetype or ref.filetype or 0),
     )
+
+
+def apply_host_meta(ref: DeviceTrackRef, meta: TrackMetadata) -> DeviceTrackRef:
+    """Overlay host-library tags onto a listing ref (GUID basename join)."""
+    return DeviceTrackRef(
+        item_id=int(ref.item_id or 0),
+        name=ref.name,
+        title=(meta.title or "").strip() or ref.title,
+        artist=(meta.artist or "").strip() or ref.artist,
+        parent_id=int(ref.parent_id or 0),
+        storage_id=int(ref.storage_id or 0),
+        filetype=int(ref.filetype or 0),
+    )
+
+
+def guid_stems_from_files(
+    files: Sequence[FileEntry] | Iterable[FileEntry],
+) -> set[str]:
+    """Collect 32-hex GUID stems from device file basenames (any extension)."""
+    stems: set[str] = set()
+    for entry in files:
+        g = guid_from_remote_name(getattr(entry, "name", None))
+        if g:
+            stems.add(g)
+    return stems
+
+
+def guid_stems_from_track_refs(
+    refs: Sequence[DeviceTrackRef] | Iterable[DeviceTrackRef],
+) -> set[str]:
+    """Collect GUID stems from device track listing names."""
+    stems: set[str] = set()
+    for ref in refs:
+        g = guid_from_remote_name(getattr(ref, "name", None))
+        if g:
+            stems.add(g)
+    return stems
+
+
+def enrich_refs_from_host(
+    refs: Sequence[DeviceTrackRef] | Iterable[DeviceTrackRef],
+    by_guid: Mapping[str, Track] | Mapping[str, TrackMetadata],
+) -> list[DeviceTrackRef]:
+    """Fill artist/title from host library for GUID-named device objects.
+
+    *by_guid* maps 32-hex guid → ``Track`` or ``TrackMetadata``.
+    Non-GUID or unknown names are left unchanged.
+    """
+    out: list[DeviceTrackRef] = []
+    for ref in refs:
+        g = guid_from_remote_name(ref.name)
+        if not g or g not in by_guid:
+            out.append(ref)
+            continue
+        hit = by_guid[g]
+        meta = hit.meta if isinstance(hit, Track) else hit
+        out.append(apply_host_meta(ref, meta))
+    return _sort_track_refs(out)
 
 
 def _sort_track_refs(refs: list[DeviceTrackRef]) -> list[DeviceTrackRef]:

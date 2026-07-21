@@ -19,6 +19,7 @@ from mtpmanager.app.cancellation import (
 )
 from mtpmanager.domain.device_profile import needs_transcode
 from mtpmanager.domain.models import Track, TrackMetadata
+from mtpmanager.domain.track_id import is_track_guid, new_track_guid
 from mtpmanager.infra.logging_setup import start_transfer_log, stop_transfer_log
 from mtpmanager.infra.mutagen_tags import read_metadata
 from mtpmanager.ports.transcoder import Transcoder
@@ -27,10 +28,13 @@ from mtpmanager.ports.transport import Transport, TransportError
 logger = logging.getLogger(__name__)
 
 ProgressCallback = Callable[[int, int, str], None]
-# source_path, status: "transcoding" | "transferring" | "done" | "failed"
+# source_path, status: "transcoding" | "transferring" | "done" | "failed" | "skipped"
 TrackStatusCallback = Callable[[str, str], None]
 # Optional: resolve MTP parent folder id for a track (artist folders, etc.).
+# Ignored when GUID remote naming is active (flat under Music 100).
 ParentFolderResolver = Callable[[TrackMetadata], int | None]
+# After a successful send: (guid, remote send path, optional object id)
+AfterSendCallback = Callable[[str, str, int | None], None]
 
 
 @dataclass(frozen=True)
@@ -41,6 +45,7 @@ class PreparedTrack:
     meta: TrackMetadata
     cleanup_path: str | None
     source_path: str
+    guid: str = ""
 
 
 def _merge_meta_after_convert(
@@ -116,21 +121,37 @@ def prepare_track(
             sorted(device_formats) if device_formats else None,
         )
 
+    guid = track.guid if is_track_guid(track.guid) else new_track_guid()
     return PreparedTrack(
         send_path=src,
         meta=meta,
         cleanup_path=cleanup_path,
         source_path=track.path,
+        guid=guid,
     )
 
 
 def _resolve_parent(
     resolver: ParentFolderResolver | None,
     meta: TrackMetadata,
+    *,
+    guid: str | None = None,
 ) -> int | None:
+    # GUID ObjectFileName mode is always flat under Music 100.
+    if guid and is_track_guid(guid):
+        return None
     if resolver is None:
         return None
     return resolver(meta)
+
+
+def _guid_already_on_device(
+    guid: str,
+    device_guid_stems: Collection[str] | None,
+) -> bool:
+    if not device_guid_stems or not is_track_guid(guid):
+        return False
+    return guid in device_guid_stems
 
 
 def transfer_track(
@@ -145,6 +166,8 @@ def transfer_track(
     resolve_parent_folder: ParentFolderResolver | None = None,
     device_formats: Collection[str] | None = None,
     should_cancel: CancelCheck | None = None,
+    device_guid_stems: Collection[str] | None = None,
+    on_after_send: AfterSendCallback | None = None,
 ) -> None:
     """
     Ensure track is device-ready (transcode if needed), then send via transport.
@@ -152,8 +175,17 @@ def transfer_track(
 
     *should_cancel* is checked before prepare and before send (cannot abort an
     in-flight MTP/ffmpeg call).
+
+    *device_guid_stems*: set of 32-hex GUIDs already present on the device
+    (from list_files). Matching tracks are skipped without send.
     """
     raise_if_cancelled(should_cancel, total=1)
+    guid_hint = track.guid if is_track_guid(track.guid) else ""
+    if guid_hint and _guid_already_on_device(guid_hint, device_guid_stems):
+        logger.info("Skip (already on device): guid=%s path=%s", guid_hint, track.path)
+        _notify_status(on_track_status, track.path, "skipped")
+        return
+
     prepared = prepare_track(
         track,
         target_format=target_format,
@@ -165,12 +197,30 @@ def transfer_track(
         should_cancel=should_cancel,
     )
     try:
+        if _guid_already_on_device(prepared.guid, device_guid_stems):
+            logger.info(
+                "Skip (already on device): guid=%s path=%s",
+                prepared.guid,
+                track.path,
+            )
+            _notify_status(on_track_status, track.path, "skipped")
+            return
         raise_if_cancelled(should_cancel, total=1)
         _notify_status(on_track_status, track.path, "transferring")
-        parent_id = _resolve_parent(resolve_parent_folder, prepared.meta)
-        transport.send_track(
-            prepared.send_path, prepared.meta, parent_id=parent_id
+        parent_id = _resolve_parent(
+            resolve_parent_folder, prepared.meta, guid=prepared.guid
         )
+        object_id = transport.send_track(
+            prepared.send_path,
+            prepared.meta,
+            parent_id=parent_id,
+            guid=prepared.guid,
+        )
+        if on_after_send is not None:
+            try:
+                on_after_send(prepared.guid, prepared.send_path, object_id)
+            except Exception:
+                logger.debug("on_after_send failed", exc_info=True)
         _notify_status(on_track_status, track.path, "done")
     except Exception:
         _notify_status(on_track_status, track.path, "failed")
@@ -193,18 +243,23 @@ def transfer_tracks(
     resolve_parent_folder: ParentFolderResolver | None = None,
     device_formats: Collection[str] | None = None,
     should_cancel: CancelCheck | None = None,
+    device_guid_stems: Collection[str] | None = None,
+    on_after_send: AfterSendCallback | None = None,
 ) -> int:
     """Transfer many tracks with dual-slot convert/send pipeline.
 
     While track *i* is sent (blocking transport), track *i+1* is prepared on a
     helper thread into the alternate temp slot (``i % 2`` vs ``(i+1) % 2``).
-    Returns number of successful sends.
+    Returns number of successful sends (including skips counted as success).
 
     *on_track_status* receives ``(source_path, status)`` where status is one of
-    ``transcoding``, ``transferring``, ``done``, or ``failed``.
+    ``transcoding``, ``transferring``, ``done``, ``skipped``, or ``failed``.
 
     *device_formats* lists extensions the player plays natively; those sources
     skip ffmpeg even when they differ from *target_format*.
+
+    *device_guid_stems*: GUIDs already on the device (list_files stems); matching
+    tracks are not re-sent.
 
     *should_cancel*: when true between tracks, remaining items are skipped and
     :class:`~mtpmanager.app.cancellation.JobCancelled` is raised (the track
@@ -212,6 +267,7 @@ def transfer_tracks(
     """
     total = len(tracks)
     succeeded = 0
+    skipped = 0
     session_handler = None
     if session_log:
         try:
@@ -221,10 +277,11 @@ def transfer_tracks(
 
     logger.info(
         "Batch transfer start: %d track(s) target_format=%s "
-        "device_formats=%s (dual-slot pipeline)",
+        "device_formats=%s device_guid_stems=%s (dual-slot pipeline)",
         total,
         target_format,
         sorted(device_formats) if device_formats else None,
+        len(device_guid_stems) if device_guid_stems is not None else None,
     )
 
     prepared: PreparedTrack | None = None
@@ -307,17 +364,37 @@ def transfer_tracks(
 
                 assert prepared is not None
                 try:
-                    _notify_status(on_track_status, track.path, "transferring")
-                    parent_id = _resolve_parent(
-                        resolve_parent_folder, prepared.meta
-                    )
-                    transport.send_track(
-                        prepared.send_path,
-                        prepared.meta,
-                        parent_id=parent_id,
-                    )
-                    succeeded += 1
-                    _notify_status(on_track_status, track.path, "done")
+                    if _guid_already_on_device(prepared.guid, device_guid_stems):
+                        logger.info(
+                            "Skip (already on device): guid=%s path=%s",
+                            prepared.guid,
+                            track.path,
+                        )
+                        succeeded += 1
+                        skipped += 1
+                        _notify_status(on_track_status, track.path, "skipped")
+                    else:
+                        _notify_status(on_track_status, track.path, "transferring")
+                        parent_id = _resolve_parent(
+                            resolve_parent_folder,
+                            prepared.meta,
+                            guid=prepared.guid,
+                        )
+                        object_id = transport.send_track(
+                            prepared.send_path,
+                            prepared.meta,
+                            parent_id=parent_id,
+                            guid=prepared.guid,
+                        )
+                        if on_after_send is not None:
+                            try:
+                                on_after_send(
+                                    prepared.guid, prepared.send_path, object_id
+                                )
+                            except Exception:
+                                logger.debug("on_after_send failed", exc_info=True)
+                        succeeded += 1
+                        _notify_status(on_track_status, track.path, "done")
                 except TransportError as exc:
                     remaining = total - i - 1
                     logger.error(
@@ -375,9 +452,10 @@ def transfer_tracks(
         if on_progress and total:
             on_progress(total, total, "")
         logger.info(
-            "Batch transfer finished: succeeded=%d/%d",
+            "Batch transfer finished: succeeded=%d/%d skipped=%d",
             succeeded,
             total,
+            skipped,
         )
         return succeeded
     finally:

@@ -580,24 +580,31 @@ class PymtpDevice:
         meta: TrackMetadata,
         *,
         parent_id: int | None = None,
-    ) -> None:
+        guid: str | None = None,
+    ) -> int | None:
         """Transport.send_track — push audio with metadata via libmtp.
 
         Uses the same ZEN remote contract as CmdTransport: numeric folder parent
-        (Music or an artist subfolder), explicit storage id, and a short
-        sanitized object basename. Tags keep full title/artist/album.
+        (Music under GUID mode), explicit storage id, and a short object
+        basename (GUID when provided). Tags keep full title/artist/album.
 
         On failure raises TransportError (fatal). Does not fall back to CMD.
+        Returns the new object id when libmtp reports one.
         """
         _, ext = os.path.splitext(path)
         ext = ext or ".mp3"
-        folder_id = (
-            int(parent_id) if parent_id is not None else int(self.music_folder_id)
-        )
+        # GUID mode: always flat under Music (ignore artist/album parents).
+        if guid:
+            folder_id = int(self.music_folder_id)
+        else:
+            folder_id = (
+                int(parent_id) if parent_id is not None else int(self.music_folder_id)
+            )
         remote = build_remote_path(
             meta,
             ext,
             music_folder_id=folder_id,
+            guid=guid,
         )
         parent_id, basename = split_remote_path(remote)
 
@@ -696,3 +703,7 @@ class PymtpDevice:
 
         _ = keep  # lifetime through C call
         logger.debug("send_track object_id=%s path=%s", trid, path)
+        try:
+            return int(trid) if trid is not None else None
+        except (TypeError, ValueError):
+            return None

@@ -244,15 +244,21 @@ class CmdTransport:
         meta: TrackMetadata,
         *,
         parent_id: int | None = None,
-    ) -> None:
+        guid: str | None = None,
+    ) -> int | None:
         _, file_extension = os.path.splitext(path)
-        folder_id = (
-            int(parent_id) if parent_id is not None else int(self.music_folder_id)
-        )
+        # GUID mode: always flat under Music (ignore artist/album parents).
+        if guid:
+            folder_id = int(self.music_folder_id)
+        else:
+            folder_id = (
+                int(parent_id) if parent_id is not None else int(self.music_folder_id)
+            )
         remote = build_remote_path(
             meta,
             file_extension or ".mp3",
             music_folder_id=folder_id,
+            guid=guid,
         )
         cmd = [
             self.binary,
@@ -393,3 +399,4 @@ class CmdTransport:
                 stderr=output,
                 returncode=result.returncode,
             )
+        return None

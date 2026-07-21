@@ -23,7 +23,7 @@ End-to-end send path, Stable vs Experimental behavior, and where to change thing
 | Update | `ui/controllers.on_update_library` | **Background** re-scan of stored root; disabled if root missing/unreachable or busy |
 | Scan | `app/scan_library.scan_library` | Recursive music files → tags via mutagen (worker thread) |
 | Background jobs | `ui/bg.TkBackgroundRunner` | Thread + queue + `root.after` poll; never touch Tk from workers |
-| Persist index | `infra/library_index` | Saved in scan worker; UI updated on main thread |
+| Persist index | `infra/library_index` | SQLite `{data_dir}/library_index.db`; GUID per track; saved in scan worker |
 | Index (in-memory) | `domain/library.Library` | Source of truth; Treeview is a sorted view |
 | Library tree | `ttk.Treeview` + `domain/library_sort` | Columns Title/Artist/Album/Year; heading click sorts; Artist/Year hierarchy. Group rows put the full header text in Title. **Album** headers show a thumb in `#0` (rowheight sized so art is not cropped). Thumbs are **disk-cached** PNGs under `{data_dir}/album_art_cache/` and built **off the UI thread** (with index load/scan + after tree rebuild). |
 | Format preference | **Config → Config…** → `{data_dir}/config.json` | Durable `send_format` (`mp3`/`wma`); all Sync actions use it |
@@ -46,7 +46,9 @@ End-to-end send path, Stable vs Experimental behavior, and where to change thing
 | **Select Library Root…** | Folder picker → background full scan → save index |
 | **Update Library** | Background re-scan of stored root → rewrite index; **disabled** when no root, root unreachable, or a library job is running |
 
-- **Startup:** schedule index restore after the UI is up (`after(0, …)`). Worker loads `{data_dir}/library_index.json`; main thread fills the listbox. If `root_path` is still a directory, missing files are dropped. If the root is **unreachable**, still show index entries greyed/disabled and leave **Update Library** disabled.
+- **Startup:** schedule index restore after the UI is up (`after(0, …)`). Worker loads `{data_dir}/library_index.db` (migrates legacy `library_index.json` once if needed); main thread fills the listbox. If `root_path` is still a directory, missing files are dropped. If the root is **unreachable**, still show index entries greyed/disabled and leave **Update Library** disabled.
+- **Send names:** ObjectFileName is `{guid}{ext}` under Music folder 100; full tags still go on the wire. When Experimental is connected, multi-track sync **skips** tracks whose GUID stem is already on the device (`list_files`).
+- **List Tracks:** file listing + join host SQLite by GUID basename for artist/title display (no bulk device tag fetch).
 - **Non-blocking:** scan and index restore run on a daemon thread (`TkBackgroundRunner`). The previous library stays until the job finishes; a newer job discards stale results. Listbox population is chunked so large libraries do not freeze the event loop.
 - While busy, Library menu actions are disabled and the toolbar count shows `Loading index…` / `Scanning…`.
 - Transfers that need the library refuse to run while busy or while the root is unreachable.
@@ -119,7 +121,7 @@ Batch actions sort matches by `path` before `transfer_tracks`.
 |----------|----------|
 | Process model | **One `mtp-sendtr` process per track** — connect → send → exit |
 | Session | No long-lived libmtp session in the app |
-| Remote | `build_remote_path` → `100/<short>.mp3`; `-s` storage id |
+| Remote | `build_remote_path(..., guid=)` → `100/<32hex>.mp3`; `-s` storage id |
 | Tags | Full metadata on CLI flags; filename sanitized |
 | Timeout | Size-based (min 90s, max 900s, ~256 KiB/s + overhead) |
 | Hang handling | Stream stdout/stderr; match fatal patterns; after ~8s post-fatal grace, **kill** process (album-association hang after failed finalize) |

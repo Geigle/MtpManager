@@ -36,7 +36,8 @@ class _FakeTranscoder:
 
 class _RecordingTransport:
     def __init__(self) -> None:
-        self.sent: list[tuple[str, str, int | None]] = []  # path, title, parent
+        # path, title, parent, guid
+        self.sent: list[tuple[str, str, int | None, str | None]] = []
         self.hold_paths: list[str] = []
 
     def send_track(
@@ -45,11 +46,13 @@ class _RecordingTransport:
         meta: TrackMetadata,
         *,
         parent_id: int | None = None,
-    ) -> None:
+        guid: str | None = None,
+    ) -> int | None:
         # Prove the file still exists at send time (not clobbered/deleted).
         self.hold_paths.append(path)
         assert os.path.isfile(path), f"missing at send: {path}"
-        self.sent.append((path, meta.title, parent_id))
+        self.sent.append((path, meta.title, parent_id, guid))
+        return None
 
 
 class _FailSecondTransport(_RecordingTransport):
@@ -59,17 +62,20 @@ class _FailSecondTransport(_RecordingTransport):
         meta: TrackMetadata,
         *,
         parent_id: int | None = None,
-    ) -> None:
-        super().send_track(path, meta, parent_id=parent_id)
+        guid: str | None = None,
+    ) -> int | None:
+        super().send_track(path, meta, parent_id=parent_id, guid=guid)
         if len(self.sent) == 2:
             raise TransportError("boom", fatal=True, path=path)
+        return None
 
 
-def _track(path: str, title: str) -> Track:
+def _track(path: str, title: str, *, guid: str = "") -> Track:
     # .flac so prepare always "converts" via fake transcoder
     return Track(
         path=path,
         meta=TrackMetadata(title=title, artist="A", album="B"),
+        guid=guid,
     )
 
 
@@ -172,9 +178,12 @@ class DualSlotPipelineTests(unittest.TestCase):
             )
             self.assertEqual(n, 3)
             self.assertEqual(
-                [t for _, t, _ in transport.sent], ["One", "Two", "Three"]
+                [t for _, t, _, _ in transport.sent], ["One", "Two", "Three"]
             )
-            self.assertEqual([p for _, _, p in transport.sent], [None, None, None])
+            self.assertEqual([p for _, _, p, _ in transport.sent], [None, None, None])
+            # Every send gets a 32-hex guid
+            for _, _, _, g in transport.sent:
+                self.assertEqual(len(g or ""), 32)
             # Convert order uses slots 0, 1, 0
             slots = [c[2] for c in tr.calls]
             self.assertEqual(slots, [0, 1, 0])
@@ -197,7 +206,8 @@ class DualSlotPipelineTests(unittest.TestCase):
                 resolve_parent_folder=lambda _meta: 445003,
             )
             self.assertEqual(n, 1)
-            self.assertEqual(transport.sent[0][2], 445003)
+            # GUID mode forces flat Music (parent None) even if resolver is set.
+            self.assertIsNone(transport.sent[0][2])
 
     def test_fatal_aborts_remaining(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -275,9 +285,12 @@ class DualSlotPipelineTests(unittest.TestCase):
                 return cancel_after_first["n"] >= 1
 
             class _CountingTransport(_RecordingTransport):
-                def send_track(self, path, meta, *, parent_id=None):
-                    super().send_track(path, meta, parent_id=parent_id)
+                def send_track(self, path, meta, *, parent_id=None, guid=None):
+                    super().send_track(
+                        path, meta, parent_id=parent_id, guid=guid
+                    )
                     cancel_after_first["n"] += 1
+                    return None
 
             transport = _CountingTransport()
             with self.assertRaises(JobCancelled) as ctx:
@@ -293,6 +306,44 @@ class DualSlotPipelineTests(unittest.TestCase):
             self.assertEqual(ctx.exception.total, 3)
             self.assertEqual(len(transport.sent), 1)
             self.assertEqual(transport.sent[0][1], "One")
+
+    def test_skip_if_guid_already_on_device(self) -> None:
+        from mtpmanager.domain.track_id import new_track_guid
+
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = []
+            guids = []
+            for name in ("a.flac", "b.flac"):
+                p = os.path.join(tmp, name)
+                Path(p).write_bytes(b"x")
+                paths.append(p)
+                guids.append(new_track_guid())
+            tracks = [
+                _track(paths[0], "One", guid=guids[0]),
+                _track(paths[1], "Two", guid=guids[1]),
+            ]
+            tr = _FakeTranscoder(tmp)
+            transport = _RecordingTransport()
+            events: list[str] = []
+
+            def on_status(path: str, status: str) -> None:
+                events.append(status)
+
+            n = transfer_tracks(
+                tracks,
+                target_format="mp3",
+                transport=transport,
+                transcoder=tr,
+                session_log=False,
+                device_guid_stems={guids[0]},
+                on_track_status=on_status,
+            )
+            self.assertEqual(n, 2)
+            # First skipped, second sent
+            self.assertEqual(len(transport.sent), 1)
+            self.assertEqual(transport.sent[0][1], "Two")
+            self.assertIn("skipped", events)
+            self.assertIn("done", events)
 
 
 if __name__ == "__main__":

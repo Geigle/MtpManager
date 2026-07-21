@@ -47,18 +47,19 @@ Use **numeric IDs**, never string paths like `Music/...`.
 ### Correct
 
 ```text
-100/<short>.mp3
+100/<32-hex-guid>.mp3
 ```
 
 Examples:
 
 ```text
-100/08 Flesh Metal.mp3
-100/01 Outlines.mp3
+100/a1b2c3d4e5f6789012345678abcdef01.mp3
+100/9f86d081884c7d659a2feaa0c55ad015.wma
 ```
 
 - **Parent** is a **numeric folder id** (Music = 100), not the string `Music`.
-- **Basename** is short, sanitized, and includes the real extension (`.mp3`, `.wma`, …).
+- **Basename** is the host track GUID (32 hex) plus the real extension (`.mp3`, `.wma`, …).
+- Full title/artist/album go in **tags**, not the ObjectFileName.
 
 ### Incorrect (do not invent)
 
@@ -97,31 +98,46 @@ CMD always passes `-s <storage_id>`. PyMTP sets `mt.storage_id` and refreshes st
 
 ## Basename rules
 
-Implemented by `sanitize_component` / `build_remote_path`:
+Implemented by `sanitize_component` / `build_remote_path` (and `domain/track_id` for GUIDs).
 
-1. **Max body ~56** (`MAX_REMOTE_BASENAME`), including extension budget: body room is `max_basename - len(ext)`, minimum body length 8. This is a **send reliability margin**, not a claim that the player cannot store longer names from other software (PTP allows much longer strings; a 91-char name has been observed on-device under Music parent 100). Details: [basename-limit-evidence.md](./basename-limit-evidence.md).
+### Production (GUID mode)
+
+When a host track GUID is available (normal send path):
+
+1. **Shape:** `100/{32-hex-guid}{ext}` — e.g. `100/a1b2c3d4e5f6789012345678abcdef01.mp3`.
+2. **Parent:** always Music folder **100** (flat; ignore artist/album folder prefs).
+3. **GUID:** lowercase UUID4 hex without hyphens (32 chars). Safe charset; length well under `MAX_REMOTE_BASENAME` (56).
+4. **Extension required** on the object name (e.g. `.mp3`).
+5. **Inventory key:** any file under Music whose basename **stem** is that GUID counts as “already on device” (extension may differ after transcode).
+
+Host SQLite maps GUID → path + tags. Device List Tracks uses `list_files` + join; bulk device track tags are not required for display.
+
+### Legacy fallback (no GUID)
+
+If `guid` is omitted (tests / rare paths), the older short title form applies:
+
+1. **Max body ~56** (`MAX_REMOTE_BASENAME`), including extension budget. Details: [basename-limit-evidence.md](./basename-limit-evidence.md).
 2. **Strip unsafe characters** (replaced with space, then collapsed whitespace):
 
    ```text
    / \ : * ? " < > | &  and control chars (\x00-\x1f)
    ```
 
-3. **Extension required** on the object name (e.g. `.mp3`).
-4. Prefer compact form: `{trackno} {title}{ext}` (e.g. `08 Flesh Metal.mp3`).
-5. If the candidate is still tiny (&lt; 4 chars after sanitize), fall back to `{trackno} {artist} {title}`.
-6. Empty components become `"unknown"`.
+3. Prefer compact form: `{trackno} {title}{ext}` (e.g. `08 Flesh Metal.mp3`).
+4. If the candidate is still tiny (&lt; 4 chars after sanitize), fall back to `{trackno} {artist} {title}`.
+5. Empty components become `"unknown"`.
 
-**Tags** may still contain `&`, long titles, full album names, etc. Only the **on-wire object filename** is sanitized.
+**Tags** may still contain `&`, long titles, full album names, etc. Only the **on-wire object filename** is a GUID (or sanitized short title).
 
-Do **not** raise `MAX_REMOTE_BASENAME` only because longer names already exist on the device. Loosen only after a controlled send experiment (see evidence note).
+Do **not** invent nested string paths like `Music/Artist/Album/...`.
 
 ---
 
 ## Tags vs filename split
 
-| Channel | Content |within our send basename budge
+| Channel | Content |
 |---------|---------|
-| Remote **filename** | Short, safe, under length limit |
+| Remote **filename** | GUID + extension (production), short/safe under length limit |
 | **Tags** / metadata flags | Full title, artist, album, genre, track number, year |
 
 CMD (`mtp-sendtr`): `-t`/`-a`/`-l`/… carry full metadata; remote path is only parent + basename.
@@ -150,14 +166,15 @@ from mtpmanager.infra.remote_naming import (
     DEFAULT_MUSIC_FOLDER_ID,  # 100
     DEFAULT_STORAGE_ID,       # 0x00010001
     MAX_REMOTE_BASENAME,      # 56
-    build_remote_path,        # meta + ext → "100/08 Title.mp3"
-    split_remote_path,        # "100/08 Title.mp3" → (100, "08 Title.mp3")
+    build_remote_path,        # meta + ext [+ guid] → "100/<guid>.mp3"
+    split_remote_path,        # "100/<name>.mp3" → (100, basename)
     sanitize_component,
     year_arg,
 )
+from mtpmanager.domain.track_id import new_track_guid, guid_from_remote_name
 ```
 
-- **CMD:** `build_remote_path` → last argv to `mtp-sendtr`; storage via `-s`.
+- **CMD:** `build_remote_path(..., guid=)` → last argv to `mtp-sendtr`; storage via `-s`.
 - **PyMTP:** `build_remote_path` + `split_remote_path` → `parent_id` + basename; storage on `LIBMTP_Track`.
 
 Any new transport **must** use this module (or equivalent constants) rather than inventing `Music/Artist/Album/...` paths.
