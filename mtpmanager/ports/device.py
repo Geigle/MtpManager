@@ -15,12 +15,18 @@ class DevicePort(Protocol):
     """MTP device session and admin operations."""
 
     def connect(self) -> str:
-        """Connect; return device name."""
+        """Connect; return device name. Session open only — no diagnostics."""
         ...
 
     def disconnect(self) -> None: ...
 
-    def get_info(self) -> DeviceInfo: ...
+    def get_identity(self) -> DeviceInfo:
+        """Minimal name/manufacturer/model for profile matching (no battery/storage)."""
+        ...
+
+    def get_info(self) -> DeviceInfo:
+        """Full diagnostics (battery, storage, …). Optional fields may be empty."""
+        ...
 
     def set_device_name(self, name: str) -> None: ...
 

@@ -40,6 +40,7 @@ class EnrichTracksResult:
 
 
 def connect(device: DevicePort) -> str:
+    """Open MTP session only (no battery/storage probes)."""
     return device.connect()
 
 
@@ -47,7 +48,13 @@ def disconnect(device: DevicePort) -> None:
     device.disconnect()
 
 
+def get_device_identity(device: DevicePort) -> DeviceInfo:
+    """Lightweight identity (name / manufacturer / model) for connect + profile."""
+    return device.get_identity()
+
+
 def get_device_info(device: DevicePort) -> DeviceInfo:
+    """Full diagnostics for Device → Device Info (optional fields soft-fail)."""
     return device.get_info()
 
 

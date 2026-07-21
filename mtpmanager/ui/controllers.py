@@ -1020,29 +1020,40 @@ class AppController:
 
         self._device_connect_inflight = True
         local_gen = gen
-        need_info = self._active_profile is None
+        need_identity = self._active_profile is None
 
         def work() -> tuple[str, DeviceInfo | None]:
-            """Return (status, info). status: ok | soft_fail | gone | absent."""
+            """Return (status, info). status: ok | soft_fail | gone | absent.
+
+            Minimum USB: connect + optional identity (name/mfr/model). Never
+            battery/storage here — those are Device → Device Info only.
+            """
             if self.device.is_connected():
                 if self.device.session_alive():
-                    if not need_info:
-                        # Already profiled — skip full get_device_info (battery
-                        # + storage walks are USB-heavy on a recovering bus).
+                    if not need_identity:
                         return ("ok", None)
                     try:
-                        return ("ok", device_ops.get_device_info(self.device))
+                        return ("ok", device_ops.get_device_identity(self.device))
                     except Exception:
-                        # Lightweight probe passed; full info failed — do not
-                        # tear down on a single glitch after long listings.
+                        # Probe passed; identity still failed — keep session.
                         return ("soft_fail", None)
                 return ("soft_fail", None)
 
             try:
                 device_ops.connect(self.device)
-                return ("ok", device_ops.get_device_info(self.device))
             except Exception:
                 return ("absent", None)
+            if not need_identity:
+                return ("ok", None)
+            try:
+                return ("ok", device_ops.get_device_identity(self.device))
+            except Exception:
+                # Connected enough to open a session; profile can wait.
+                logger.debug(
+                    "Auto-connect: identity read failed after connect",
+                    exc_info=True,
+                )
+                return ("ok", DeviceInfo())
 
         def on_done(result: tuple[str, DeviceInfo | None]) -> None:
             self._device_connect_inflight = False
@@ -1158,16 +1169,25 @@ class AppController:
             logger.exception("Disconnect for Stable Mode failed")
 
     def on_connect(self) -> None:
-        """Manual connect; re-enables auto-reconnect polling on Experimental."""
+        """Manual connect; re-enables auto-reconnect polling on Experimental.
+
+        Opens the session and loads **identity only** (name / manufacturer /
+        model) for the left-panel profile. Battery and storage are not queried
+        here — use Device → Device Info for full diagnostics.
+        """
         self._device_auto_reconnect = True
         try:
             device_ops.connect(self.device)
             self._logged_no_device = False
             try:
-                info = device_ops.get_device_info(self.device)
+                info = device_ops.get_device_identity(self.device)
                 self._apply_device_profile(info)
             except Exception:
-                logger.exception("Connected but could not load device info")
+                # Session is up; missing identity must not undo connect.
+                logger.exception(
+                    "Connected but could not load device identity "
+                    "(name/manufacturer/model)"
+                )
         except Exception as e:
             logger.exception("Connect failed")
             messagebox.showerror("Connect", str(e))
@@ -1186,9 +1206,11 @@ class AppController:
 
 
     def on_device_info(self) -> None:
+        """Device → Device Info: full diagnostics (battery, storage, …)."""
         if not self._require_device_ready():
             return
         try:
+            # Full probe is intentional here; fields soft-fail individually.
             info = device_ops.get_device_info(self.device)
         except Exception as e:
             logger.exception("Device info failed")

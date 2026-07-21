@@ -68,7 +68,9 @@ Device admin prompts use dialogs (`ui/dialogs.py`); there is no main-window path
 
 **USB listings never run on the Tk thread.** List Folders / Files / Tracks and the listing phase of Delete Track, Delete All Tracks, Get File Info, and Get Track Info go through `AppController._run_device_bg` → `TkBackgroundRunner` (same busy flag as transfers, so auto-connect poll does not race the session). List paths use an indeterminate bar. **Do not** use full-library `get_tracklisting` as the default List Tracks path on ZEN (multi-hour USB; no partial results until C returns). Tags are on-demand only. Long USB walks may still print `LIBMTP panic: unable to read in zero packet` to **stderr** (C library, not Python logging); that noise is often non-fatal.
 
-After a heavy USB job the controller keeps a short **USB quiet window** (`_DEVICE_USB_COOLDOWN_S`) and treats a single failed liveness probe as a **soft-fail** (keep session; only disconnect after consecutive failures). Immediate post-listing `get_device_info` / `get_modelname` used to look like “list_tracks failed” when the listing had already succeeded and auto-connect tore the session down (`Could not close session!` / endpoint errors on disconnect).
+After a heavy USB job the controller keeps a short **USB quiet window** (`_DEVICE_USB_COOLDOWN_S`) and treats a single failed liveness probe as a **soft-fail** (keep session; only disconnect after consecutive failures).
+
+**Connect vs diagnostics:** Device → Connect and auto-connect only open the MTP session and read **identity** (name / manufacturer / model) for profile matching. They never call battery or storage APIs. Full `get_info` (battery, free/total/used space, serial, version) is **Device → Device Info** only; each optional field soft-fails so one bad property (historically `get_batterylevel` on recovering ZENs) does not abort the dialog or undo connect.
 
 ---
 

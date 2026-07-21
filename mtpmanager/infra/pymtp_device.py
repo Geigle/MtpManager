@@ -145,28 +145,31 @@ class PymtpDevice:
         After unplug, libmtp may leave a non-NULL device pointer so
         :meth:`is_connected` stays True. Call this to detect a dead session
         and force reconnect logic.
+
+        Uses model name only (one PTP property). Does **not** call battery or
+        storage APIs — those are reserved for :meth:`get_info` diagnostics.
         """
         if not self.is_connected():
             return False
         try:
-            # Any simple property read that hits the device; failures mean gone.
             _ = self._mtp.get_modelname()
             return True
         except Exception:
-            logger.debug("MTP session probe failed (device likely removed)", exc_info=True)
+            logger.debug(
+                "MTP session probe failed (device likely removed)",
+                exc_info=True,
+            )
             return False
 
     def connect(self) -> str:
+        """Open MTP session only — no battery/storage probes."""
         try:
             self._mtp.connect()
-            name = _decode(self._mtp.get_devicename())
-            logger.info("Connected to %s", name)
+            name = self._safe_device_str("get_devicename", "")
+            logger.info("Connected to %s", name or "(unnamed)")
             return name
         except pymtp.AlreadyConnected:
-            try:
-                name = _decode(self._mtp.get_devicename())
-            except Exception:
-                name = "(unknown)"
+            name = self._safe_device_str("get_devicename", "(unknown)")
             logger.info("%s already connected.", name)
             return name
 
@@ -177,18 +180,64 @@ class PymtpDevice:
         except pymtp.NotConnected:
             logger.info("No MTP device present.")
 
-    def get_info(self) -> DeviceInfo:
+    def _safe_device_str(self, method: str, default: str = "") -> str:
+        """Call a pymtp string getter; return *default* on any failure."""
+        try:
+            fn = getattr(self._mtp, method)
+            return _decode(fn())
+        except Exception:
+            logger.debug("Device %s failed (using default)", method, exc_info=True)
+            return default
+
+    def _safe_device_call(self, method: str, default):
+        """Call a pymtp method; return *default* on any failure."""
+        try:
+            fn = getattr(self._mtp, method)
+            return fn()
+        except Exception:
+            logger.debug("Device %s failed (using default)", method, exc_info=True)
+            return default
+
+    def get_identity(self) -> DeviceInfo:
+        """Minimal identity for connect / auto-connect / profile matching.
+
+        Only friendly name, manufacturer, and model — no battery or storage
+        walks (those freeze recovering ZENs after long transfer sessions).
+        """
         return DeviceInfo(
-            name=_decode(self._mtp.get_devicename()),
-            serial=_decode(self._mtp.get_serialnumber()),
-            manufacturer=_decode(self._mtp.get_manufacturer()),
-            battery=self._mtp.get_batterylevel(),
-            model=_decode(self._mtp.get_modelname()),
-            version=_decode(self._mtp.get_deviceversion()),
-            free=self._mtp.get_freespace(),
-            total=self._mtp.get_totalspace(),
-            used=self._mtp.get_usedspace(),
-            used_percent=self._mtp.get_usedspace_percent(),
+            name=self._safe_device_str("get_devicename"),
+            manufacturer=self._safe_device_str("get_manufacturer"),
+            model=self._safe_device_str("get_modelname"),
+        )
+
+    def get_info(self) -> DeviceInfo:
+        """Full device diagnostics (Device → Device Info).
+
+        Each optional field is fetched independently and soft-fails to a
+        default so a single bad API (e.g. ``get_batterylevel``) never aborts
+        the whole dialog or poison-connect recovery.
+        """
+        identity = self.get_identity()
+        battery = self._safe_device_call("get_batterylevel", None)
+        free = self._safe_device_call("get_freespace", 0) or 0
+        total = self._safe_device_call("get_totalspace", 0) or 0
+        used = self._safe_device_call("get_usedspace", 0) or 0
+        used_pct = self._safe_device_call("get_usedspace_percent", 0.0)
+        try:
+            used_pct = float(used_pct or 0.0)
+        except (TypeError, ValueError):
+            used_pct = 0.0
+        return DeviceInfo(
+            name=identity.name,
+            serial=self._safe_device_str("get_serialnumber"),
+            manufacturer=identity.manufacturer,
+            battery=battery,
+            model=identity.model,
+            version=self._safe_device_str("get_deviceversion"),
+            free=int(free) if free is not None else 0,
+            total=int(total) if total is not None else 0,
+            used=int(used) if used is not None else 0,
+            used_percent=used_pct,
         )
 
     def set_device_name(self, name: str) -> None:
