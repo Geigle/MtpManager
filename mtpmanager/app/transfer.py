@@ -17,6 +17,7 @@ from mtpmanager.app.cancellation import (
     JobCancelled,
     raise_if_cancelled,
 )
+from mtpmanager.app.transfer_queue import BatchTransferQueue
 from mtpmanager.domain.device_profile import needs_transcode
 from mtpmanager.domain.models import Track, TrackMetadata
 from mtpmanager.domain.track_id import is_track_guid, new_track_guid
@@ -232,7 +233,7 @@ def transfer_track(
 
 
 def transfer_tracks(
-    tracks: Sequence[Track],
+    tracks: Sequence[Track] | BatchTransferQueue,
     *,
     target_format: str,
     transport: Transport,
@@ -248,6 +249,10 @@ def transfer_tracks(
     on_after_send: AfterSendCallback | None = None,
 ) -> int:
     """Transfer many tracks with dual-slot convert/send pipeline.
+
+    *tracks* may be a fixed sequence or a live :class:`BatchTransferQueue`
+    that the UI can extend while this function runs (append artist/album/
+    selection). The worker re-reads ``queue.total()`` each iteration.
 
     While track *i* is sent (blocking transport), track *i+1* is prepared on a
     helper thread into the alternate temp slot (``i % 2`` vs ``(i+1) % 2``).
@@ -266,7 +271,11 @@ def transfer_tracks(
     :class:`~mtpmanager.app.cancellation.JobCancelled` is raised (the track
     already in flight still finishes).
     """
-    total = len(tracks)
+    if isinstance(tracks, BatchTransferQueue):
+        track_queue = tracks
+    else:
+        track_queue = BatchTransferQueue(tracks)
+
     succeeded = 0
     skipped = 0
     session_handler = None
@@ -278,8 +287,8 @@ def transfer_tracks(
 
     logger.info(
         "Batch transfer start: %d track(s) target_format=%s "
-        "device_formats=%s device_guid_stems=%s (dual-slot pipeline)",
-        total,
+        "device_formats=%s device_guid_stems=%s (queue dual-slot pipeline)",
+        track_queue.total(),
         target_format,
         sorted(device_formats) if device_formats else None,
         len(device_guid_stems) if device_guid_stems is not None else None,
@@ -334,38 +343,50 @@ def transfer_tracks(
             should_cancel=should_cancel,
         )
 
+    def _live_total() -> int:
+        return max(1, track_queue.total())
+
     def _user_cancel(*, at_index: int) -> None:
         nonlocal prepared
-        remaining = max(0, total - at_index)
+        total_now = track_queue.total()
+        remaining = max(0, total_now - at_index)
         logger.info(
             "Batch cancelled by user: succeeded=%d/%d remaining_not_started=%d",
             succeeded,
-            total,
+            total_now,
             remaining,
         )
         _cancel_next()
         _cleanup(prepared)
         prepared = None
-        if on_progress and total:
-            on_progress(succeeded, total, "")
+        if on_progress and total_now:
+            on_progress(succeeded, total_now, "")
         raise JobCancelled(
-            f"Cancelled after {succeeded} of {total} track(s)",
+            f"Cancelled after {succeeded} of {total_now} track(s)",
             completed=succeeded,
-            total=total,
+            total=total_now,
         )
 
     try:
-        if total == 0:
+        first = track_queue.track_at(0)
+        if first is None:
             return 0
 
-        raise_if_cancelled(should_cancel, total=total)
+        raise_if_cancelled(should_cancel, total=_live_total())
 
         with ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="mtpmanager-prep"
         ) as pool:
-            prepared = _prepare(tracks[0], 0)
+            prepared = _prepare(first, 0)
+            i = 0
 
-            for i, track in enumerate(tracks):
+            while True:
+                track = track_queue.track_at(i)
+                if track is None:
+                    break
+
+                total = track_queue.total()
+
                 # Between items: honor cancel before starting the next send.
                 if should_cancel is not None and should_cancel():
                     _user_cancel(at_index=i)
@@ -375,10 +396,13 @@ def transfer_tracks(
                     on_progress(i, total, track.path)
                 logger.info("%d/%d - %s", i + 1, total, track.path)
 
-                if i + 1 < total:
-                    next_slot = (i + 1) % 2
-                    next_track = tracks[i + 1]
-                    next_future = pool.submit(_prepare, next_track, next_slot)
+                # Dual-slot: start preparing the next known track if any.
+                if next_future is None:
+                    next_track = track_queue.track_at(i + 1)
+                    if next_track is not None:
+                        next_future = pool.submit(
+                            _prepare, next_track, (i + 1) % 2
+                        )
 
                 assert prepared is not None
                 try:
@@ -386,7 +410,8 @@ def transfer_tracks(
                         prepared.guid, device_guid_stems
                     ):
                         logger.info(
-                            "Skip (already on device, no transcode): guid=%s path=%s",
+                            "Skip (already on device, no transcode): "
+                            "guid=%s path=%s",
                             prepared.guid,
                             track.path,
                         )
@@ -394,7 +419,9 @@ def transfer_tracks(
                         skipped += 1
                         _notify_status(on_track_status, track.path, "skipped")
                     else:
-                        _notify_status(on_track_status, track.path, "transferring")
+                        _notify_status(
+                            on_track_status, track.path, "transferring"
+                        )
                         parent_id = _resolve_parent(
                             resolve_parent_folder,
                             prepared.meta,
@@ -409,13 +436,18 @@ def transfer_tracks(
                         if on_after_send is not None:
                             try:
                                 on_after_send(
-                                    prepared.guid, prepared.send_path, object_id
+                                    prepared.guid,
+                                    prepared.send_path,
+                                    object_id,
                                 )
                             except Exception:
-                                logger.debug("on_after_send failed", exc_info=True)
+                                logger.debug(
+                                    "on_after_send failed", exc_info=True
+                                )
                         succeeded += 1
                         _notify_status(on_track_status, track.path, "done")
                 except TransportError as exc:
+                    total = track_queue.total()
                     remaining = total - i - 1
                     logger.error(
                         "FAILED (%d/%d): %s fatal=%s path=%s rc=%s",
@@ -451,12 +483,14 @@ def transfer_tracks(
                     _cleanup(prepared)
                     prepared = None
 
+                i += 1
+
                 if next_future is not None:
                     try:
                         prepared = next_future.result()
                     except JobCancelled:
                         next_future = None
-                        # Prep thread saw cancel; report progress so far.
+                        total = track_queue.total()
                         raise JobCancelled(
                             f"Cancelled after {succeeded} of {total} track(s)",
                             completed=succeeded,
@@ -467,8 +501,15 @@ def transfer_tracks(
                         raise
                     next_future = None
                 else:
-                    prepared = None
+                    # Maybe the UI enqueued more tracks during the last send.
+                    nxt = track_queue.track_at(i)
+                    if nxt is not None:
+                        prepared = _prepare(nxt, i % 2)
+                    else:
+                        prepared = None
+                        break
 
+        total = track_queue.total()
         if on_progress and total:
             on_progress(total, total, "")
         logger.info(

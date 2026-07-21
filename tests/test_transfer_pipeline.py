@@ -348,6 +348,48 @@ class DualSlotPipelineTests(unittest.TestCase):
             self.assertEqual(len(tr.calls), 1)
             self.assertEqual(tr.calls[0][0], paths[1])
 
+    def test_queue_grows_during_batch(self) -> None:
+        """UI can append tracks while the worker drains the queue."""
+        from mtpmanager.app.transfer_queue import BatchTransferQueue
+
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = []
+            for name in ("a.flac", "b.flac", "c.flac"):
+                p = os.path.join(tmp, name)
+                Path(p).write_bytes(b"x")
+                paths.append(p)
+            q = BatchTransferQueue([_track(paths[0], "One")])
+            tr = _FakeTranscoder(tmp)
+
+            class _GrowTransport(_RecordingTransport):
+                def send_track(self, path, meta, *, parent_id=None, guid=None):
+                    # After first send starts, enqueue more work.
+                    if len(self.sent) == 0:
+                        q.extend(
+                            [
+                                _track(paths[1], "Two"),
+                                _track(paths[2], "Three"),
+                            ]
+                        )
+                    return super().send_track(
+                        path, meta, parent_id=parent_id, guid=guid
+                    )
+
+            transport = _GrowTransport()
+            n = transfer_tracks(
+                q,
+                target_format="mp3",
+                transport=transport,
+                transcoder=tr,
+                session_log=False,
+            )
+            self.assertEqual(n, 3)
+            self.assertEqual(len(transport.sent), 3)
+            self.assertEqual(
+                [t for _, t, _, _ in transport.sent],
+                ["One", "Two", "Three"],
+            )
+
     def test_skip_all_on_device_no_transcode(self) -> None:
         from mtpmanager.domain.track_id import new_track_guid
 

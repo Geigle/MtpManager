@@ -68,6 +68,27 @@ class SyncJobState:
             return []
         return list(self.paths[self.next_index :])
 
+    def append_paths(self, paths: list[str]) -> list[str]:
+        """Append unique paths to the plan (for mid-job queue growth).
+
+        Returns the paths that were actually added.
+        """
+        known = set(self.paths)
+        added: list[str] = []
+        for p in paths:
+            path = (p or "").strip()
+            if not path or path in known:
+                continue
+            self.paths.append(path)
+            known.add(path)
+            added.append(path)
+        if added:
+            self.updated_at = _utc_now()
+            if self.status == "completed":
+                # Queue grew after drain thought it was done — keep running.
+                self.status = "running"
+        return added
+
     def mark_path_done(self, path: str) -> bool:
         """Advance *next_index* past *path* if it is the current head (or earlier).
 

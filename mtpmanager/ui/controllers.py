@@ -13,6 +13,7 @@ from mtpmanager.app.artist_folders import ensure_album_folder, ensure_artist_fol
 from mtpmanager.app.cancellation import JobCancelled
 from mtpmanager.app.scan_library import scan_library
 from mtpmanager.app.transfer import transfer_track, transfer_tracks
+from mtpmanager.app.transfer_queue import BatchTransferQueue
 from mtpmanager.domain.device_profile import DeviceProfile, match_device_profile
 from mtpmanager.domain.device_profiles import BUILTIN_PROFILES
 from mtpmanager.domain.library import Library, primary_artist
@@ -113,6 +114,8 @@ class AppController:
         self._job_cancel = threading.Event()
         # Durable multi-track sync plan (resume after failure / cancel).
         self._active_sync_job: SyncJobState | None = None
+        # Live batch queue (same object the worker drains; UI may extend).
+        self._transfer_queue: BatchTransferQueue | None = None
         # Path → Track for the active batch (progress status label).
         self._batch_track_by_path: dict[str, Track] = {}
         self._populate_after_id: str | None = None
@@ -419,8 +422,12 @@ class AppController:
         )
         return False
 
-    def _require_usable_library(self) -> bool:
-        """True when library media can be transferred; shows a dialog otherwise."""
+    def _require_usable_library(self, *, allow_enqueue: bool = False) -> bool:
+        """True when library media can be transferred; shows a dialog otherwise.
+
+        *allow_enqueue*: when True, an active batch transfer queue is OK
+        (caller will append tracks instead of starting a new job).
+        """
         if self._library_busy:
             messagebox.showinfo(
                 "Library",
@@ -428,11 +435,16 @@ class AppController:
             )
             return False
         if self._transfer_busy:
-            messagebox.showinfo(
-                "Transfer",
-                "A transfer is already in progress. Wait for it to finish.",
-            )
-            return False
+            if allow_enqueue and self._transfer_queue is not None:
+                pass  # mid-job append is allowed
+            else:
+                messagebox.showinfo(
+                    "Transfer",
+                    "A transfer is already in progress. Wait for it to finish,\n"
+                    "or add tracks via Sync Album / Artist / Selected while a "
+                    "batch transfer queue is running.",
+                )
+                return False
         if not self.library.root_path:
             messagebox.showinfo(
                 "Library",
@@ -449,9 +461,13 @@ class AppController:
             return False
         return True
 
-    def _require_sync_ready(self) -> bool:
-        """Library usable + PyMTP connection gate when not in Stable Mode."""
-        if not self._require_usable_library():
+    def _require_sync_ready(self, *, allow_enqueue: bool = True) -> bool:
+        """Library usable + PyMTP connection gate when not in Stable Mode.
+
+        *allow_enqueue* defaults True so Sync Album/Artist/Selected can append
+        to an active batch queue.
+        """
+        if not self._require_usable_library(allow_enqueue=allow_enqueue):
             return False
         return self._require_experimental_connected()
 
@@ -1661,6 +1677,7 @@ class AppController:
     def _end_transfer_job(self) -> None:
         self._transfer_busy = False
         self._job_cancel.clear()
+        self._transfer_queue = None
         self.win.set_cancel_job_enabled(False)
         try:
             self.win.btn_cancel_job.configure(text="Cancel")
@@ -1804,6 +1821,10 @@ class AppController:
         )
 
     def _transfer_one(self, track: Track, fmt: str) -> None:
+        # Prefer appending to an active batch queue over a separate one-shot job.
+        if self._transfer_queue is not None and self._transfer_busy:
+            self._enqueue_tracks([track], kind="track", label="Selected track")
+            return
         if not self._begin_transfer_job():
             return
         # Capture transport / formats on main thread (mode may change later).
@@ -2070,6 +2091,49 @@ class AppController:
         if job.next_index >= job.total:
             job.mark_completed()
 
+    def _enqueue_tracks(
+        self,
+        tracks: list[Track],
+        *,
+        kind: str = "batch",
+        label: str = "",
+    ) -> int:
+        """Append tracks to the active batch queue. Returns count newly queued."""
+        q = self._transfer_queue
+        job = self._active_sync_job
+        if q is None or job is None or not self._transfer_busy:
+            return 0
+        added = q.extend(tracks)
+        if not added:
+            logger.info(
+                "Queue: no new tracks (all already queued) kind=%s", kind
+            )
+            return 0
+        job.append_paths([t.path for t in added])
+        if label and job.label and label not in job.label:
+            # Keep a short combined label for the status line.
+            job.label = f"{job.label} + {label}"
+        elif label and not job.label:
+            job.label = label
+        self._persist_sync_job()
+        for t in added:
+            self._batch_track_by_path[t.path] = t
+            self._apply_track_status(t.path, "queued")
+        logger.info(
+            "Queue: added %d track(s) kind=%s → %s",
+            len(added),
+            kind,
+            job.summary_line(),
+        )
+        try:
+            self.win.set_progress_status(
+                f"Queued +{len(added)} → {job.succeeded}/{job.total} "
+                f"({job.remaining} left)"
+            )
+        except Exception:
+            pass
+        return len(added)
+
     def _transfer_many(
         self,
         tracks: list[Track],
@@ -2082,14 +2146,28 @@ class AppController:
         if not tracks:
             messagebox.showinfo("Transfer", "No tracks to transfer.")
             return
+
+        # Mid-job: append to the live queue instead of refusing.
+        if (
+            resume_job is None
+            and self._transfer_busy
+            and self._transfer_queue is not None
+            and self._active_sync_job is not None
+        ):
+            n = self._enqueue_tracks(tracks, kind=kind, label=label or kind)
+            if n == 0:
+                messagebox.showinfo(
+                    "Transfer queue",
+                    "Those tracks are already in the transfer queue.",
+                )
+            return
+
         if not self._begin_transfer_job():
             return
 
         transport = self._transport()
         transcoder = self.transcoder
         device_formats = self._device_audio_formats()
-        # Snapshot the list so library changes during transfer do not race.
-        batch = list(tracks)
         mode = self.win.active_mode()
 
         if resume_job is not None:
@@ -2097,22 +2175,27 @@ class AppController:
             job.mark_running()
             # Remaining batch must align with job.paths[job.next_index:].
             self._active_sync_job = job
+            batch = list(tracks)
         else:
             job = new_sync_job(
-                paths=[t.path for t in batch],
+                paths=[t.path for t in tracks],
                 kind=kind,
                 label=label or kind,
                 target_format=fmt,
                 mode=mode,
             )
             self._active_sync_job = job
+            batch = list(tracks)
+
+        track_queue = BatchTransferQueue(batch)
+        self._transfer_queue = track_queue
         self._persist_sync_job()
         self.win.set_resume_sync_enabled(False)
         self._mark_batch_queued(batch)
         logger.info(
-            "Sync job start: %s (batch_now=%d)",
+            "Sync job start: %s (queue=%d)",
             job.summary_line(),
-            len(batch),
+            track_queue.total(),
         )
 
         def work() -> int:
@@ -2127,7 +2210,7 @@ class AppController:
 
             stems = self._device_guid_stems_for_skip()
             return transfer_tracks(
-                batch,
+                track_queue,
                 target_format=fmt,
                 transport=transport,
                 transcoder=transcoder,

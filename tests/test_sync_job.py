@@ -79,6 +79,15 @@ class SyncJobTests(unittest.TestCase):
             dest = Path(tmp) / "nope.json"
             self.assertIsNone(load_sync_job(path=dest))
 
+    def test_append_paths_dedupes(self) -> None:
+        job = new_sync_job(paths=["a", "b"])
+        job.mark_path_done("a")
+        added = job.append_paths(["b", "c", "c", "d"])
+        self.assertEqual(added, ["c", "d"])
+        self.assertEqual(job.paths, ["a", "b", "c", "d"])
+        self.assertEqual(job.next_index, 1)
+        self.assertEqual(job.remaining, 3)
+
 
 if __name__ == "__main__":
     unittest.main()

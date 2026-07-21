@@ -49,6 +49,7 @@ Do **not**:
 | CMD hang / timeout / fatal stderr patterns | `mtpmanager/infra/cmd_transport.py` |
 | PyMTP send, filetype enum, ctypes | `mtpmanager/infra/pymtp_wrapper.py`, `pymtp_device.py` + `tests/test_pymtp_filetypes.py` |
 | Transcode → send pipeline, batch abort | `mtpmanager/app/transfer.py` |
+| Live batch queue (append mid-job) | `mtpmanager/app/transfer_queue.py` + controllers `_enqueue_tracks` |
 | UI actions, mode, recovery dialogs | `mtpmanager/ui/controllers.py`, `window.py` |
 | Artist/album selection | `mtpmanager/domain/library.py` |
 | Scan / tags | `app/scan_library.py`, `infra/mutagen_tags.py` |

@@ -182,11 +182,23 @@ Single-track and batch sends run on a **worker thread** via `ui/bg.TkBackgroundR
 
 Cancel is **cooperative**: the current track send / object delete is allowed to finish; remaining items are skipped and the UI reports how many completed (`JobCancelled` / `DeleteAllResult.cancelled`). In-flight ffmpeg convert of the *next* track is abandoned when the batch stops.
 
+### Transfer queue (live append)
+
+Batch syncs run from a **live queue** (`app/transfer_queue.BatchTransferQueue`) shared by the worker and UI:
+
+- Starting Entire Library / Folder / Album / Artist / Selected creates the queue and durable `sync_job.json` plan.
+- While that batch is running, **Sync album**, **Sync all from artist**, **Sync selected**, and single-track sync **append** new unique paths (by source path) instead of refusing with “already in progress”.
+- Already-queued or finished paths are ignored on append.
+- Progress totals grow as items are added; row tints mark newly queued tracks.
+
+Device admin jobs (list/delete) still take the busy lock and do **not** expose a transfer queue.
+
 ### Resume Sync
 
 Multi-track syncs (Entire Library, Folder, Album, Artist, **Selected tracks**) write a durable plan to `{data_dir}/sync_job.json` (`infra/sync_job.py`): ordered source paths, `next_index` (first not-yet-successful path), status, target format, and last error.
 
 - After each successful send, `next_index` advances and the file is updated.
+- Mid-job queue appends also append paths on the durable job.
 - On fatal failure or cancel, status becomes `failed` / `cancelled` and **Transfer → Resume Sync** enables.
 - Resume rebuilds tracks from the remaining paths (library tags, or re-read from disk) and continues from `next_index` (retries the failed track).
 - A full successful run marks the job `completed` (Resume disabled). An app quit mid-job is treated as failed on next launch if paths remain.
