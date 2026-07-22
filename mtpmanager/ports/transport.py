@@ -32,4 +32,21 @@ class TransportError(Exception):
 class Transport(Protocol):
     """Sends a local audio file to the device with metadata."""
 
-    def send_track(self, path: str, meta: TrackMetadata) -> None: ...
+    def send_track(
+        self,
+        path: str,
+        meta: TrackMetadata,
+        *,
+        parent_id: int | None = None,
+        guid: str | None = None,
+    ) -> int | None:
+        """Send *path* with *meta*.
+
+        *parent_id*, when set, is the MTP folder object id for the parent
+        (e.g. Music=100). GUID mode forces Music and ignores nested parents.
+        *guid*, when set, is the 32-char host track id used as ObjectFileName.
+
+        Returns the new MTP object id when the transport knows it (PyMTP),
+        else ``None`` (e.g. mtp-sendtr).
+        """
+        ...

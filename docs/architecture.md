@@ -9,7 +9,7 @@ MtpManager loads music onto picky MTP players (especially Creative ZEN Vision:M)
 ## Problem framing
 
 - Old players speak MTP poorly; host software often assumes modern devices or WMP-centric workflows.
-- Need: FLAC (etc.) → device formats (MP3/WMA), reliable track send, honest failure handling when the session dies.
+- Need: FLAC (etc.) → device formats (MP3/WMA/WAV on ZEN), reliable track send, honest failure handling when the session dies. Native formats are passed through without re-encode.
 - Hard lessons: nested remote paths, storage id 0, long object names, ignored subprocess status, and broken PyMTP bindings all look like “USB is haunted” until diagnosed. See debriefs under `docs/`.
 
 ---
@@ -34,11 +34,11 @@ MtpManager loads music onto picky MTP players (especially Creative ZEN Vision:M)
 
 | Package | Responsibility | Key modules |
 |---------|----------------|-------------|
-| `domain/` | Pure models + library selection logic | `models.py` (`Track`, `TrackMetadata`, `DeviceInfo`), `library.py` (scan helpers, `filter_by_artist` / `filter_by_album`) |
+| `domain/` | Pure models + library selection logic | `models.py` (`Track`, `TrackMetadata`, `DeviceInfo`), `library.py`, `device_profile.py` / `device_profiles.py` (player matching) |
 | `ports/` | Protocols + shared error type | `transport.py` (`Transport`, `TransportError`), `device.py` (`DevicePort`), `tags.py`, `transcoder.py` |
 | `app/` | Use cases (orchestration only) | `transfer.py`, `scan_library.py`, `device_ops.py` |
-| `infra/` | libmtp / ffmpeg / mutagen / logging | `cmd_transport.py`, `pymtp_device.py`, `pymtp_wrapper.py`, `remote_naming.py`, `ffmpeg_transcode.py`, `mutagen_tags.py`, `logging_setup.py` |
-| `ui/` | Tk layout + event wiring | `window.py`, `controllers.py`, `formatting.py` |
+| `infra/` | libmtp / ffmpeg / mutagen / logging / library index | `cmd_transport.py`, `pymtp_device.py`, `pymtp_wrapper.py`, `remote_naming.py`, `ffmpeg_transcode.py`, `mutagen_tags.py`, `logging_setup.py`, `app_paths.py`, `library_index.py` |
+| `ui/` | Tk layout + event wiring | `window.py` (menus, track context, format, status toolbar), `controllers.py`, `dialogs.py`, `formatting.py`, `bg.py` |
 
 ---
 
@@ -53,7 +53,7 @@ MtpManager loads music onto picky MTP players (especially Creative ZEN Vision:M)
 `mtpmanager/__main__.py` wires:
 
 1. `configure_logging()` / `prune_old_logs()`
-2. `MainWindow()` + `PymtpDevice()` + `AppController(window, device)`
+2. `MainWindow()` + `PymtpDevice()` + `AppController(window, device)` (index restore scheduled on a background thread; mainloop is not blocked)
 3. `window.mainloop()`
 
 `PymtpDevice` is always constructed (for Experimental Connect / device admin). Stable transfers use a **separate** `CmdTransport()` instance and do not require an open PyMTP session.
@@ -66,27 +66,28 @@ MtpManager loads music onto picky MTP players (especially Creative ZEN Vision:M)
 
 | UI tab | Mode id | Transport |
 |--------|---------|-----------|
-| **Stable Mode** | `"stable"` | `CmdTransport()` — one `mtp-sendtr` process per track |
-| **Experimental Mode** | `"experimental"` | `self.device` (`PymtpDevice`) — also implements device admin |
+| **PyMTP (default)** | `"experimental"` | `self.device` (`PymtpDevice`) — also implements device admin |
+| **Stable Mode** | `"stable"` | `CmdTransport()` — one `mtp-sendtr` process per track; Config menu toggle |
 
-Action lists (`ui/window.py`):
+UI action surfaces (`ui/window.py`):
 
-- **Stable:** transfer-oriented actions only (`STABLE_ACTIONS`).
-- **Experimental:** transfers + Connect/Disconnect/Device Info + folder/name/admin tools (`EXPERIMENTAL_ACTIONS`).
+- **Track context menu** (both modes): Sync this track / Album / Artist.
+- **Transfer** menubar: entire library / folder sync.
+- **Device** menubar (Connect / Disconnect / Device Info + admin tools; enabled when Stable Mode is off) + left-panel device graphic (`domain/device_profile` + `assets/devices/`).
 
-Stable is the recommended transfer path. Experimental is for PyMTP/libmtp tools and deliberate in-process send testing. Experimental **does not** silently fall back to CMD on failure (see [decisions.md](./decisions.md) D3).
+PyMTP is the default (aspirational) path. Stable Mode is an opt-in Config toggle for the proven `mtp-sendtr` subprocess path. PyMTP **does not** silently fall back to CMD on failure (see [decisions.md](./decisions.md) D3).
 
 ---
 
 ## Data flow (high level)
 
 ```text
-Select Library → scan_library → Library[Track]
+[index load | Library menu Select/Update] → scan_library → Library[Track]
      → user action → transfer_track(s)
      → (optional) FFmpegTranscoder → Transport.send_track
 ```
 
-Details: [transfer-and-modes.md](./transfer-and-modes.md).
+Chrome: **Library** menubar (Select root / Update); full-width **status toolbar** (path + count); left panel is PyMTP device session (or Stable Mode help when that toggle is on). Details: [transfer-and-modes.md](./transfer-and-modes.md). Durable library index (`library_index.db` SQLite: root, paths, tags, per-track GUID) and `config.json` live under the app data dir (`infra/app_paths.py` + `infra/library_index.py` + `infra/app_config.py`). Sends use GUID ObjectFileNames under Music 100. Device inventory is SQLite (`device_index`: seed on connect, update on send/delete); List Tracks joins cached basenames to host track tags (see decisions D11–D13).
 
 Remote object naming for **both** transports is centralized in `infra/remote_naming.py` ([device-contract.md](./device-contract.md)).
 
@@ -112,8 +113,10 @@ Platform defaults: macOS `~/Library/Logs/MtpManager`; Linux `~/.local/share/mtpm
 |-----|----------------------|
 | Hardcoded ZEN Music folder / storage defaults | `remote_naming.DEFAULT_*`; constructors on both transports |
 | Multi-device discovery | Not implemented; user must match device layout |
-| Transfers on Tk main thread | Controllers call `transfer_*` inline → UI freezes during send/hang |
-| Full “Delete All Tracks” | Stub lists storage ids only |
-| Upstream-maintained libmtp Python binding | Stock pymtp patched in-process via `pymtp_wrapper.py` |
+| Transfer send still blocking in worker | Convert/send pipeline + UI job are off the Tk thread; each `send_track` still blocks the transfer worker until the device finishes |
+| Single-object metadata after picker | Listing is backgrounded; live `get_file_metadata` / one-shot `get_track_metadata` (Get Track Info) / one-shot `delete_object` still run on the main thread after the user picks (usually short; can still hitch). List Tracks → **Load tags for selection** batches `get_track_metadata` on a worker |
+| Upstream-maintained libmtp Python binding | Stock pymtp patched in-process via `pymtp_wrapper.py`; hazards [pymtp-binding-hazards.md](./pymtp-binding-hazards.md); coverage [libmtp-api-coverage.md](./libmtp-api-coverage.md) |
+
+**Device admin (experimental, implemented):** **List Files** / **List Tracks** (fast `get_filelisting` + media filter; ids/filenames; optional **Load tags for selection** via per-id `get_track_metadata` — not full-library `get_tracklisting`); single **Delete Track** (file listing picker + `delete_object`); **Delete All Tracks** (same fast list path + confirmed batch `delete_object`, fatal abort); **Get File Info** / **Get Track Info** (picker + `get_file_metadata` / `get_track_metadata`). Full-device listings use `_run_device_bg` so USB walks do not freeze Tk.
 
 These are known limitations, not accidental omissions in the docs. Product follow-ups stay out of this architecture description except as honest gaps.

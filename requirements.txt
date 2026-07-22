@@ -1,3 +1,4 @@
 pymtp
 mutagen
 python-ffmpeg
+Pillow

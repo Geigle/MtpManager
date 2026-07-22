@@ -8,7 +8,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Iterable
 
-from mtpmanager.domain.models import Track
+from mtpmanager.domain.models import Track, TrackMetadata
 
 logger = logging.getLogger(__name__)
 
@@ -44,12 +44,16 @@ def is_music_file(path: str, exclude_formats: Iterable[str] | None = None) -> bo
     return False
 
 
-def _year_from_date(date: str) -> str | None:
+def year_from_date(date: str) -> str | None:
     """Extract a 19xx/20xx year from a date tag, if present."""
     if not date:
         return None
     m = _YEAR_RE.search(str(date).strip())
     return m.group(1) if m else None
+
+
+# Back-compat alias for internal call sites.
+_year_from_date = year_from_date
 
 
 def _albumartist_meaningful(albumartist: str) -> bool:
@@ -58,6 +62,26 @@ def _albumartist_meaningful(albumartist: str) -> bool:
 
 def _artist_meaningful(artist: str) -> bool:
     return bool(artist) and artist != _UNKNOWN_ARTIST
+
+
+def primary_artist_meta(meta: TrackMetadata) -> str:
+    """Artist key for grouping / device folders from track metadata."""
+    aa = (meta.albumartist or "").strip()
+    if _albumartist_meaningful(aa):
+        return aa
+    ar = (meta.artist or "").strip()
+    return ar if ar else _UNKNOWN_ARTIST
+
+
+def primary_artist(track: Track) -> str:
+    """Artist key for library grouping: prefer albumartist, else track artist.
+
+    Keeps a whole CD under one heading when track-level ARTIST tags differ
+    (features, classical performers, “Various Artists” compilations with a
+    real albumartist, etc.). Falls back to the track artist when albumartist
+    is missing or the unknown placeholder.
+    """
+    return primary_artist_meta(track.meta)
 
 
 def _path_has_component(path: str, name: str) -> bool:
@@ -118,19 +142,21 @@ class Library:
         return self.tracks[index]
 
     def filter_by_artist(self, seed: Track) -> list[Track]:
-        """Tracks by the same artist as *seed*.
+        """Tracks by the same library artist as *seed*.
 
-        Primary identity is seed.meta.artist. Includes tracks with a matching
-        artist tag, albums credited to that artist via albumartist, or paths
-        that contain the artist name as a folder component. Logs when a track
-        is included despite a different artist tag (questionable membership).
+        Identity is :func:`primary_artist` (albumartist when set, else track
+        artist). Also includes tracks whose track artist or albumartist tag
+        equals that key, or whose path has that name as a folder component.
+        Logs when a track is included despite a different track-artist tag.
         """
-        artist = seed.meta.artist
+        artist = primary_artist(seed)
         artist_ok = _artist_meaningful(artist)
 
         matches: list[Track] = []
         for t in self.tracks:
             reasons: list[str] = []
+            if primary_artist(t) == artist:
+                reasons.append("same_primary_artist")
             if t.meta.artist == artist:
                 reasons.append("same_artist")
             if artist_ok and t.meta.albumartist == artist:
@@ -141,7 +167,7 @@ class Library:
             if not reasons:
                 continue
 
-            if "same_artist" not in reasons:
+            if "same_artist" not in reasons and "same_primary_artist" not in reasons:
                 logger.debug(
                     "Artist match (questionable): %r by %r — reasons: %s; artist=%r",
                     t.meta.title,

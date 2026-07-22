@@ -35,6 +35,8 @@ class TrackMetadata:
 class Track:
     path: str
     meta: TrackMetadata
+    # Stable host identity (32-char hex). Empty until assigned by scan/index.
+    guid: str = ""
 
 
 @dataclass(frozen=True)
@@ -66,7 +68,74 @@ class DeviceInfo:
         }
 
 
-@dataclass
+@dataclass(frozen=True)
 class FolderEntry:
     folder_id: int
     name: str
+    parent_id: int = 0
+
+
+@dataclass(frozen=True)
+class FileEntry:
+    """One object from device file listing / file metadata (LIBMTP_file_t)."""
+
+    item_id: int
+    name: str
+    parent_id: int = 0
+    storage_id: int = 0
+    filesize: int = 0
+    filetype: int = 0
+    modificationdate: int = 0
+
+
+@dataclass(frozen=True)
+class DeviceTrackInfo:
+    """On-device track metadata from LIBMTP_Get_Trackmetadata (experimental)."""
+
+    item_id: int
+    name: str = ""
+    parent_id: int = 0
+    storage_id: int = 0
+    filesize: int = 0
+    filetype: int = 0
+    modificationdate: int = 0
+    title: str = ""
+    artist: str = ""
+    album: str = ""
+    genre: str = ""
+    composer: str = ""
+    date: str = ""
+    tracknumber: int = 0
+    duration_ms: int = 0
+    sample_rate: int = 0
+    channels: int = 0
+    bitrate: int = 0
+    bitrate_type: int = 0
+    rating: int = 0
+    usecount: int = 0
+
+
+@dataclass(frozen=True)
+class DeviceTrackRef:
+    """One track from device track listing (ids + labels for delete/admin)."""
+
+    item_id: int
+    name: str = ""
+    title: str = ""
+    artist: str = ""
+    parent_id: int = 0
+    storage_id: int = 0
+    filetype: int = 0
+
+
+@dataclass(frozen=True)
+class DeleteAllResult:
+    """Outcome of Device → Delete All Tracks."""
+
+    total: int
+    deleted: int
+    failed_id: int | None = None
+    aborted: bool = False
+    cancelled: bool = False
+    # Object ids successfully removed (in order); for device_index cache.
+    deleted_ids: tuple[int, ...] = ()

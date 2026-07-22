@@ -5,10 +5,17 @@ from __future__ import annotations
 import unittest
 
 from mtpmanager.domain.models import TrackMetadata
+from mtpmanager.domain.track_id import (
+    guid_from_remote_name,
+    is_track_guid,
+    new_track_guid,
+)
 from mtpmanager.infra.remote_naming import (
     DEFAULT_MUSIC_FOLDER_ID,
     DEFAULT_STORAGE_ID,
     MAX_REMOTE_BASENAME,
+    ZEN_VISION_M_FOLDER_IDS,
+    ZEN_VISION_M_FOLDER_NAMES,
     build_remote_path,
     sanitize_component,
     split_remote_path,
@@ -65,6 +72,47 @@ class RemoteNamingTests(unittest.TestCase):
 
     def test_default_storage_id_is_zen_media(self) -> None:
         self.assertEqual(DEFAULT_STORAGE_ID, 0x00010001)
+
+    def test_build_remote_path_guid_form(self) -> None:
+        g = new_track_guid()
+        remote = build_remote_path(_meta(), ".mp3", guid=g)
+        parent, basename = split_remote_path(remote)
+        self.assertEqual(parent, DEFAULT_MUSIC_FOLDER_ID)
+        self.assertEqual(basename, f"{g}.mp3")
+        self.assertLessEqual(len(basename), MAX_REMOTE_BASENAME)
+        self.assertTrue(is_track_guid(guid_from_remote_name(basename) or ""))
+        # Tags must not leak into ObjectFileName
+        self.assertNotIn("Flesh", basename)
+        self.assertNotIn("Gordon", basename)
+
+    def test_guid_from_remote_name(self) -> None:
+        g = new_track_guid()
+        self.assertEqual(guid_from_remote_name(f"{g}.mp3"), g)
+        self.assertEqual(guid_from_remote_name(f"{g.upper()}.MP3"), g)
+        self.assertIsNone(guid_from_remote_name("08 Flesh Metal.mp3"))
+        self.assertIsNone(guid_from_remote_name(""))
+
+    def test_zen_vision_m_folder_map(self) -> None:
+        """Device → List Folders layout on Creative ZEN Vision:M (reference)."""
+        expected = {
+            100: "Music",
+            104: "My Playlists",
+            108: "My Recordings",
+            112: "My Organizer",
+            116: "Pictures",
+            120: "Video",
+            124: "TV",
+            128: "ZENcast",
+            132: "My Slideshows",
+        }
+        self.assertEqual(dict(ZEN_VISION_M_FOLDER_IDS), expected)
+        self.assertEqual(DEFAULT_MUSIC_FOLDER_ID, 100)
+        self.assertEqual(ZEN_VISION_M_FOLDER_IDS[DEFAULT_MUSIC_FOLDER_ID], "Music")
+        self.assertEqual(ZEN_VISION_M_FOLDER_NAMES["music"], 100)
+        self.assertEqual(ZEN_VISION_M_FOLDER_NAMES["zencast"], 128)
+        # Immutable reference map — do not invent nested remote paths.
+        with self.assertRaises(TypeError):
+            ZEN_VISION_M_FOLDER_IDS[100] = "Nope"  # type: ignore[index]
 
 
 if __name__ == "__main__":

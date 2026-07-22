@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import logging
 import os
+from typing import Any
 
 from mutagen.asf import ASF
 from mutagen.easyid3 import EasyID3
 from mutagen.flac import FLAC
 from mutagen.mp3 import MP3
+from mutagen.oggvorbis import OggVorbis
 
 from mtpmanager.domain.library import is_format
 from mtpmanager.domain.models import TrackMetadata
@@ -67,36 +69,68 @@ def _from_id3(path: str) -> TrackMetadata:
     )
 
 
-def _vorbis_get(tag_dict, tag_id: str) -> str:
+def _vorbis_lookup(tag_dict: Any, *keys: str) -> str | None:
+    """Return first non-empty string for any of the keys (case-insensitive)."""
     if tag_dict is None:
-        tag_dict = {}
-    if tag_id in tag_dict:
-        raw = tag_dict[tag_id][0]
-        if tag_id == "TRACKNUMBER" and "/" in raw:
+        return None
+    # Prefer direct membership (mutagen VCommentDict is case-insensitive).
+    for key in keys:
+        try:
+            if key in tag_dict:
+                val = tag_dict[key]
+                raw = val[0] if isinstance(val, (list, tuple)) else val
+                text = str(raw).strip()
+                if text:
+                    return text
+        except (TypeError, KeyError, IndexError):
+            continue
+    # Fallback: normalize keys to lowercase for plain dicts / odd containers.
+    try:
+        items = dict(tag_dict)
+    except Exception:
+        return None
+    lower_map = {str(k).lower(): v for k, v in items.items()}
+    for key in keys:
+        val = lower_map.get(key.lower())
+        if val is None:
+            continue
+        raw = val[0] if isinstance(val, (list, tuple)) else val
+        text = str(raw).strip()
+        if text:
+            return text
+    return None
+
+
+def _vorbis_get(tag_dict: Any, tag_id: str) -> str:
+    """Read a Vorbis comment field (FLAC / Ogg Vorbis). Keys are case-insensitive."""
+    wanted = tag_id.upper()
+    raw = _vorbis_lookup(tag_dict, wanted)
+    if raw is not None:
+        if wanted == "TRACKNUMBER" and "/" in raw:
             raw = raw.split("/")[0]
-        if tag_id == "TRACKNUMBER":
+        if wanted == "TRACKNUMBER":
             return _pad_tracknum(str(raw))
         return str(raw)
 
-    if tag_id in ("TRACKNUMBER", "DISCNUMBER"):
+    if wanted in ("TRACKNUMBER", "DISCNUMBER"):
         return "01"
-    if tag_id in ("ALBUMARTIST", "COMPOSER"):
+    if wanted in ("ALBUMARTIST", "COMPOSER"):
         return _vorbis_get(tag_dict, "ARTIST")
-    if tag_id == "ARTIST":
+    if wanted == "ARTIST":
         return "Unknown Artist"
-    if tag_id == "DATE":
+    if wanted == "DATE":
         return _vorbis_get(tag_dict, "YEAR")
-    if tag_id == "ALBUM":
+    if wanted == "ALBUM":
         return "Unknown Album"
-    if tag_id == "TITLE":
+    if wanted == "TITLE":
         return "Unknown Title"
     return ""
 
 
-def _from_flac(path: str) -> TrackMetadata:
-    trk = FLAC(path)
-    tags = trk.tags
-    info = trk.info
+def _from_vorbis_audio(trk: Any) -> TrackMetadata:
+    """Build TrackMetadata from a mutagen audio object with Vorbis comments."""
+    tags = getattr(trk, "tags", None)
+    info = getattr(trk, "info", None)
     return TrackMetadata(
         artist=_vorbis_get(tags, "ARTIST"),
         albumartist=_vorbis_get(tags, "ALBUMARTIST"),
@@ -114,22 +148,88 @@ def _from_flac(path: str) -> TrackMetadata:
     )
 
 
-def _asf_get(tag_dict: dict, tag_id: str) -> str:
-    """Read ASF tags; keys may be mixed-case depending on mutagen version."""
-    # Try common key variants
-    candidates = [tag_id, tag_id.upper(), tag_id.lower(), tag_id.capitalize()]
-    for key in candidates:
-        if key in tag_dict:
-            val = tag_dict[key]
-            raw = val[0] if isinstance(val, (list, tuple)) else val
-            raw = str(raw)
-            if tag_id.lower() in ("tracknumber", "track") and "/" in raw:
-                raw = raw.split("/")[0]
-            if tag_id.lower() in ("tracknumber", "track"):
-                return _pad_tracknum(raw)
-            return raw
+def _from_flac(path: str) -> TrackMetadata:
+    return _from_vorbis_audio(FLAC(path))
 
+
+def _from_ogg(path: str) -> TrackMetadata:
+    """Ogg Vorbis (.ogg / .vorbis) — same comment schema as FLAC, different container."""
+    return _from_vorbis_audio(OggVorbis(path))
+
+
+# Windows Media / ASF content descriptors (WMA). Mutagen exposes the standard
+# names (Title, Author, WM/…) — not the generic EasyID3-style keys.
+_ASF_KEY_ALIASES: dict[str, tuple[str, ...]] = {
+    "title": ("Title", "WM/Title", "title", "TITLE"),
+    # Performer is almost always "Author" on WMA, not "Artist".
+    "artist": ("Author", "WM/AlbumArtist", "Artist", "artist", "ARTIST"),
+    "albumartist": ("WM/AlbumArtist", "Author", "AlbumArtist", "albumartist"),
+    "album": ("WM/AlbumTitle", "Album", "album", "ALBUM"),
+    "genre": ("WM/Genre", "Genre", "genre", "GENRE"),
+    "composer": ("WM/Composer", "Composer", "composer"),
+    "tracknumber": (
+        "WM/TrackNumber",
+        "WM/Track",
+        "TrackNumber",
+        "Track",
+        "tracknumber",
+    ),
+    "date": ("WM/Year", "Year", "date", "DATE", "WM/OriginalReleaseTime"),
+    "year": ("WM/Year", "Year", "year"),
+    "discnumber": ("WM/PartOfSet", "WM/DiscNumber", "discnumber"),
+}
+
+
+def _asf_value_text(val: Any) -> str:
+    """Normalize mutagen ASF attribute / plain value to a stripped string."""
+    if val is None:
+        return ""
+    if isinstance(val, (list, tuple)):
+        if not val:
+            return ""
+        val = val[0]
+    if hasattr(val, "value"):
+        val = val.value
+    return str(val).strip()
+
+
+def _asf_lookup(tag_dict: dict | None, *keys: str) -> str | None:
+    if not tag_dict:
+        return None
+    # Exact keys first (as_dict uses canonical WM names).
+    for key in keys:
+        if key in tag_dict:
+            text = _asf_value_text(tag_dict[key])
+            if text:
+                return text
+    # Case-insensitive fallback for odd taggers / plain mocks.
+    lower_map = {str(k).lower(): v for k, v in tag_dict.items()}
+    for key in keys:
+        if key.lower() in lower_map:
+            text = _asf_value_text(lower_map[key.lower()])
+            if text:
+                return text
+    return None
+
+
+def _asf_get(tag_dict: dict | None, tag_id: str) -> str:
+    """Read ASF/WMA tags using Windows Media key names and common aliases."""
     lower = tag_id.lower()
+    aliases = _ASF_KEY_ALIASES.get(lower, (tag_id, tag_id.capitalize(), tag_id.upper()))
+    raw = _asf_lookup(tag_dict, *aliases)
+
+    if raw is not None:
+        if lower in ("tracknumber", "track", "discnumber"):
+            if "/" in raw:
+                raw = raw.split("/")[0]
+            # Some writers store zero-based WM/Track; TrackNumber is preferred
+            # via alias order. Pad digits only when purely numeric.
+            digits = raw.strip()
+            if digits.isdigit():
+                return _pad_tracknum(digits)
+            return raw
+        return raw
+
     if lower in ("tracknumber", "discnumber", "track"):
         return "01"
     if lower in ("albumartist", "composer"):
@@ -146,6 +246,7 @@ def _asf_get(tag_dict: dict, tag_id: str) -> str:
 
 
 def _from_asf(path: str) -> TrackMetadata:
+    """WMA / ASF — tags use Title/Author/WM/* content descriptors."""
     trk = ASF(path)
     tags = trk.tags.as_dict() if trk.tags is not None else {}
     info = trk.info
@@ -176,15 +277,21 @@ def read_metadata(path: str) -> TrackMetadata:
             return _from_id3(path)
         if is_format(path, "flac"):
             return _from_flac(path)
+        if is_format(path, "ogg") or is_format(path, "vorbis"):
+            return _from_ogg(path)
         if is_format(path, "wma"):
             return _from_asf(path)
-        # Try ID3 for aac/etc., then FLAC, then defaults
+        # Try known containers for aac/wav/etc., then basename defaults
         try:
             return _from_id3(path)
         except Exception:
             pass
         try:
             return _from_flac(path)
+        except Exception:
+            pass
+        try:
+            return _from_ogg(path)
         except Exception:
             pass
         try:

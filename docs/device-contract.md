@@ -5,7 +5,8 @@
 **Code:** `mtpmanager/infra/remote_naming.py`  
 **Consumers:** `cmd_transport.py`, `pymtp_device.py`  
 **Tests:** `tests/test_remote_naming.py`  
-**How we learned:** [debrief-zen-track-send-failure.md](./debrief-zen-track-send-failure.md), [debrief-pymtp-transfer-failure.md](./debrief-pymtp-transfer-failure.md)
+**How we learned:** [debrief-zen-track-send-failure.md](./debrief-zen-track-send-failure.md), [debrief-pymtp-transfer-failure.md](./debrief-pymtp-transfer-failure.md)  
+**Basename length evidence:** [basename-limit-evidence.md](./basename-limit-evidence.md)
 
 ---
 
@@ -15,11 +16,29 @@ Defaults are **Creative ZEN Vision:M–centric** (VID `041e`, PID `413e`). They 
 
 | Constant | Value | Source |
 |----------|--------|--------|
-| `DEFAULT_MUSIC_FOLDER_ID` | **100** | `mtp-folders`: folder 100 == `"Music"` |
+| `DEFAULT_MUSIC_FOLDER_ID` | **100** | List Folders / `mtp-folders`: folder 100 == `"Music"` |
 | `DEFAULT_STORAGE_ID` | **`0x00010001`** (65537) | `mtp-detect`: Storage Media |
-| `MAX_REMOTE_BASENAME` | **56** | Stay well under ~64-char object-name limits |
+| `MAX_REMOTE_BASENAME` | **56** | Empirical send hygiene (margin under a suspected ~64 boundary from a ZEN finalize incident) — **not** a proven hard device max; see [basename-limit-evidence.md](./basename-limit-evidence.md) |
 
 These are hardcoded in `remote_naming` and constructor defaults on `CmdTransport` / `PymtpDevice`. **Auto-discovery of folder/storage IDs is future work**, not present today.
+
+### ZEN Vision:M top-level folder IDs (`ZEN_VISION_M_FOLDER_IDS`)
+
+Captured via **Device → List Folders** on a real Creative ZEN Vision:M (same layout as `mtp-folders`). Code: `mtpmanager/infra/remote_naming.py`.
+
+| ID | Name | Notes |
+|----|------|--------|
+| **100** | Music | **Track send parent** (`DEFAULT_MUSIC_FOLDER_ID`) |
+| 104 | My Playlists | |
+| 108 | My Recordings | |
+| 112 | My Organizer | |
+| 116 | Pictures | |
+| 120 | Video | |
+| 124 | TV | |
+| 128 | ZENcast | Podcasts |
+| 132 | My Slideshows | |
+
+Use **numeric IDs**, never string paths like `Music/...`.
 
 ---
 
@@ -28,18 +47,19 @@ These are hardcoded in `remote_naming` and constructor defaults on `CmdTransport
 ### Correct
 
 ```text
-100/<short>.mp3
+100/<32-hex-guid>.mp3
 ```
 
 Examples:
 
 ```text
-100/08 Flesh Metal.mp3
-100/01 Outlines.mp3
+100/a1b2c3d4e5f6789012345678abcdef01.mp3
+100/9f86d081884c7d659a2feaa0c55ad015.wma
 ```
 
 - **Parent** is a **numeric folder id** (Music = 100), not the string `Music`.
-- **Basename** is short, sanitized, and includes the real extension (`.mp3`, `.wma`, …).
+- **Basename** is the host track GUID (32 hex) plus the real extension (`.mp3`, `.wma`, …).
+- Full title/artist/album go in **tags**, not the ObjectFileName.
 
 ### Incorrect (do not invent)
 
@@ -78,21 +98,38 @@ CMD always passes `-s <storage_id>`. PyMTP sets `mt.storage_id` and refreshes st
 
 ## Basename rules
 
-Implemented by `sanitize_component` / `build_remote_path`:
+Implemented by `sanitize_component` / `build_remote_path` (and `domain/track_id` for GUIDs).
 
-1. **Max body ~56** (`MAX_REMOTE_BASENAME`), including extension budget: body room is `max_basename - len(ext)`, minimum body length 8.
+### Production (GUID mode)
+
+When a host track GUID is available (normal send path):
+
+1. **Shape:** `100/{32-hex-guid}{ext}` — e.g. `100/a1b2c3d4e5f6789012345678abcdef01.mp3`.
+2. **Parent:** always Music folder **100** (flat; ignore artist/album folder prefs).
+3. **GUID:** lowercase UUID4 hex without hyphens (32 chars). Safe charset; length well under `MAX_REMOTE_BASENAME` (56).
+4. **Extension required** on the object name (e.g. `.mp3`).
+5. **Inventory key:** any file under Music whose basename **stem** is that GUID counts as “already on device” (extension may differ after transcode).
+
+Host SQLite maps GUID → path + tags. Device List Tracks uses `list_files` + join; bulk device track tags are not required for display.
+
+### Legacy fallback (no GUID)
+
+If `guid` is omitted (tests / rare paths), the older short title form applies:
+
+1. **Max body ~56** (`MAX_REMOTE_BASENAME`), including extension budget. Details: [basename-limit-evidence.md](./basename-limit-evidence.md).
 2. **Strip unsafe characters** (replaced with space, then collapsed whitespace):
 
    ```text
    / \ : * ? " < > | &  and control chars (\x00-\x1f)
    ```
 
-3. **Extension required** on the object name (e.g. `.mp3`).
-4. Prefer compact form: `{trackno} {title}{ext}` (e.g. `08 Flesh Metal.mp3`).
-5. If the candidate is still tiny (&lt; 4 chars after sanitize), fall back to `{trackno} {artist} {title}`.
-6. Empty components become `"unknown"`.
+3. Prefer compact form: `{trackno} {title}{ext}` (e.g. `08 Flesh Metal.mp3`).
+4. If the candidate is still tiny (&lt; 4 chars after sanitize), fall back to `{trackno} {artist} {title}`.
+5. Empty components become `"unknown"`.
 
-**Tags** may still contain `&`, long titles, full album names, etc. Only the **on-wire object filename** is sanitized.
+**Tags** may still contain `&`, long titles, full album names, etc. Only the **on-wire object filename** is a GUID (or sanitized short title).
+
+Do **not** invent nested string paths like `Music/Artist/Album/...`.
 
 ---
 
@@ -100,7 +137,7 @@ Implemented by `sanitize_component` / `build_remote_path`:
 
 | Channel | Content |
 |---------|---------|
-| Remote **filename** | Short, safe, under length limit |
+| Remote **filename** | GUID + extension (production), short/safe under length limit |
 | **Tags** / metadata flags | Full title, artist, album, genre, track number, year |
 
 CMD (`mtp-sendtr`): `-t`/`-a`/`-l`/… carry full metadata; remote path is only parent + basename.
@@ -129,14 +166,15 @@ from mtpmanager.infra.remote_naming import (
     DEFAULT_MUSIC_FOLDER_ID,  # 100
     DEFAULT_STORAGE_ID,       # 0x00010001
     MAX_REMOTE_BASENAME,      # 56
-    build_remote_path,        # meta + ext → "100/08 Title.mp3"
-    split_remote_path,        # "100/08 Title.mp3" → (100, "08 Title.mp3")
+    build_remote_path,        # meta + ext [+ guid] → "100/<guid>.mp3"
+    split_remote_path,        # "100/<name>.mp3" → (100, basename)
     sanitize_component,
     year_arg,
 )
+from mtpmanager.domain.track_id import new_track_guid, guid_from_remote_name
 ```
 
-- **CMD:** `build_remote_path` → last argv to `mtp-sendtr`; storage via `-s`.
+- **CMD:** `build_remote_path(..., guid=)` → last argv to `mtp-sendtr`; storage via `-s`.
 - **PyMTP:** `build_remote_path` + `split_remote_path` → `parent_id` + basename; storage on `LIBMTP_Track`.
 
 Any new transport **must** use this module (or equivalent constants) rather than inventing `Music/Artist/Album/...` paths.
@@ -151,7 +189,7 @@ When a send fails near the end or rejects immediately:
 2. **Storage ID** in logs/CMD output — `0` is a red flag; expect `65537` / `0x00010001`.
 3. **`mtp-detect`** — confirm Storage Media id and free space (post-death “full” is often a lie).
 4. **`mtp-folders`** — confirm Music folder id (100 on this ZEN).
-5. **Remote basename** — length well under 64; no `& \ / : * ? " < > |`; extension present.
+5. **Remote basename** — within `MAX_REMOTE_BASENAME` (56) send budget; no `& \ / : * ? " < > |`; extension present. Longer names may already exist on-device from other tools; that does not relax our send policy ([basename-limit-evidence.md](./basename-limit-evidence.md)).
 6. **Cascade after unplug** — PTP `02ff`, “storage full or corrupt” often means **session dead**, not root cause.
 7. **App abort** — one fatal `TransportError` should stop the batch; if not, transfer error handling regressed.
 8. **Experimental only** — `filetype=2` for MP3 (not 1); libmtp errorstack in logs, not bare `CommandFailed`.
