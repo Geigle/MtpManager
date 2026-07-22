@@ -28,6 +28,7 @@ What libmtp/pymtp/MtpManager implement vs leave unbound:
 from __future__ import annotations
 
 import ctypes
+import logging
 import ctypes.util
 import os
 import sys
@@ -425,18 +426,43 @@ _ProgressFunc = ctypes.CFUNCTYPE(
 )
 
 
+def _next_node_ptr(node, *, ptr_type=None):
+    """Capture linked-list ``next`` as a stable POINTER before free.
+
+    Reading ``node.next`` after destroy is undefined. Some ctypes layouts also
+    need an explicit cast through ``c_void_p`` so a non-NULL next is not lost.
+    """
+    nxt = getattr(node, "next", None)
+    if not nxt:
+        return None
+    try:
+        addr = ctypes.cast(nxt, ctypes.c_void_p).value
+    except (TypeError, ValueError, ctypes.ArgumentError):
+        return nxt if _ptr_truthy(nxt) else None
+    if addr in (None, 0):
+        return None
+    if ptr_type is None:
+        return nxt
+    try:
+        return ctypes.cast(addr, ptr_type)
+    except (TypeError, ValueError, ctypes.ArgumentError):
+        return nxt
+
+
 def _get_tracklisting(self, callback=None):
     """Return track snapshots (Python 3 / NULL-safe); free each C track node.
 
     Stock walks the linked list without a NULL-safe head check, leaves C
     strings allocated, and uses an untyped progress callback. We snapshot
-    fields into Python and ``LIBMTP_destroy_track_t`` each node before
-    following ``next`` (libmtp docs: destroy one node at a time — does not
-    free the rest of the chain).
+    fields into Python and ``LIBMTP_destroy_track_t`` each node after saving
+    the *next* pointer address (libmtp: destroy one node at a time).
+
+    Note: on Creative ZEN Vision:M, bulk Get_Tracklisting is often
+    **incomplete** (e.g. one demo track). Product List Tracks uses
+    filelisting + per-id Get_Trackmetadata (mtp-tracks algorithm) instead.
 
     *callback*, if given, is ``callback(sent, total)`` where *sent*/*total*
     are object-handle indices from libmtp (not yet the final track count).
-    The expensive work is inside this C call (per-track metadata GETs).
     """
     if self.device is None:
         raise NotConnected
@@ -465,8 +491,10 @@ def _get_tracklisting(self, callback=None):
         return []
 
     destroy = getattr(self.mtp, "LIBMTP_destroy_track_t", None)
+    track_p = type(head)
     ret: list = []
     cur = head
+    walked = 0
     while _ptr_truthy(cur):
         try:
             node = cur.contents
@@ -474,7 +502,9 @@ def _get_tracklisting(self, callback=None):
             break
         snap = _snapshot_track(node)
         ret.append(snap)
-        nxt = getattr(node, "next", None)
+        walked += 1
+        # MUST capture next address before destroy frees this node.
+        nxt = _next_node_ptr(node, ptr_type=track_p)
         if destroy is not None:
             try:
                 destroy(cur)
@@ -484,6 +514,8 @@ def _get_tracklisting(self, callback=None):
             break
         cur = nxt
 
+    _log = logging.getLogger(__name__)
+    _log.info("get_tracklisting walk complete count=%s", walked)
     return ret
 
 

@@ -49,8 +49,8 @@ class DevicePort(Protocol):
     ) -> list[DeviceTrackRef]:
         """Device track listing (music/video; experimental).
 
-        Default product path: bulk ``LIBMTP_Get_Tracklisting*`` (may be very
-        slow on large libraries). Optional *on_progress(done, total, message)*.
+        Default product path: filelisting + per-id track metadata (mtp-tracks
+        algorithm). Optional *on_progress(done, total, message)*.
         """
         ...
 

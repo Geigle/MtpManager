@@ -85,9 +85,8 @@ def list_tracks(
 ) -> list[DeviceTrackRef]:
     """Experimental track listing (List Tracks / Delete All Tracks).
 
-    Default: bulk Get_Tracklisting (tags when the device provides them;
-    can be multi-hour on large ZEN libraries). *on_progress(done, total,
-    message)* is optional.
+    Default (mtp-tracks style): filelisting + per-id Get_Trackmetadata.
+    *on_progress(done, total, message)* is optional.
     """
     if on_progress is None:
         return device.list_tracks()

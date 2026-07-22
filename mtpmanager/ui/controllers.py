@@ -2558,11 +2558,11 @@ class AppController:
         )
 
     def action_read_track_list(self) -> None:
-        """Experimental Device → List Tracks (live Get_Tracklisting; may be slow)."""
+        """Experimental Device → List Tracks (filelisting + Get_Trackmetadata)."""
 
         def on_success(tracks) -> None:
             logger.info(
-                "List Tracks (live tracklisting): %d track(s)",
+                "List Tracks (mtp-tracks style): %d track(s)",
                 len(tracks),
             )
             for entry in tracks[:50]:
@@ -2687,7 +2687,8 @@ class AppController:
             work=work,
             on_success=on_success,
             busy_message=(
-                "listing device tracks (Get_Tracklisting — may take a long time)…"
+                "listing files + loading track tags "
+                "(mtp-tracks style; scales with track count)…"
             ),
             progress_mode="determinate",
         )
@@ -2889,8 +2890,8 @@ class AppController:
             work=list_work,
             on_success=on_listed,
             busy_message=(
-                "listing device tracks before delete "
-                "(Get_Tracklisting — may take a long time)…"
+                "listing tracks before delete "
+                "(filelisting + tags; may take a while)…"
             ),
             progress_mode="determinate",
         )

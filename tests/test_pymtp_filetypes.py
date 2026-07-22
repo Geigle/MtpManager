@@ -131,7 +131,7 @@ class PymtpDeleteObjectTests(unittest.TestCase):
 
 
 class PymtpTrackListingTests(unittest.TestCase):
-    """Patched get_tracklisting is the experimental List Tracks bulk path."""
+    """Patched get_tracklisting (diagnostic); product List Tracks uses file+meta."""
 
     def test_get_tracklisting_is_patched(self) -> None:
         self.assertIs(pymtp.MTP.get_tracklisting, pymtp._get_tracklisting)
@@ -143,6 +143,16 @@ class PymtpTrackListingTests(unittest.TestCase):
         self.assertIn("_ptr_truthy", src)
         self.assertIn("_ProgressFunc", src)
         self.assertIn("callback", src)
+        # Linked-list next must be captured before destroy.
+        self.assertIn("_next_node_ptr", src)
+
+    def test_next_node_ptr_null_safe(self) -> None:
+        from types import SimpleNamespace
+
+        from mtpmanager.infra import pymtp_wrapper as wrap
+
+        self.assertIsNone(wrap._next_node_ptr(SimpleNamespace(next=None)))
+        self.assertIsNone(wrap._next_node_ptr(SimpleNamespace()))
 
     def test_get_tracklisting_requires_connection(self) -> None:
         mtp = pymtp.MTP()

@@ -9,7 +9,7 @@ import time
 from collections.abc import Callable
 
 import mtpmanager.infra.pymtp_wrapper as pymtp
-from mtpmanager.domain.device_media import track_refs_from_files
+from mtpmanager.domain.device_media import apply_track_info, track_refs_from_files
 from mtpmanager.domain.models import (
     DeviceInfo,
     DeviceTrackInfo,
@@ -530,39 +530,180 @@ class PymtpDevice:
     def list_tracks(
         self,
         on_progress: Callable[[int, int, str], None] | None = None,
+        *,
+        load_tags: bool = True,
+        stop_on_fatal: bool = True,
     ) -> list[DeviceTrackRef]:
-        """Experimental: full track listing via ``LIBMTP_Get_Tracklisting*``.
+        """Experimental track list — **mtp-tracks algorithm**.
 
-        Uses patched ``get_tracklisting`` (per-track metadata GETs inside
-        libmtp). Can be **very slow** on large libraries (hours on ZEN with
-        thousands of tracks); progress is best-effort from libmtp's object
-        counters. Prefer a smaller device when soaking this path.
+        1. ``get_filelisting`` (complete, fast on ZEN)
+        2. Media filter (audio/video-ish)
+        3. Per-id ``get_track_metadata`` for tags (same as CLI ``mtp-tracks``
+           which uses Get_Files_And_Folders + Get_Trackmetadata — **not**
+           bulk Get_Tracklisting, which is incomplete on this device)
 
-        Fast alternative (filelisting + media filter only) remains available
-        as :meth:`list_tracks_from_files` for diagnostics / skip tooling.
-
+        *load_tags*: when False, return id/filename rows only (fast filter).
+        *stop_on_fatal*: abort remaining tag fetches on fatal TransportError.
         Never touch Tk here.
         """
         if on_progress is not None:
             try:
-                on_progress(0, 0, "listing tracks (Get_Tracklisting)…")
+                on_progress(0, 0, "listing device files…")
             except Exception:
                 logger.debug("list_tracks progress callback failed", exc_info=True)
+
+        logger.info(
+            "list_tracks (mtp-tracks style: filelisting + Get_Trackmetadata)"
+        )
+        t0 = time.monotonic()
+        files = self.list_files()
+        refs = track_refs_from_files(files)
+        total = len(refs)
+        logger.info(
+            "list_tracks candidates=%s of %s files (tags=%s)",
+            total,
+            len(files),
+            load_tags,
+        )
+
+        if not load_tags or total == 0:
+            if on_progress is not None:
+                try:
+                    on_progress(
+                        total,
+                        total or 1,
+                        f"found {total} track(s)",
+                    )
+                except Exception:
+                    logger.debug(
+                        "list_tracks progress callback failed", exc_info=True
+                    )
+            return refs
+
+        out: list[DeviceTrackRef] = []
+        updated = 0
+        failed = 0
+        for i, ref in enumerate(refs):
+            oid = int(ref.item_id or 0)
+            label = (ref.name or "").strip() or f"id={oid}"
+            if on_progress is not None:
+                try:
+                    on_progress(
+                        i,
+                        total,
+                        f"track tags {i + 1}/{total}  {label}",
+                    )
+                except Exception:
+                    logger.debug(
+                        "list_tracks progress callback failed", exc_info=True
+                    )
+            if oid <= 0:
+                out.append(ref)
+                failed += 1
+                continue
+            try:
+                info = self.get_track_metadata(oid)
+            except TransportError as exc:
+                logger.warning(
+                    "list_tracks tag miss id=%s fatal=%s: %s",
+                    oid,
+                    exc.fatal,
+                    exc,
+                )
+                out.append(ref)
+                failed += 1
+                if stop_on_fatal and exc.fatal:
+                    # Keep remaining as filename-only.
+                    out.extend(refs[i + 1 :])
+                    logger.error(
+                        "list_tracks aborted after fatal tag error id=%s "
+                        "got=%s remaining=%s",
+                        oid,
+                        len(out),
+                        total - len(out),
+                    )
+                    break
+                continue
+            except Exception:
+                logger.exception("list_tracks unexpected tag error id=%s", oid)
+                out.append(ref)
+                failed += 1
+                continue
+            out.append(apply_track_info(ref, info))
+            updated += 1
+
+        out.sort(
+            key=lambda e: (
+                (e.artist or "").casefold(),
+                (e.title or "").casefold(),
+                (e.name or "").casefold(),
+                e.item_id,
+            )
+        )
+        elapsed = time.monotonic() - t0
+        logger.info(
+            "list_tracks ok count=%s tagged=%s failed=%s elapsed=%.1fs",
+            len(out),
+            updated,
+            failed,
+            elapsed,
+        )
+        if elapsed >= 15.0:
+            logger.warning(
+                "list_tracks was slow (%.1fs). Auto-connect probes are paused "
+                "briefly afterward so a recovering session is not torn down.",
+                elapsed,
+            )
+        if on_progress is not None:
+            try:
+                on_progress(
+                    len(out),
+                    len(out) or 1,
+                    f"found {len(out)} track(s) ({updated} tagged)",
+                )
+            except Exception:
+                logger.debug("list_tracks progress callback failed", exc_info=True)
+        return out
+
+    def list_tracks_from_files(
+        self,
+        on_progress: Callable[[int, int, str], None] | None = None,
+    ) -> list[DeviceTrackRef]:
+        """Fast track-ish listing: filelisting + media filter (ids/filenames only)."""
+        return self.list_tracks(on_progress=on_progress, load_tags=False)
+
+    def list_tracks_via_tracklisting(
+        self,
+        on_progress: Callable[[int, int, str], None] | None = None,
+    ) -> list[DeviceTrackRef]:
+        """Diagnostic: bulk ``LIBMTP_Get_Tracklisting*`` (often incomplete on ZEN)."""
+        if on_progress is not None:
+            try:
+                on_progress(0, 0, "listing tracks (Get_Tracklisting)…")
+            except Exception:
+                logger.debug(
+                    "list_tracks_via_tracklisting progress failed",
+                    exc_info=True,
+                )
 
         def _cb(sent: int, total: int) -> None:
             if on_progress is None:
                 return
             try:
-                # libmtp reports handle indices, not always final track count.
                 on_progress(
                     int(sent),
                     max(int(total), int(sent), 1),
                     f"track listing {int(sent)}/{int(total) or '?'}…",
                 )
             except Exception:
-                logger.debug("list_tracks progress callback failed", exc_info=True)
+                logger.debug(
+                    "list_tracks_via_tracklisting progress failed",
+                    exc_info=True,
+                )
 
-        logger.info("list_tracks (via get_tracklisting / LIBMTP_Get_Tracklisting*)")
+        logger.info(
+            "list_tracks_via_tracklisting (Get_Tracklisting* — diagnostic)"
+        )
         t0 = time.monotonic()
         try:
             raw = self._mtp.get_tracklisting(callback=_cb)
@@ -615,54 +756,8 @@ class PymtpDevice:
         )
         elapsed = time.monotonic() - t0
         logger.info(
-            "list_tracks ok count=%s elapsed=%.1fs (tracklisting)",
+            "list_tracks_via_tracklisting ok count=%s elapsed=%.1fs",
             len(result),
-            elapsed,
-        )
-        if elapsed >= 15.0:
-            logger.warning(
-                "list_tracks was slow (%.1fs). Auto-connect probes are paused "
-                "briefly afterward so a recovering session is not torn down.",
-                elapsed,
-            )
-        if on_progress is not None:
-            try:
-                on_progress(
-                    len(result),
-                    len(result) or 1,
-                    f"found {len(result)} track(s)",
-                )
-            except Exception:
-                logger.debug("list_tracks progress callback failed", exc_info=True)
-        return result
-
-    def list_tracks_from_files(
-        self,
-        on_progress: Callable[[int, int, str], None] | None = None,
-    ) -> list[DeviceTrackRef]:
-        """Fast track-ish listing: filelisting + media filter (ids/filenames).
-
-        No bulk track tags. Kept for diagnostics and tooling that must not
-        wait on Get_Tracklisting.
-        """
-        if on_progress is not None:
-            try:
-                on_progress(0, 0, "listing device files (track filter)…")
-            except Exception:
-                logger.debug(
-                    "list_tracks_from_files progress callback failed",
-                    exc_info=True,
-                )
-
-        logger.info("list_tracks_from_files (get_filelisting + media filter)")
-        t0 = time.monotonic()
-        files = self.list_files()
-        result = track_refs_from_files(files)
-        elapsed = time.monotonic() - t0
-        logger.info(
-            "list_tracks_from_files ok count=%s of %s files elapsed=%.1fs",
-            len(result),
-            len(files),
             elapsed,
         )
         if on_progress is not None:
@@ -674,7 +769,7 @@ class PymtpDevice:
                 )
             except Exception:
                 logger.debug(
-                    "list_tracks_from_files progress callback failed",
+                    "list_tracks_via_tracklisting progress failed",
                     exc_info=True,
                 )
         return result

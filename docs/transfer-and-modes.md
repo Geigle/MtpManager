@@ -50,7 +50,7 @@ End-to-end send path, Stable vs Experimental behavior, and where to change thing
 - **Send names:** ObjectFileName is `{guid}{ext}` under Music folder 100; full tags still go on the wire. Multi-track sync **skips** tracks whose GUID stem is in the durable device index (SQLite) — **not** a live `list_files` per job.
 - **Device index (skip only):** one `list_files` seed after Experimental connect (or **Refresh Device Index…**); successful send/delete update the cache. Used for **skip-if-present**, not as the sole browse UI.
 - **Experimental List Files / pickers:** **live** `get_filelisting` (may also refresh the durable index).
-- **Experimental List Tracks / Delete All list:** **live** bulk `LIBMTP_Get_Tracklisting*` (can be multi-hour on large ZEN libraries; progress is best-effort). Soft-fills empty titles from host GUID library when known.
+- **Experimental List Tracks / Delete All list:** **live** filelisting + per-id `Get_Trackmetadata` (same algorithm as CLI `mtp-tracks`; complete on ZEN). Soft-fills empty titles from host GUID library when known. Bulk `Get_Tracklisting*` is diagnostic-only (`list_tracks_via_tracklisting`) — often returns only a few tracks on this device.
 - **Non-blocking:** scan and index restore run on a daemon thread (`TkBackgroundRunner`). The previous library stays until the job finishes; a newer job discards stale results. Listbox population is chunked so large libraries do not freeze the event loop.
 - While busy, Library menu actions are disabled and the toolbar count shows `Loading index…` / `Scanning…`.
 - Transfers that need the library refuse to run while busy or while the root is unreachable.
