@@ -216,6 +216,28 @@ def _configure_libmtp_ctypes() -> None:
         lib.LIBMTP_destroy_track_t.argtypes = [track_p]
         lib.LIBMTP_destroy_track_t.restype = None
 
+    # int Get_File_To_File(dev, uint32_t id, char *path, progress_cb, data)
+    if hasattr(lib, "LIBMTP_Get_File_To_File"):
+        lib.LIBMTP_Get_File_To_File.argtypes = [
+            dev_p,
+            ctypes.c_uint32,
+            ctypes.c_char_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+        ]
+        lib.LIBMTP_Get_File_To_File.restype = ctypes.c_int
+
+    # int Get_Track_To_File(dev, uint32_t id, char *path, progress_cb, data)
+    if hasattr(lib, "LIBMTP_Get_Track_To_File"):
+        lib.LIBMTP_Get_Track_To_File.argtypes = [
+            dev_p,
+            ctypes.c_uint32,
+            ctypes.c_char_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+        ]
+        lib.LIBMTP_Get_Track_To_File.restype = ctypes.c_int
+
 
 _configure_libmtp_ctypes()
 
@@ -696,6 +718,61 @@ def _get_track_metadata(self, track_id):
                 pass
 
 
+def _get_object_to_file(self, lib_fn_name: str, object_id: int, target, callback=None):
+    """Shared download path for Get_File_To_File / Get_Track_To_File.
+
+    Stock pymtp passes a Python ``str`` path without argtypes — on arm64/Py3
+    that can truncate to the first character. We encode a full UTF-8 buffer
+    and type the C call.
+    """
+    if self.device is None:
+        raise NotConnected
+
+    dev = _device_ptr(self.device)
+    if not dev:
+        raise NotConnected
+
+    path_b = _as_c_char_p(target)
+    if not path_b:
+        raise ValueError("Download target path must be non-empty")
+    path_buf = ctypes.create_string_buffer(path_b)
+
+    c_progress = None
+    if callback is not None:
+
+        def _c_progress(sent, total, _data):
+            try:
+                callback(int(sent), int(total))
+            except Exception:
+                pass
+            return 0
+
+        c_progress = _ProgressFunc(_c_progress)
+
+    fn = getattr(self.mtp, lib_fn_name)
+    ret = fn(
+        dev,
+        ctypes.c_uint32(int(object_id)),
+        path_buf,
+        c_progress,
+        None,
+    )
+    _ = c_progress
+    if int(ret) != 0:
+        _debug_stack(self)
+        raise CommandFailed
+
+
+def _get_file_to_file(self, file_id, target, callback=None):
+    """Download any object by id to *target* (typed path + progress)."""
+    _get_object_to_file(self, "LIBMTP_Get_File_To_File", file_id, target, callback)
+
+
+def _get_track_to_file(self, track_id, target, callback=None):
+    """Download a track object by id to *target* (typed path + progress)."""
+    _get_object_to_file(self, "LIBMTP_Get_Track_To_File", track_id, target, callback)
+
+
 # Monkey-patch stock methods so all callers get the fixed behavior.
 _MTP.debug_stack = _debug_stack
 _MTP.send_track_from_file = _send_track_from_file
@@ -708,3 +785,5 @@ _MTP.set_devicename = _set_devicename
 _MTP.delete_object = _delete_object
 _MTP.get_file_metadata = _get_file_metadata
 _MTP.get_track_metadata = _get_track_metadata
+_MTP.get_file_to_file = _get_file_to_file
+_MTP.get_track_to_file = _get_track_to_file

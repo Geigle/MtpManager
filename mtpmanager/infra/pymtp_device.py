@@ -518,6 +518,135 @@ class PymtpDevice:
         )
         return info
 
+    def get_file_to_file(
+        self,
+        object_id: int,
+        dest_path: str,
+        *,
+        on_progress: Callable[[int, int], None] | None = None,
+    ) -> None:
+        """Download any object by id to *dest_path* (experimental)."""
+        oid = int(object_id)
+        if oid <= 0:
+            raise ValueError(f"Invalid object id: {object_id}")
+        dest = str(dest_path or "").strip()
+        if not dest:
+            raise ValueError("Destination path required")
+        logger.info("get_file_to_file id=%s dest=%s", oid, dest)
+
+        def _cb(sent: int, total: int) -> None:
+            if on_progress is None:
+                return
+            try:
+                on_progress(int(sent), int(total))
+            except Exception:
+                logger.debug("get_file_to_file progress failed", exc_info=True)
+
+        try:
+            self._mtp.get_file_to_file(
+                oid, dest, callback=_cb if on_progress else None
+            )
+        except pymtp.NotConnected as exc:
+            raise TransportError(
+                "PyMTP download failed: device not connected. "
+                "Use Device → Connect first.",
+                fatal=True,
+                path=dest,
+            ) from exc
+        except OSError as exc:
+            raise TransportError(
+                f"PyMTP download failed: {exc}. Dest: {dest}",
+                fatal=True,
+                path=dest,
+            ) from exc
+        except pymtp.CommandFailed as exc:
+            try:
+                self._mtp.debug_stack()
+            except Exception:
+                logger.debug("Could not dump libmtp error stack", exc_info=True)
+            stack_text = _collect_errorstack(self._mtp)
+            detail = str(exc).strip() or "CommandFailed"
+            logger.error(
+                "PyMTP get_file_to_file failed id=%s dest=%s detail=%s\n%s",
+                oid,
+                dest,
+                detail,
+                stack_text or "(no libmtp errorstack text)",
+            )
+            msg = (
+                f"PyMTP download failed ({detail}) for object id={oid}. "
+                f"Dest: {dest}"
+            )
+            if stack_text:
+                msg = f"{msg}\n{stack_text}"
+            raise TransportError(msg, fatal=True, path=dest) from exc
+        logger.info("get_file_to_file ok id=%s dest=%s", oid, dest)
+
+    def get_track_to_file(
+        self,
+        object_id: int,
+        dest_path: str,
+        *,
+        on_progress: Callable[[int, int], None] | None = None,
+    ) -> None:
+        """Download a track-typed object by id (experimental). Prefer file path for mixed media."""
+        oid = int(object_id)
+        if oid <= 0:
+            raise ValueError(f"Invalid object id: {object_id}")
+        dest = str(dest_path or "").strip()
+        if not dest:
+            raise ValueError("Destination path required")
+        logger.info("get_track_to_file id=%s dest=%s", oid, dest)
+
+        def _cb(sent: int, total: int) -> None:
+            if on_progress is None:
+                return
+            try:
+                on_progress(int(sent), int(total))
+            except Exception:
+                logger.debug("get_track_to_file progress failed", exc_info=True)
+
+        try:
+            self._mtp.get_track_to_file(
+                oid, dest, callback=_cb if on_progress else None
+            )
+        except pymtp.NotConnected as exc:
+            raise TransportError(
+                "PyMTP track download failed: device not connected. "
+                "Use Device → Connect first.",
+                fatal=True,
+                path=dest,
+            ) from exc
+        except OSError as exc:
+            raise TransportError(
+                f"PyMTP track download failed: {exc}. Dest: {dest}",
+                fatal=True,
+                path=dest,
+            ) from exc
+        except pymtp.CommandFailed as exc:
+            try:
+                self._mtp.debug_stack()
+            except Exception:
+                logger.debug("Could not dump libmtp error stack", exc_info=True)
+            stack_text = _collect_errorstack(self._mtp)
+            detail = str(exc).strip() or "CommandFailed"
+            logger.error(
+                "PyMTP get_track_to_file failed id=%s dest=%s detail=%s\n%s",
+                oid,
+                dest,
+                detail,
+                stack_text or "(no libmtp errorstack text)",
+            )
+            # Fall back to generic file download (works for video/non-track too).
+            logger.info(
+                "get_track_to_file failed (%s); retrying get_file_to_file id=%s",
+                detail,
+                oid,
+            )
+            self.get_file_to_file(oid, dest, on_progress=on_progress)
+            return
+        logger.info("get_track_to_file ok id=%s dest=%s", oid, dest)
+
     def send_file(self, path: str, remote_name: str | None = None) -> None:
         keep: list[bytes] = []
         fname = remote_name or "000_TEST_FILE.mp3"

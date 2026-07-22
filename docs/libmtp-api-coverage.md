@@ -55,6 +55,8 @@ Domain contract for send (parent 100 / artist folder id, storage `0x00010001`, s
 | Device info | `get_devicename`, `get_serialnumber`, `get_manufacturer`, `get_modelname`, `get_deviceversion`, `get_batterylevel` | |
 | Capacity | `get_freespace`, `get_totalspace`, `get_usedspace`, `get_usedspace_percent` | Walks storage; multi-storage may be wrong |
 | Filetype guess | `find_filetype` | Table fixed; method body stock |
+| Download file | `get_file_to_file` → `LIBMTP_Get_File_To_File` | Patched path encoding + argtypes; Device → **Get Tracks from Device** |
+| Download track | `get_track_to_file` → `LIBMTP_Get_Track_To_File` | Patched; falls back to file download on failure |
 | Generic file send | `send_file_from_file` | **Not** product-hardened like track send; residual string/argtypes risk |
 | Storage refresh | `LIBMTP_Get_Storage` (direct ctypes in `send_track`) | Argtypes set in wrapper |
 

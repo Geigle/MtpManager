@@ -66,4 +66,14 @@ class DevicePort(Protocol):
         """Fetch one track's on-device tags by id (experimental Get Track Info)."""
         ...
 
+    def get_file_to_file(
+        self,
+        object_id: int,
+        dest_path: str,
+        *,
+        on_progress=None,
+    ) -> None:
+        """Download object *object_id* to *dest_path* (experimental)."""
+        ...
+
     def send_file(self, path: str, remote_name: str | None = None) -> None: ...

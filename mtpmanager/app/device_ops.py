@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import logging
+import os
+import re
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from mtpmanager.app.cancellation import CancelCheck
 from mtpmanager.domain.device_media import apply_track_info
@@ -15,8 +17,10 @@ from mtpmanager.domain.models import (
     DeviceTrackRef,
     FileEntry,
     FolderEntry,
+    TrackMetadata,
 )
-from mtpmanager.infra.remote_naming import DEFAULT_MUSIC_FOLDER_ID
+from mtpmanager.infra.mutagen_tags import write_metadata
+from mtpmanager.infra.remote_naming import DEFAULT_MUSIC_FOLDER_ID, sanitize_component
 from mtpmanager.ports.device import DevicePort
 from mtpmanager.ports.transport import TransportError
 
@@ -26,6 +30,10 @@ logger = logging.getLogger(__name__)
 DeleteProgressCallback = Callable[[int, int, DeviceTrackRef | None], None]
 # done_count, total, message
 EnrichProgressCallback = Callable[[int, int, str], None]
+# done_count, total, current ref or None
+RetrieveProgressCallback = Callable[[int, int, DeviceTrackRef | None], None]
+
+_UNSAFE_HOST = re.compile(r'[/\\:*?"<>|\x00-\x1f]')
 
 
 @dataclass(frozen=True)
@@ -188,6 +196,248 @@ def get_file_metadata(device: DevicePort, object_id: int) -> FileEntry:
 def get_track_metadata(device: DevicePort, object_id: int) -> DeviceTrackInfo:
     """Experimental on-device track tags (Device -> Get Track Info)."""
     return device.get_track_metadata(int(object_id))
+
+
+@dataclass(frozen=True)
+class RetrieveTracksResult:
+    """Outcome of experimental Get Tracks from Device."""
+
+    total: int
+    succeeded: int
+    failed: int
+    paths: list[str] = field(default_factory=list)
+    aborted: bool = False
+    cancelled: bool = False
+    failed_id: int | None = None
+
+
+def track_info_to_metadata(info: DeviceTrackInfo) -> TrackMetadata:
+    """Map on-device track tags to host TrackMetadata for mutagen write."""
+    tn = str(info.tracknumber or "").strip() or "01"
+    if info.tracknumber and int(info.tracknumber) > 0:
+        tn = f"{int(info.tracknumber):02d}"
+    length = 0.0
+    if info.duration_ms and info.duration_ms > 0:
+        length = float(info.duration_ms) / 1000.0
+    return TrackMetadata(
+        artist=(info.artist or "").strip() or "Unknown Artist",
+        albumartist=(info.artist or "").strip() or "Unknown Artist",
+        composer=(info.composer or "").strip() or "Unknown Composer",
+        album=(info.album or "").strip() or "Unknown Album",
+        title=(info.title or "").strip() or "Unknown Title",
+        genre=(info.genre or "").strip() or "Unknown Genre",
+        tracknumber=tn,
+        date=(info.date or "").strip(),
+        length_sec=length,
+        sample_rate=int(info.sample_rate or 0),
+        channels=int(info.channels or 0),
+        bitrate=int(info.bitrate or 0),
+        bitrate_mode=int(info.bitrate_type or 0),
+    )
+
+
+def suggested_retrieve_basename(
+    ref: DeviceTrackRef,
+    *,
+    info: DeviceTrackInfo | None = None,
+) -> str:
+    """Build a host-safe basename with extension from device name/tags."""
+    raw_name = (ref.name or "").strip() or (info.name if info else "") or "track"
+    _, ext = os.path.splitext(raw_name)
+    if not ext:
+        ext = ".mp3"
+    ext = ext if ext.startswith(".") else f".{ext}"
+
+    title = ""
+    artist = ""
+    if info is not None:
+        title = (info.title or "").strip()
+        artist = (info.artist or "").strip()
+    if not title:
+        title = (ref.title or "").strip()
+    if not artist:
+        artist = (ref.artist or "").strip()
+
+    if title and artist and artist not in ("—", "Unknown Artist"):
+        body = f"{artist} - {title}"
+    elif title:
+        body = title
+    else:
+        body = os.path.splitext(raw_name)[0] or f"track_{ref.item_id}"
+
+    body = _UNSAFE_HOST.sub(" ", body)
+    body = sanitize_component(body, 80)
+    return f"{body}{ext.lower() if len(ext) <= 5 else ext}"
+
+
+def unique_dest_path(dest_dir: str, basename: str) -> str:
+    """Return dest_dir/basename, adding (n) before ext if the path exists."""
+    dest_dir = os.path.abspath(dest_dir)
+    os.makedirs(dest_dir, exist_ok=True)
+    candidate = os.path.join(dest_dir, basename)
+    if not os.path.exists(candidate):
+        return candidate
+    stem, ext = os.path.splitext(basename)
+    n = 2
+    while True:
+        alt = os.path.join(dest_dir, f"{stem} ({n}){ext}")
+        if not os.path.exists(alt):
+            return alt
+        n += 1
+
+
+def retrieve_track(
+    device: DevicePort,
+    ref: DeviceTrackRef,
+    dest_dir: str,
+    *,
+    info: DeviceTrackInfo | None = None,
+    write_tags: bool = True,
+) -> str:
+    """Download one track/media object to *dest_dir*; optionally write tags.
+
+    Uses ``get_file_to_file`` (works for audio and video). Tries track
+    metadata when *info* is not provided. Returns the host file path.
+    """
+    oid = int(ref.item_id or 0)
+    if oid <= 0:
+        raise ValueError(f"Invalid object id on ref: {ref!r}")
+
+    meta_info = info
+    if meta_info is None:
+        try:
+            meta_info = device.get_track_metadata(oid)
+        except TransportError as exc:
+            if exc.fatal:
+                raise
+            logger.debug(
+                "retrieve_track: no track metadata id=%s (%s)", oid, exc
+            )
+            meta_info = None
+        except Exception:
+            logger.debug(
+                "retrieve_track: track metadata failed id=%s", oid, exc_info=True
+            )
+            meta_info = None
+
+    basename = suggested_retrieve_basename(ref, info=meta_info)
+    dest = unique_dest_path(dest_dir, basename)
+    logger.info(
+        "retrieve_track id=%s name=%r → %s", oid, ref.name, dest
+    )
+
+    # Prefer generic file download (audio + video). Fall back if needed.
+    getter = getattr(device, "get_file_to_file", None)
+    if getter is None:
+        raise TransportError(
+            "Device adapter does not support get_file_to_file",
+            fatal=True,
+        )
+    getter(oid, dest)
+
+    if write_tags and meta_info is not None:
+        host_meta = track_info_to_metadata(meta_info)
+        # Skip placeholder-only writes
+        if (host_meta.title and host_meta.title != "Unknown Title") or (
+            host_meta.artist and host_meta.artist not in ("Unknown Artist",)
+        ):
+            if write_metadata(dest, host_meta):
+                logger.info("retrieve_track wrote tags path=%s", dest)
+
+    return dest
+
+
+def retrieve_tracks(
+    device: DevicePort,
+    refs: Sequence[DeviceTrackRef],
+    dest_dir: str,
+    *,
+    on_progress: RetrieveProgressCallback | None = None,
+    stop_on_fatal: bool = True,
+    should_cancel: CancelCheck | None = None,
+    write_tags: bool = True,
+) -> RetrieveTracksResult:
+    """Download many tracks to *dest_dir* with best-effort metadata."""
+    batch = list(refs)
+    total = len(batch)
+    paths: list[str] = []
+    succeeded = 0
+    failed = 0
+    logger.info("retrieve_tracks start total=%s dest=%s", total, dest_dir)
+
+    def _progress(done: int, current: DeviceTrackRef | None) -> None:
+        if on_progress is None:
+            return
+        try:
+            on_progress(done, total, current)
+        except Exception:
+            logger.debug("retrieve_tracks on_progress failed", exc_info=True)
+
+    def _cancelled() -> bool:
+        if should_cancel is None:
+            return False
+        try:
+            return bool(should_cancel())
+        except Exception:
+            return False
+
+    for i, ref in enumerate(batch):
+        if _cancelled():
+            logger.info(
+                "retrieve_tracks cancelled succeeded=%s/%s",
+                succeeded,
+                total,
+            )
+            _progress(succeeded, None)
+            return RetrieveTracksResult(
+                total=total,
+                succeeded=succeeded,
+                failed=failed,
+                paths=paths,
+                cancelled=True,
+            )
+        _progress(i, ref)
+        try:
+            path = retrieve_track(
+                device, ref, dest_dir, write_tags=write_tags
+            )
+            paths.append(path)
+            succeeded += 1
+        except TransportError as exc:
+            logger.error(
+                "retrieve_tracks failed id=%s fatal=%s: %s",
+                ref.item_id,
+                exc.fatal,
+                exc,
+            )
+            failed += 1
+            if stop_on_fatal and exc.fatal:
+                _progress(i, ref)
+                return RetrieveTracksResult(
+                    total=total,
+                    succeeded=succeeded,
+                    failed=failed,
+                    paths=paths,
+                    aborted=True,
+                    failed_id=int(ref.item_id or 0),
+                )
+        except Exception:
+            logger.exception("retrieve_tracks unexpected id=%s", ref.item_id)
+            failed += 1
+
+    _progress(total, None)
+    logger.info(
+        "retrieve_tracks done succeeded=%s failed=%s total=%s",
+        succeeded,
+        failed,
+        total,
+    )
+    return RetrieveTracksResult(
+        total=total,
+        succeeded=succeeded,
+        failed=failed,
+        paths=paths,
+    )
 
 
 def delete_all_tracks(

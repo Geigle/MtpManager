@@ -169,6 +169,29 @@ class PymtpTrackListingTests(unittest.TestCase):
         self.assertIs(fn.argtypes[2], ctypes.c_void_p)
 
 
+class PymtpDownloadTests(unittest.TestCase):
+    """Experimental retrieve uses patched get_file_to_file / get_track_to_file."""
+
+    def test_get_file_to_file_is_patched(self) -> None:
+        self.assertIs(pymtp.MTP.get_file_to_file, pymtp._get_file_to_file)
+        src = inspect.getsource(pymtp.MTP.get_file_to_file)
+        self.assertIn("LIBMTP_Get_File_To_File", src)
+        self.assertIn("_as_c_char_p", inspect.getsource(pymtp._get_object_to_file))
+        self.assertIn("create_string_buffer", inspect.getsource(pymtp._get_object_to_file))
+
+    def test_get_track_to_file_is_patched(self) -> None:
+        self.assertIs(pymtp.MTP.get_track_to_file, pymtp._get_track_to_file)
+
+    def test_download_argtypes(self) -> None:
+        import ctypes
+
+        fn = pymtp._pymtp._libmtp.LIBMTP_Get_File_To_File
+        self.assertEqual(len(fn.argtypes), 5)
+        self.assertIs(fn.argtypes[0], ctypes.c_void_p)
+        self.assertIs(fn.argtypes[1], ctypes.c_uint32)
+        self.assertIs(fn.argtypes[2], ctypes.c_char_p)
+
+
 class PymtpGetFileMetadataTests(unittest.TestCase):
     """Experimental Get File Info uses patched get_file_metadata."""
 

@@ -85,6 +85,7 @@ MENU_CREATE_FOLDER = "Create Folder…"
 MENU_LIST_FOLDERS = "List Folders"
 MENU_LIST_FILES = "List Files (experimental)"
 MENU_LIST_TRACKS = "List Tracks (experimental)"
+MENU_GET_TRACKS_FROM_DEVICE = "Get Tracks from Device… (experimental)"
 MENU_DELETE_TRACK = "Delete Track (experimental)"
 MENU_GET_FILE_INFO = "Get File Info (experimental)"
 MENU_GET_TRACK_INFO = "Get Track Info (experimental)"
@@ -109,6 +110,7 @@ _DEVICE_MENU_LABELS = (
     MENU_LIST_FOLDERS,
     MENU_LIST_FILES,
     MENU_LIST_TRACKS,
+    MENU_GET_TRACKS_FROM_DEVICE,
     MENU_REFRESH_DEVICE_INDEX,
     MENU_DELETE_TRACK,
     MENU_GET_FILE_INFO,
@@ -472,6 +474,7 @@ class MainWindow:
         on_list_folders,
         on_list_files=None,
         on_list_tracks=None,
+        on_get_tracks_from_device=None,
         on_delete_track=None,
         on_get_file_info,
         on_get_track_info=None,
@@ -487,6 +490,10 @@ class MainWindow:
             self.menu_device.entryconfig(MENU_LIST_FILES, command=on_list_files)
         if on_list_tracks is not None:
             self.menu_device.entryconfig(MENU_LIST_TRACKS, command=on_list_tracks)
+        if on_get_tracks_from_device is not None:
+            self.menu_device.entryconfig(
+                MENU_GET_TRACKS_FROM_DEVICE, command=on_get_tracks_from_device
+            )
         if on_refresh_device_index is not None:
             self.menu_device.entryconfig(
                 MENU_REFRESH_DEVICE_INDEX, command=on_refresh_device_index

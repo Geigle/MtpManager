@@ -51,6 +51,7 @@ End-to-end send path, Stable vs Experimental behavior, and where to change thing
 - **Device index (skip only):** one `list_files` seed after Experimental connect (or **Refresh Device Index…**); successful send/delete update the cache. Used for **skip-if-present**, not as the sole browse UI.
 - **Experimental List Files / pickers:** **live** `get_filelisting` (may also refresh the durable index).
 - **Experimental List Tracks / Delete All list:** **live** filelisting + per-id `Get_Trackmetadata` (same algorithm as CLI `mtp-tracks`; complete on ZEN). Soft-fills empty titles from host GUID library when known. Bulk `Get_Tracklisting*` is diagnostic-only (`list_tracks_via_tracklisting`) — often returns only a few tracks on this device.
+- **Get Tracks from Device…:** list media (with tags), then download each via `get_file_to_file` to a chosen host folder; best-effort mutagen tag write when device metadata exists (audio containers; video often keeps embedded tags only).
 - **Non-blocking:** scan and index restore run on a daemon thread (`TkBackgroundRunner`). The previous library stays until the job finishes; a newer job discards stale results. Listbox population is chunked so large libraries do not freeze the event loop.
 - While busy, Library menu actions are disabled and the toolbar count shows `Loading index…` / `Scanning…`.
 - Transfers that need the library refuse to run while busy or while the root is unreachable.

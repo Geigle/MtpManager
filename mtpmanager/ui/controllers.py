@@ -177,6 +177,7 @@ class AppController:
             on_list_folders=self.action_read_folder_list,
             on_list_files=self.action_read_file_list,
             on_list_tracks=self.action_read_track_list,
+            on_get_tracks_from_device=self.action_get_tracks_from_device,
             on_delete_track=self.action_delete_track,
             on_get_track_info=self.action_get_track_info,
             on_get_file_info=self.action_get_file_info,
@@ -2555,6 +2556,132 @@ class AppController:
             work=lambda device: device_ops.list_files(device),
             on_success=on_success,
             busy_message="listing device files (live get_filelisting)…",
+        )
+
+    def action_get_tracks_from_device(self) -> None:
+        """Experimental: download all media tracks (+ tags) to a host folder.
+
+        Uses mtp-tracks-style listing, then ``get_file_to_file`` per object
+        (audio and video). Best-effort mutagen write when device tags exist.
+        """
+        if not self._require_device_ready():
+            return
+        dest = filedialog.askdirectory(
+            title="Save retrieved tracks to folder",
+            initialdir=self.library.root_path or os.path.expanduser("~/Music"),
+        )
+        if not dest:
+            return
+        if not messagebox.askyesno(
+            "Get Tracks from Device",
+            "This will list media on the device (with tags where available),\n"
+            "then download each file to:\n\n"
+            f"{dest}\n\n"
+            "Includes audio and video when listed as tracks. Continue?",
+        ):
+            return
+
+        if not self._begin_transfer_job():
+            return
+        device = self.device
+
+        def work():
+            gen = self._bg.generation
+            report = self._bg.progress_callback(gen)
+
+            def list_progress(done: int, total: int, message: str) -> None:
+                report("status", message or "listing…")
+                if total and total > 0:
+                    report("progress", done, total, message)
+
+            report("status", "listing device tracks…")
+            refs = device_ops.list_tracks(device, on_progress=list_progress)
+            if not refs:
+                return device_ops.RetrieveTracksResult(
+                    total=0, succeeded=0, failed=0, paths=[]
+                )
+
+            def dl_progress(done: int, total: int, current) -> None:
+                label = ""
+                if current is not None:
+                    label = (
+                        (current.title or current.name or "").strip()
+                        or f"id={current.item_id}"
+                    )
+                report(
+                    "status",
+                    f"downloading {done + 1}/{total}  {label}"
+                    if done < total
+                    else f"downloaded {done}/{total}",
+                )
+                report("progress", done, total, label)
+
+            return device_ops.retrieve_tracks(
+                device,
+                refs,
+                dest,
+                on_progress=dl_progress,
+                should_cancel=self._should_cancel_job,
+                write_tags=True,
+            )
+
+        def on_done(result) -> None:
+            self._end_transfer_job()
+            try:
+                self.win.progress["value"] = 100
+            except Exception:
+                pass
+            if result.cancelled:
+                messagebox.showinfo(
+                    "Get Tracks cancelled",
+                    f"Stopped after {result.succeeded} of {result.total} "
+                    f"file(s).\nSaved under:\n{dest}",
+                )
+                return
+            if result.aborted:
+                messagebox.showerror(
+                    "Get Tracks aborted",
+                    f"Downloaded {result.succeeded} of {result.total}.\n"
+                    f"Stopped at object id={result.failed_id}.\n\n"
+                    f"Folder:\n{dest}\n\n"
+                    "Session may be poisoned — disconnect/replug if needed.",
+                )
+                return
+            if result.total == 0:
+                messagebox.showinfo(
+                    "Get Tracks from Device",
+                    "No media tracks found on the device.",
+                )
+                return
+            messagebox.showinfo(
+                "Get Tracks from Device",
+                f"Downloaded {result.succeeded} of {result.total} file(s)"
+                f"{f' ({result.failed} failed)' if result.failed else ''}.\n\n"
+                f"Saved under:\n{dest}",
+            )
+            logger.info(
+                "Get Tracks done succeeded=%s failed=%s dest=%s",
+                result.succeeded,
+                result.failed,
+                dest,
+            )
+
+        def on_error(exc: BaseException) -> None:
+            self._end_transfer_job()
+            if isinstance(exc, JobCancelled):
+                self._handle_job_cancelled(
+                    exc, title="Get Tracks cancelled"
+                )
+                return
+            logger.exception("Get Tracks from Device failed")
+            messagebox.showerror("Get Tracks from Device", str(exc))
+
+        self._bg.submit(
+            work,
+            on_done=on_done,
+            on_error=on_error,
+            on_progress=self._on_transfer_ui_event,
+            name="get-tracks-from-device",
         )
 
     def action_read_track_list(self) -> None:
