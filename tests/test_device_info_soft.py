@@ -74,6 +74,7 @@ class DeviceInfoSoftFailTests(unittest.TestCase):
         dev, fake = self._device()
         info = dev.get_identity()
         self.assertEqual(info.name, "Gage's Zen")
+        self.assertEqual(info.serial, "SN123")  # serial is cheap + multi-device key
         self.assertIn("Creative", info.manufacturer)
         self.assertIn("Vision", info.model)
         self.assertIsNone(info.battery)

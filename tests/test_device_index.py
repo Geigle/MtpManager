@@ -6,10 +6,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from mtpmanager.domain.models import FileEntry
+from mtpmanager.domain.models import DeviceInfo, FileEntry
 from mtpmanager.domain.track_id import new_track_guid
 from mtpmanager.infra.device_index import (
     device_list_is_complete,
+    device_serial_key,
     guid_stems_on_device,
     list_cached_files,
     list_cached_track_refs,
@@ -108,8 +109,82 @@ class DeviceIndexTests(unittest.TestCase):
             )
             self.assertEqual(guid_stems_on_device("default", path=db), {g})
             files = list_cached_files("default", path=db)
-            self.assertEqual(files[0].item_id, 0)
+            # Synthetic negative item_id when MTP id unknown
+            self.assertLess(files[0].item_id, 0)
             self.assertEqual(files[0].name, f"{g}.mp3")
+
+    def test_duplicate_names_in_listing_ok(self) -> None:
+        """Same basename under different parents / duplicate item_ids must not crash."""
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "library_index.db"
+            g = new_track_guid()
+            n = replace_device_listing(
+                "SER_DUP",
+                [
+                    _file(10, f"{g}.mp3", parent=100),
+                    _file(11, f"{g}.mp3", parent=200),  # same name, other folder
+                    _file(10, f"{g}.mp3", parent=100),  # duplicate item_id
+                    _file(12, "readme.txt", parent=100),
+                ],
+                path=db,
+            )
+            self.assertGreaterEqual(n, 2)
+            files = list_cached_files("SER_DUP", path=db)
+            ids = {f.item_id for f in files}
+            self.assertIn(10, ids)
+            self.assertIn(11, ids)
+            self.assertEqual(guid_stems_on_device("SER_DUP", path=db), {g})
+
+    def test_device_serial_key_prefers_mtp_serial(self) -> None:
+        info = DeviceInfo(
+            name="ZEN A",
+            serial="ABC123",
+            manufacturer="Creative",
+            model="ZEN Vision:M",
+        )
+        self.assertEqual(device_serial_key(info), "ABC123")
+
+    def test_device_serial_key_fingerprint_when_no_serial(self) -> None:
+        a = DeviceInfo(
+            name="My ZEN",
+            serial="",
+            manufacturer="Creative",
+            model="ZEN Vision:M",
+        )
+        b = DeviceInfo(
+            name="Other ZEN",
+            serial="",
+            manufacturer="Creative",
+            model="ZEN Vision:M",
+        )
+        c = DeviceInfo(
+            name="My ZEN",
+            serial="",
+            manufacturer="Creative",
+            model="ZEN Vision:M",
+        )
+        ka, kb, kc = device_serial_key(a), device_serial_key(b), device_serial_key(c)
+        self.assertTrue(ka.startswith("fp:"))
+        self.assertNotEqual(ka, kb)  # different friendly names
+        self.assertEqual(ka, kc)  # same identity → same key
+        self.assertNotEqual(ka, "default")
+
+    def test_two_devices_isolated_by_fingerprint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "library_index.db"
+            k1 = device_serial_key(
+                DeviceInfo(name="Player One", manufacturer="Creative", model="ZEN")
+            )
+            k2 = device_serial_key(
+                DeviceInfo(name="Player Two", manufacturer="Creative", model="ZEN")
+            )
+            g1, g2 = new_track_guid(), new_track_guid()
+            replace_device_listing(k1, [_file(1, f"{g1}.mp3")], path=db)
+            replace_device_listing(k2, [_file(2, f"{g2}.mp3")], path=db)
+            self.assertEqual(guid_stems_on_device(k1, path=db), {g1})
+            self.assertEqual(guid_stems_on_device(k2, path=db), {g2})
+            self.assertEqual(len(list_cached_files(k1, path=db)), 1)
+            self.assertEqual(len(list_cached_files(k2, path=db)), 1)
 
 
 if __name__ == "__main__":

@@ -131,7 +131,7 @@ class PymtpDeleteObjectTests(unittest.TestCase):
 
 
 class PymtpTrackListingTests(unittest.TestCase):
-    """Patched get_tracklisting kept for diagnostics (not bulk List Tracks UX)."""
+    """Patched get_tracklisting is the experimental List Tracks bulk path."""
 
     def test_get_tracklisting_is_patched(self) -> None:
         self.assertIs(pymtp.MTP.get_tracklisting, pymtp._get_tracklisting)

@@ -37,7 +37,7 @@ Rough scale (1.1.23): ~120 exported `LIBMTP_*` ops → ~34 pymtp high-level meth
 | Set friendly name | `set_devicename` → `LIBMTP_Set_Friendlyname` | `pymtp_wrapper._set_devicename` |
 | Error dump | `debug_stack` → `LIBMTP_Dump_Errorstack` | `pymtp_wrapper._debug_stack` |
 | File listing | `get_filelisting` → `LIBMTP_Get_Filelisting_With_Callback` | `pymtp_wrapper._get_filelisting`; Device → **List Files** / pickers / **List Tracks** + **Delete All** list (media filter) via `_run_device_bg` |
-| Track listing | `get_tracklisting` → `LIBMTP_Get_Tracklisting_With_Callback` | `pymtp_wrapper._get_tracklisting` patched (NULL-safe + snapshot + destroy + optional progress) for diagnostics; **not** the bulk List Tracks / Delete All path on ZEN (multi-hour / incomplete) |
+| Track listing | `get_tracklisting` → `LIBMTP_Get_Tracklisting_With_Callback` | `pymtp_wrapper._get_tracklisting` patched; **Device → List Tracks / Delete All** default bulk path (may be multi-hour on large libraries). Fast filelisting filter remains as `list_tracks_from_files` |
 | Single-object delete | `delete_object` → `LIBMTP_Delete_Object` | `pymtp_wrapper._delete_object` + argtypes; Device → **Delete Track** / batch **Delete All Tracks** |
 | File metadata | `get_file_metadata` → `LIBMTP_Get_Filemetadata` | `pymtp_wrapper._get_file_metadata` + argtypes; Device → **Get File Info**; on ZEN NULL/proplist fail → **listing snapshot** (class J in hazards) |
 | Track metadata | `get_track_metadata` → `LIBMTP_Get_Trackmetadata` | `pymtp_wrapper._get_track_metadata` (argtypes + snapshot + destroy); Device → **Get Track Info** + List Tracks → **Load tags for selection** (`device_ops.enrich_track_refs`) |
