@@ -142,9 +142,10 @@ class DeviceIndexTests(unittest.TestCase):
             manufacturer="Creative",
             model="ZEN Vision:M",
         )
+        # Serial alone — not combined with name/model.
         self.assertEqual(device_serial_key(info), "ABC123")
 
-    def test_device_serial_key_fingerprint_when_no_serial(self) -> None:
+    def test_device_serial_key_fingerprint_ignores_friendly_name(self) -> None:
         a = DeviceInfo(
             name="My ZEN",
             serial="",
@@ -152,7 +153,7 @@ class DeviceIndexTests(unittest.TestCase):
             model="ZEN Vision:M",
         )
         b = DeviceInfo(
-            name="Other ZEN",
+            name="Other ZEN",  # rename must not change inventory key
             serial="",
             manufacturer="Creative",
             model="ZEN Vision:M",
@@ -163,21 +164,33 @@ class DeviceIndexTests(unittest.TestCase):
             manufacturer="Creative",
             model="ZEN Vision:M",
         )
+        other_model = DeviceInfo(
+            name="My ZEN",
+            serial="",
+            manufacturer="Creative",
+            model="ZEN Micro",
+        )
         ka, kb, kc = device_serial_key(a), device_serial_key(b), device_serial_key(c)
         self.assertTrue(ka.startswith("fp:"))
-        self.assertNotEqual(ka, kb)  # different friendly names
-        self.assertEqual(ka, kc)  # same identity → same key
+        self.assertEqual(ka, kb)  # friendly name ignored
+        self.assertEqual(ka, kc)
+        self.assertNotEqual(ka, device_serial_key(other_model))
         self.assertNotEqual(ka, "default")
 
-    def test_two_devices_isolated_by_fingerprint(self) -> None:
+    def test_two_models_isolated_by_fingerprint(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             db = Path(tmp) / "library_index.db"
             k1 = device_serial_key(
                 DeviceInfo(name="Player One", manufacturer="Creative", model="ZEN")
             )
             k2 = device_serial_key(
-                DeviceInfo(name="Player Two", manufacturer="Creative", model="ZEN")
+                DeviceInfo(
+                    name="Player One",
+                    manufacturer="Creative",
+                    model="ZEN Vision:M",
+                )
             )
+            self.assertNotEqual(k1, k2)
             g1, g2 = new_track_guid(), new_track_guid()
             replace_device_listing(k1, [_file(1, f"{g1}.mp3")], path=db)
             replace_device_listing(k2, [_file(2, f"{g2}.mp3")], path=db)
@@ -185,6 +198,38 @@ class DeviceIndexTests(unittest.TestCase):
             self.assertEqual(guid_stems_on_device(k2, path=db), {g2})
             self.assertEqual(len(list_cached_files(k1, path=db)), 1)
             self.assertEqual(len(list_cached_files(k2, path=db)), 1)
+
+    def test_serial_key_stable_after_rename(self) -> None:
+        """Same serial / same mfr+model → same key after friendly-name change."""
+        before = DeviceInfo(
+            name="Old Name",
+            serial="SN99",
+            manufacturer="Creative",
+            model="ZEN Vision:M",
+        )
+        after = DeviceInfo(
+            name="New Name",
+            serial="SN99",
+            manufacturer="Creative",
+            model="ZEN Vision:M",
+        )
+        self.assertEqual(device_serial_key(before), device_serial_key(after))
+        no_serial_before = DeviceInfo(
+            name="Old Name",
+            serial="",
+            manufacturer="Creative",
+            model="ZEN Vision:M",
+        )
+        no_serial_after = DeviceInfo(
+            name="New Name",
+            serial="",
+            manufacturer="Creative",
+            model="ZEN Vision:M",
+        )
+        self.assertEqual(
+            device_serial_key(no_serial_before),
+            device_serial_key(no_serial_after),
+        )
 
 
 if __name__ == "__main__":

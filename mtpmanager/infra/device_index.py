@@ -6,8 +6,9 @@ successful send / delete. Skip-if-present and List Files/Tracks read this
 cache — not a live USB walk every sync.
 
 Multiple devices: inventory is keyed by MTP serial when available, else a
-stable fingerprint of manufacturer/model/friendly name. Never share one
-``default`` bucket across two plugged players.
+stable fingerprint of manufacturer + model only. Friendly name is never part
+of the key (user-editable; renaming would orphan the cache). Never share one
+``default`` bucket across two known players when identity is present.
 """
 
 from __future__ import annotations
@@ -89,19 +90,25 @@ def _is_placeholder_serial(value: str | None) -> bool:
     return text.casefold() in _PLACEHOLDER_SERIALS
 
 
-def _fingerprint_key(manufacturer: str, model: str, name: str) -> str:
-    """Stable key when MTP serial is missing (common on some Creative firmware)."""
+def _fingerprint_key(manufacturer: str, model: str) -> str:
+    """Stable key when MTP serial is missing (common on some Creative firmware).
+
+    Uses manufacturer + model only. Friendly name is deliberately excluded:
+    Device → Device Info can rename the player, which must not change the
+    inventory key or orphan cached ``device_files`` rows.
+    """
     parts = [
         (manufacturer or "").strip().casefold(),
         (model or "").strip().casefold(),
-        (name or "").strip().casefold(),
     ]
     raw = "|".join(parts)
     if not any(parts):
         return DEFAULT_SERIAL
     digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
     # Human-readable prefix for logs (sanitized model).
-    label = re.sub(r"[^a-zA-Z0-9._-]+", "_", (model or name or "device").strip())[:24]
+    label = re.sub(r"[^a-zA-Z0-9._-]+", "_", (model or manufacturer or "device").strip())[
+        :24
+    ]
     return f"fp:{label}:{digest}"
 
 
@@ -114,9 +121,12 @@ def device_serial_key(
 
     Preference order:
     1. Explicit *serial* argument (when not a placeholder)
-    2. ``info.serial`` from MTP
-    3. Fingerprint of manufacturer + model + friendly name
+    2. ``info.serial`` from MTP (serial alone — most stable identity)
+    3. Fingerprint of manufacturer + model (no friendly name)
     4. ``default`` only when nothing else is known
+
+    Two same-model players without MTP serials share one fingerprint bucket;
+    that is preferred over keying on a user-editable friendly name.
     """
     if serial is not None and not _is_placeholder_serial(serial):
         # Already a fingerprint or real serial — keep as-is.
@@ -124,7 +134,7 @@ def device_serial_key(
     if info is not None:
         if not _is_placeholder_serial(info.serial):
             return str(info.serial).strip()
-        return _fingerprint_key(info.manufacturer, info.model, info.name)
+        return _fingerprint_key(info.manufacturer, info.model)
     return DEFAULT_SERIAL
 
 

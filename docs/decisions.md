@@ -178,11 +178,11 @@ Debriefs remain the forensic narrative; this file is what we keep doing.
 
 **Context:** Skip-if-present called `list_files` at the start of every sync job. Full `get_filelisting` walks are USB-heavy and appear to poison ZEN sessions when repeated. Admin List Files/Tracks did the same walk every menu click.
 
-**Decision:** Persist device inventory in SQLite (`devices` + `device_files` in `library_index.db`, keyed by device serial). **Seed once** after Experimental connect (background `list_files` → replace rows). **Skip-if-present** and **List Files / List Tracks / delete pickers** read the cache only. **Update incrementally** on successful send (`record_send`) and successful delete (`remove_by_item_id`). **Device → Refresh Device Index…** forces one live listing. No per-sync `list_files`.
+**Decision:** Persist device inventory in SQLite (`devices` + `device_files` in `library_index.db`), keyed by **MTP serial alone** when present. If serial is missing/placeholder, key by a fingerprint of **manufacturer + model only** (never friendly name). **Seed once** after Experimental connect (background `list_files` → replace rows). **Skip-if-present** and **List Files / List Tracks / delete pickers** read the cache only. **Update incrementally** on successful send (`record_send`) and successful delete (`remove_by_item_id`). **Device → Refresh Device Index…** forces one live listing. No per-sync `list_files`.
 
-**Rationale:** One listing per connect is enough for app-driven sync/delete; external device changes need explicit refresh.
+**Rationale:** One listing per connect is enough for app-driven sync/delete; external device changes need explicit refresh. Friendly name is user-editable (Device Info) and must not re-key or orphan the inventory. Serial is the stable hardware identity; mfr+model is the best no-serial fallback (two identical models without serials share one bucket — preferred over rename-fragile keys).
 
-**Consequences:** Cache can go stale if another tool writes the player; user Refresh or reconnect. Stable Mode without a serial may not skip. MTP `item_id` remains best-effort (volatile across rebuilds); skip keys on GUID stem / ObjectFileName.
+**Consequences:** Cache can go stale if another tool writes the player; user Refresh or reconnect. Stable Mode without a serial may not skip. MTP `item_id` remains best-effort (volatile across rebuilds); skip keys on GUID stem / ObjectFileName. Same-model players without serials share one index.
 
 **Source:** `infra/device_index.py`; `ui/controllers.py` connect seed + skip path; `tests/test_device_index.py`.
 
