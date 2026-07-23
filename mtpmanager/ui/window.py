@@ -70,6 +70,8 @@ MENU_SYNC_FOLDER = "Sync Folder…"
 MENU_SYNC_SELECTED = "Sync Selected Tracks"
 MENU_RESUME_SYNC = "Resume Sync"
 MENU_CANCEL_JOB = "Cancel Current Job"
+MENU_PACKAGE_RETAIL = "Package Retail Demos… (experimental)"
+MENU_RESTORE_RETAIL = "Restore Retail Package… (experimental)"
 
 # Config menu
 MENU_STABLE_MODE = "Stable Mode"
@@ -152,6 +154,9 @@ class MainWindow:
         self.menu_transfer.add_command(label=MENU_SYNC_FOLDER)
         self.menu_transfer.add_command(label=MENU_SYNC_SELECTED, state=DISABLED)
         self.menu_transfer.add_command(label=MENU_RESUME_SYNC, state=DISABLED)
+        self.menu_transfer.add_separator()
+        self.menu_transfer.add_command(label=MENU_PACKAGE_RETAIL)
+        self.menu_transfer.add_command(label=MENU_RESTORE_RETAIL)
         self.menu_transfer.add_separator()
         self.menu_transfer.add_command(label=MENU_CANCEL_JOB, state=DISABLED)
 
@@ -399,6 +404,8 @@ class MainWindow:
         on_sync_selected=None,
         on_resume_sync=None,
         on_cancel_job=None,
+        on_package_retail=None,
+        on_restore_retail=None,
     ) -> None:
         self.menu_transfer.entryconfig(MENU_SYNC_ENTIRE, command=on_sync_entire)
         self.menu_transfer.entryconfig(MENU_SYNC_FOLDER, command=on_sync_folder)
@@ -408,6 +415,14 @@ class MainWindow:
             )
         if on_resume_sync is not None:
             self.menu_transfer.entryconfig(MENU_RESUME_SYNC, command=on_resume_sync)
+        if on_package_retail is not None:
+            self.menu_transfer.entryconfig(
+                MENU_PACKAGE_RETAIL, command=on_package_retail
+            )
+        if on_restore_retail is not None:
+            self.menu_transfer.entryconfig(
+                MENU_RESTORE_RETAIL, command=on_restore_retail
+            )
         if on_cancel_job is not None:
             self.menu_transfer.entryconfig(MENU_CANCEL_JOB, command=on_cancel_job)
             self._cancel_job_command = on_cancel_job

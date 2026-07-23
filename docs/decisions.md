@@ -185,3 +185,17 @@ Debriefs remain the forensic narrative; this file is what we keep doing.
 **Consequences:** Cache can go stale if another tool writes the player; user Refresh or reconnect. Stable Mode without a serial may not skip. MTP `item_id` remains best-effort (volatile across rebuilds); skip keys on GUID stem / ObjectFileName.
 
 **Source:** `infra/device_index.py`; `ui/controllers.py` connect seed + skip path; `tests/test_device_index.py`.
+
+---
+
+## D14 — Retail package zip for Creative demos (iFlash restore)
+
+**Context:** iFlash-upgraded ZENs lack stock Creative demo media. Full device exports mix user content with demos; restore needs a portable subset plus editable metadata.
+
+**Decision:** **Transfer → Package Retail Demos…** filters a Get Tracks `device_media_map.json` to `flags.looks_like_retail_demo` host files, writes a zip (`restore_map.json` + `media/`). **Transfer → Restore Retail Package…** extracts and sends with **no GUID** ObjectFileName (`preferred_basename` / original short name), tags from `desired_tags`, and fatal batch abort. Reduced map is re-editable (`include_in_restore`, tags, notes).
+
+**Rationale:** Separate study map (verbose full export) from transfer payload (small, retail-only). Keep retail ObjectFileNames for a stock-like on-device browser; library GUID mode stays for user music.
+
+**Consequences:** Heuristic demos can false-positive; user edits full map flags before package or reduced map before restore. Video filetypes prefer ZEN Video folder parent when original parent is unknown.
+
+**Source:** `infra/retail_package.py`, `app/retail_ops.py`; `tests/test_retail_package.py`.

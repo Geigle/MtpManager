@@ -95,10 +95,11 @@ class RetrieveTracksTests(unittest.TestCase):
                 album="Creative",
             )
             ref = DeviceTrackRef(item_id=10, name="x.mp3")
-            path = retrieve_track(dev, ref, tmp)
-            self.assertTrue(os.path.isfile(path))
+            item = retrieve_track(dev, ref, tmp)
+            self.assertEqual(item.status, "ok")
+            self.assertTrue(os.path.isfile(item.path or ""))
             self.assertEqual(dev.downloaded[0][0], 10)
-            self.assertIn("Dance", os.path.basename(path))
+            self.assertIn("Dance", os.path.basename(item.path or ""))
 
     def test_retrieve_tracks_batch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -112,6 +113,9 @@ class RetrieveTracksTests(unittest.TestCase):
             self.assertEqual(result.succeeded, 2)
             self.assertEqual(result.failed, 0)
             self.assertEqual(len(result.paths), 2)
+            self.assertTrue(result.map_json_path)
+            self.assertTrue(os.path.isfile(result.map_json_path))
+            self.assertTrue(os.path.isfile(result.map_md_path))
 
     def test_retrieve_tracks_fatal_aborts(self) -> None:
         class FailSecond(FakeDevice):
@@ -133,6 +137,9 @@ class RetrieveTracksTests(unittest.TestCase):
             self.assertTrue(result.aborted)
             self.assertEqual(result.succeeded, 1)
             self.assertEqual(result.failed_id, 2)
+            # Map still written with partial + failed rows
+            self.assertTrue(result.map_json_path)
+            self.assertEqual(len(result.items), 2)
 
 
 class WriteMetadataTests(unittest.TestCase):

@@ -9,6 +9,7 @@ import time
 from tkinter import DISABLED, NORMAL, filedialog, messagebox
 
 from mtpmanager.app import device_ops
+from mtpmanager.app import retail_ops
 from mtpmanager.app.artist_folders import ensure_album_folder, ensure_artist_folder
 from mtpmanager.app.cancellation import JobCancelled
 from mtpmanager.app.scan_library import scan_library
@@ -157,6 +158,8 @@ class AppController:
             on_sync_selected=self.action_sync_selected,
             on_resume_sync=self.action_resume_sync,
             on_cancel_job=self.on_cancel_job,
+            on_package_retail=self.action_package_retail_demos,
+            on_restore_retail=self.action_restore_retail_package,
         )
         w.set_config_menu_commands(
             on_config=self.on_config,
@@ -2558,6 +2561,242 @@ class AppController:
             busy_message="listing device files (live get_filelisting)…",
         )
 
+    def action_package_retail_demos(self) -> None:
+        """Zip Creative-looking export tracks + reduced restore_map.json.
+
+        Offline — no device required. Source is a Get Tracks export folder
+        (device_media_map.json + media files).
+        """
+        if self._transfer_busy:
+            messagebox.showinfo(
+                "Transfer",
+                "A transfer or device job is already in progress.",
+            )
+            return
+        export_dir = filedialog.askdirectory(
+            title="Select Get Tracks export folder (with device_media_map.json)",
+            initialdir=self.library.root_path or os.path.expanduser("~/Music"),
+        )
+        if not export_dir:
+            return
+        map_path = os.path.join(export_dir, "device_media_map.json")
+        if not os.path.isfile(map_path):
+            messagebox.showerror(
+                "Package Retail Demos",
+                f"No device_media_map.json in:\n{export_dir}\n\n"
+                "Run Device → Get Tracks from Device… first, then select that folder.",
+            )
+            return
+        zip_path = filedialog.asksaveasfilename(
+            title="Save retail demo package as",
+            defaultextension=".zip",
+            initialfile="creative_retail_demos.zip",
+            initialdir=export_dir,
+            filetypes=[("ZIP archive", "*.zip"), ("All files", "*.*")],
+        )
+        if not zip_path:
+            return
+        if not messagebox.askyesno(
+            "Package Retail Demos",
+            "This will copy only tracks flagged as Creative retail/demo\n"
+            f"(looks_like_retail_demo) from:\n\n{export_dir}\n\n"
+            f"into:\n{zip_path}\n\n"
+            "Includes a reduced restore_map.json for later restore. Continue?",
+        ):
+            return
+
+        if not self._begin_transfer_job():
+            return
+
+        def work():
+            gen = self._bg.generation
+            report = self._bg.progress_callback(gen)
+
+            def progress(done: int, total: int, label: str) -> None:
+                report(
+                    "status",
+                    f"packaging {done + 1}/{total}  {label}"
+                    if total and done < total
+                    else f"packaged {done}/{total}",
+                )
+                if total and total > 0:
+                    report("progress", done, total, label)
+
+            return retail_ops.package_retail_from_export(
+                export_dir, zip_path, on_progress=progress
+            )
+
+        def on_done(result) -> None:
+            self._end_transfer_job()
+            try:
+                self.win.progress["value"] = 100
+            except Exception:
+                pass
+            mb = result.total_bytes / (1024 * 1024) if result.total_bytes else 0
+            messagebox.showinfo(
+                "Package Retail Demos",
+                f"Packaged {result.entry_count} retail/demo file(s) "
+                f"({mb:.1f} MiB).\n\n"
+                f"Zip:\n{result.zip_path}\n\n"
+                "Map inside zip: restore_map.json\n"
+                "Edit desired_tags / include_in_restore before restore if needed.",
+            )
+            logger.info(
+                "Retail package done entries=%s zip=%s",
+                result.entry_count,
+                result.zip_path,
+            )
+
+        def on_error(exc: BaseException) -> None:
+            self._end_transfer_job()
+            logger.exception("Package Retail Demos failed")
+            messagebox.showerror("Package Retail Demos", str(exc))
+
+        self._bg.submit(
+            work,
+            on_done=on_done,
+            on_error=on_error,
+            on_progress=self._on_transfer_ui_event,
+            name="package-retail-demos",
+        )
+
+    def action_restore_retail_package(self) -> None:
+        """Send a retail package zip onto the connected player (no GUID names)."""
+        if not self._require_experimental_connected():
+            return
+        if self._transfer_busy:
+            messagebox.showinfo(
+                "Transfer",
+                "A transfer or device job is already in progress.",
+            )
+            return
+        package = filedialog.askopenfilename(
+            title="Select retail demo package (.zip)",
+            initialdir=self.library.root_path or os.path.expanduser("~/Music"),
+            filetypes=[
+                ("Retail package ZIP", "*.zip"),
+                ("All files", "*.*"),
+            ],
+        )
+        if not package:
+            return
+        # Quick map peek for confirmation count
+        from mtpmanager.infra.retail_package import (
+            entries_for_restore,
+            load_package_map,
+        )
+
+        peek = load_package_map(package)
+        if peek is None:
+            messagebox.showerror(
+                "Restore Retail Package",
+                "Could not read restore_map.json from the selected file.\n"
+                "Use Transfer → Package Retail Demos… to create a package.",
+            )
+            return
+        n = len(entries_for_restore(peek))
+        if n == 0:
+            messagebox.showinfo(
+                "Restore Retail Package",
+                "Package has no entries with include_in_restore=true.",
+            )
+            return
+        if not messagebox.askyesno(
+            "Restore Retail Package",
+            f"Send {n} retail/demo file(s) to the player?\n\n"
+            f"Package:\n{package}\n\n"
+            "Uses original short ObjectFileNames (not GUIDs) and tags from\n"
+            "restore_map.json desired_tags. Aborts remaining files on fatal\n"
+            "transport error. Continue?",
+        ):
+            return
+
+        if not self._begin_transfer_job():
+            return
+        transport = self._transport()
+
+        def work():
+            gen = self._bg.generation
+            report = self._bg.progress_callback(gen)
+
+            def progress(done: int, total: int, label: str) -> None:
+                report(
+                    "status",
+                    f"restoring {done + 1}/{total}  {label}"
+                    if total and done < total
+                    else f"restored {done}/{total}",
+                )
+                if total and total > 0:
+                    report("progress", done, total, label)
+
+            return retail_ops.restore_retail_package(
+                transport,
+                package,
+                on_progress=progress,
+                should_cancel=self._should_cancel_job,
+                stop_on_fatal=True,
+            )
+
+        def on_done(result) -> None:
+            self._end_transfer_job()
+            try:
+                self.win.progress["value"] = 100
+            except Exception:
+                pass
+            if result.cancelled:
+                messagebox.showinfo(
+                    "Restore cancelled",
+                    f"Stopped after {result.succeeded} of {result.total} file(s).",
+                )
+                return
+            if result.aborted:
+                messagebox.showerror(
+                    "Restore aborted",
+                    f"Sent {result.succeeded} of {result.total}.\n"
+                    f"Stopped at: {result.failed_label or '—'}\n\n"
+                    + (
+                        "\n".join(result.errors[:3])
+                        if result.errors
+                        else "Fatal transport error."
+                    )
+                    + "\n\nSession may be poisoned — disconnect/replug if needed.",
+                )
+                return
+            messagebox.showinfo(
+                "Restore Retail Package",
+                f"Sent {result.succeeded} of {result.total} file(s)"
+                f"{f' ({result.failed} failed)' if result.failed else ''}.",
+            )
+            logger.info(
+                "Retail restore done succeeded=%s failed=%s total=%s",
+                result.succeeded,
+                result.failed,
+                result.total,
+            )
+
+        def on_error(exc: BaseException) -> None:
+            self._end_transfer_job()
+            if isinstance(exc, JobCancelled):
+                self._handle_job_cancelled(exc, title="Restore cancelled")
+                return
+            if isinstance(exc, TransportError):
+                self._log_transport_error("Retail restore failed", exc)
+                messagebox.showerror(
+                    "Restore Retail Package",
+                    f"{exc}\n\n{self._transfer_recovery_hint()}",
+                )
+                return
+            logger.exception("Restore Retail Package failed")
+            messagebox.showerror("Restore Retail Package", str(exc))
+
+        self._bg.submit(
+            work,
+            on_done=on_done,
+            on_error=on_error,
+            on_progress=self._on_transfer_ui_event,
+            name="restore-retail-package",
+        )
+
     def action_get_tracks_from_device(self) -> None:
         """Experimental: download all media tracks (+ tags) to a host folder.
 
@@ -2616,6 +2855,11 @@ class AppController:
                 )
                 report("progress", done, total, label)
 
+            try:
+                identity = device_ops.get_device_identity(device)
+            except Exception:
+                identity = None
+
             return device_ops.retrieve_tracks(
                 device,
                 refs,
@@ -2623,6 +2867,8 @@ class AppController:
                 on_progress=dl_progress,
                 should_cancel=self._should_cancel_job,
                 write_tags=True,
+                device_info=identity,
+                write_map=True,
             )
 
         def on_done(result) -> None:
@@ -2631,11 +2877,17 @@ class AppController:
                 self.win.progress["value"] = 100
             except Exception:
                 pass
+            map_line = ""
+            if getattr(result, "map_json_path", ""):
+                map_line = (
+                    f"\n\nEditable map:\n{result.map_json_path}"
+                    f"\n(Readable study copy: {result.map_md_path or '—'})"
+                )
             if result.cancelled:
                 messagebox.showinfo(
                     "Get Tracks cancelled",
                     f"Stopped after {result.succeeded} of {result.total} "
-                    f"file(s).\nSaved under:\n{dest}",
+                    f"file(s).\nSaved under:\n{dest}{map_line}",
                 )
                 return
             if result.aborted:
@@ -2643,7 +2895,7 @@ class AppController:
                     "Get Tracks aborted",
                     f"Downloaded {result.succeeded} of {result.total}.\n"
                     f"Stopped at object id={result.failed_id}.\n\n"
-                    f"Folder:\n{dest}\n\n"
+                    f"Folder:\n{dest}{map_line}\n\n"
                     "Session may be poisoned — disconnect/replug if needed.",
                 )
                 return
@@ -2657,13 +2909,14 @@ class AppController:
                 "Get Tracks from Device",
                 f"Downloaded {result.succeeded} of {result.total} file(s)"
                 f"{f' ({result.failed} failed)' if result.failed else ''}.\n\n"
-                f"Saved under:\n{dest}",
+                f"Saved under:\n{dest}{map_line}",
             )
             logger.info(
-                "Get Tracks done succeeded=%s failed=%s dest=%s",
+                "Get Tracks done succeeded=%s failed=%s dest=%s map=%s",
                 result.succeeded,
                 result.failed,
                 dest,
+                getattr(result, "map_json_path", ""),
             )
 
         def on_error(exc: BaseException) -> None:

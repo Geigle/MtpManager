@@ -60,6 +60,7 @@ Do **not**:
 | Device profiles / graphics | `domain/device_profile.py`, `domain/device_profiles.py`, `assets/devices/` |
 | App config (send format, …) | `infra/app_config.py` (`config.json` under data dir) |
 | Track listing / media filter (ZEN) | `domain/device_media.py` + `pymtp_device.list_tracks` (filelisting + media filter) + on-demand tags via `device_ops.enrich_track_refs` / `get_track_metadata` + `tests/test_device_media.py` |
+| Export map / retail zip / restore | `infra/device_export_map.py`, `infra/retail_package.py`, `app/retail_ops.py` + `tests/test_device_export_map.py`, `tests/test_retail_package.py` |
 
 ---
 
