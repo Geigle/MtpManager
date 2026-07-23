@@ -11,6 +11,7 @@ from tkinter import (
     Entry,
     Frame,
     Label,
+    Radiobutton,
     StringVar,
     Toplevel,
     messagebox,
@@ -19,6 +20,11 @@ from tkinter import (
 
 from mtpmanager.domain.models import DeviceInfo
 from mtpmanager.infra.app_config import VALID_SEND_FORMATS
+from mtpmanager.infra.remote_naming import (
+    DEFAULT_TV_FOLDER_ID,
+    DEFAULT_VIDEO_FOLDER_ID,
+    ZEN_VISION_M_FOLDER_IDS,
+)
 from mtpmanager.ui.formatting import folder_line
 
 
@@ -184,6 +190,88 @@ def show_config_dialog(parent, *, send_format: str) -> str | None:
     try:
         px = parent.winfo_rootx() + max(0, (parent.winfo_width() - 340) // 2)
         py = parent.winfo_rooty() + max(0, (parent.winfo_height() - 200) // 3)
+        dlg.geometry(f"+{px}+{py}")
+    except Exception:
+        pass
+    parent.wait_window(dlg)
+    return result[0]
+
+
+def ask_video_destination(
+    parent,
+    *,
+    filename: str = "",
+) -> int | None:
+    """Ask Video (120) vs TV (124) parent folder. Returns folder id or None."""
+    dlg = Toplevel(parent)
+    dlg.title("Send Video")
+    dlg.transient(parent)
+    dlg.resizable(False, False)
+
+    body = Frame(dlg, padx=14, pady=12)
+    body.pack(fill=BOTH, expand=True)
+
+    label = filename.strip() or "selected file"
+    Label(
+        body,
+        text=f"Send to device as:\n\n{label}",
+        justify=LEFT,
+        wraplength=360,
+    ).pack(anchor="w", pady=(0, 10))
+
+    choice = StringVar(value="video")
+    Radiobutton(
+        body,
+        text=f"Video  (folder {DEFAULT_VIDEO_FOLDER_ID} — "
+        f"{ZEN_VISION_M_FOLDER_IDS[DEFAULT_VIDEO_FOLDER_ID]})",
+        variable=choice,
+        value="video",
+        anchor="w",
+    ).pack(fill="x", pady=2)
+    Radiobutton(
+        body,
+        text=f"TV show  (folder {DEFAULT_TV_FOLDER_ID} — "
+        f"{ZEN_VISION_M_FOLDER_IDS[DEFAULT_TV_FOLDER_ID]})",
+        variable=choice,
+        value="tv",
+        anchor="w",
+    ).pack(fill="x", pady=2)
+
+    Label(
+        body,
+        text=(
+            "Parent folder only — ObjectFileName stays the file basename\n"
+            "(sanitized). ZEN Vision:M expects WMV/AVI-style video."
+        ),
+        justify=LEFT,
+        wraplength=360,
+    ).pack(anchor="w", pady=(10, 12))
+
+    result: list[int | None] = [None]
+
+    def on_send() -> None:
+        if choice.get() == "tv":
+            result[0] = DEFAULT_TV_FOLDER_ID
+        else:
+            result[0] = DEFAULT_VIDEO_FOLDER_ID
+        dlg.destroy()
+
+    def on_cancel() -> None:
+        result[0] = None
+        dlg.destroy()
+
+    btn_row = Frame(body)
+    btn_row.pack(fill="x")
+    Button(btn_row, text="Cancel", width=10, command=on_cancel).pack(
+        side=RIGHT, padx=(6, 0)
+    )
+    Button(btn_row, text="Send", width=10, command=on_send).pack(side=RIGHT)
+
+    dlg.protocol("WM_DELETE_WINDOW", on_cancel)
+    dlg.grab_set()
+    try:
+        px = parent.winfo_rootx() + max(0, (parent.winfo_width() - 380) // 2)
+        py = parent.winfo_rooty() + max(0, (parent.winfo_height() - 220) // 3)
         dlg.geometry(f"+{px}+{py}")
     except Exception:
         pass

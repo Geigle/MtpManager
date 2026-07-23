@@ -11,6 +11,7 @@ from pathlib import Path
 from mtpmanager.app.cancellation import CancelCheck, JobCancelled, raise_if_cancelled
 from mtpmanager.infra.remote_naming import (
     DEFAULT_MUSIC_FOLDER_ID,
+    DEFAULT_VIDEO_FOLDER_ID,
     ZEN_VISION_M_FOLDER_IDS,
 )
 from mtpmanager.infra.retail_package import (
@@ -29,8 +30,6 @@ ProgressCallback = Callable[[int, int, str], None]
 
 # libmtp filetype enums commonly used for video (see device_export_map labels).
 _VIDEO_FILETYPES = frozenset({8, 9, 10, 11, 12, 13})  # WMV AVI MPEG ASF QT UNDEF_VIDEO
-_VIDEO_FOLDER_ID = 120  # ZEN Vision:M "Video" — see remote_naming.ZEN_VISION_M_FOLDER_IDS
-assert _VIDEO_FOLDER_ID in ZEN_VISION_M_FOLDER_IDS
 
 
 @dataclass
@@ -66,10 +65,10 @@ def _parent_for_entry(entry: dict) -> int:
     if parent in ZEN_VISION_M_FOLDER_IDS:
         return parent
     if ft in _VIDEO_FILETYPES:
-        return _VIDEO_FOLDER_ID
+        return DEFAULT_VIDEO_FOLDER_ID
     label = str(obj.get("filetype_label") or "").casefold()
     if any(x in label for x in ("video", "wmv", "avi", "mpeg", "asf")):
-        return _VIDEO_FOLDER_ID
+        return DEFAULT_VIDEO_FOLDER_ID
     return DEFAULT_MUSIC_FOLDER_ID
 
 

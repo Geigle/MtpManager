@@ -61,6 +61,7 @@ from mtpmanager.infra.pymtp_device import PymtpDevice
 from mtpmanager.infra.remote_naming import (
     DEFAULT_MUSIC_FOLDER_ID,
     DEFAULT_STORAGE_ID,
+    ZEN_VISION_M_FOLDER_IDS,
     build_remote_path,
     split_remote_path,
 )
@@ -74,6 +75,7 @@ from mtpmanager.ports.transport import TransportError
 from mtpmanager.ui.bg import TkBackgroundRunner
 from mtpmanager.ui.dialogs import (
     ask_text,
+    ask_video_destination,
     pick_file_entry_dialog,
     show_config_dialog,
     show_device_info_dialog,
@@ -177,6 +179,7 @@ class AppController:
             on_disconnect=self.on_disconnect,
             on_device_info=self.on_device_info,
             on_create_folder=self.action_create_folder,
+            on_send_video=self.action_send_video,
             on_list_folders=self.action_read_folder_list,
             on_list_files=self.action_read_file_list,
             on_list_tracks=self.action_read_track_list,
@@ -2501,6 +2504,102 @@ class AppController:
         except Exception as e:
             logger.exception("Create folder failed")
             messagebox.showerror("Create Folder", str(e))
+
+    def action_send_video(self) -> None:
+        """Device → Send Video… — pick a file, choose Video or TV parent, send."""
+        if not self._require_device_ready():
+            return
+        if self._transfer_busy:
+            messagebox.showinfo(
+                "Send Video",
+                "A transfer or device job is already in progress.",
+            )
+            return
+        path = filedialog.askopenfilename(
+            title="Select video file to send",
+            initialdir=self.library.root_path or os.path.expanduser("~"),
+            filetypes=[
+                (
+                    "Video files",
+                    "*.wmv *.avi *.mpg *.mpeg *.asf *.mp4 *.mov *.m4v *.qt",
+                ),
+                ("All files", "*.*"),
+            ],
+        )
+        if not path:
+            return
+        if not os.path.isfile(path):
+            messagebox.showerror("Send Video", f"File not found:\n{path}")
+            return
+
+        parent_id = ask_video_destination(
+            self.win.root,
+            filename=os.path.basename(path),
+        )
+        if parent_id is None:
+            return
+        folder_label = ZEN_VISION_M_FOLDER_IDS.get(int(parent_id), str(parent_id))
+        if not messagebox.askyesno(
+            "Send Video",
+            f"Send this file to the device {folder_label} folder?\n\n"
+            f"{path}\n\n"
+            f"Parent folder id: {parent_id}\n"
+            "Object name: sanitized host basename (not a library GUID).",
+        ):
+            return
+
+        transport = self._transport()
+        serial = self._device_serial or device_serial_key()
+        parent = int(parent_id)
+
+        def work(device):
+            # *device* is the live PyMTP session; send uses Transport protocol.
+            _ = device
+            return device_ops.send_video(
+                transport,
+                path,
+                parent_id=parent,
+            )
+
+        def on_success(result) -> None:
+            try:
+                record_send(
+                    serial,
+                    remote_name=result.remote_basename,
+                    guid=None,
+                    item_id=result.object_id,
+                    parent_id=result.parent_id,
+                    storage_id=DEFAULT_STORAGE_ID,
+                )
+            except Exception:
+                logger.debug(
+                    "device_index record_send after video failed",
+                    exc_info=True,
+                )
+            oid_s = (
+                f" object id={result.object_id}" if result.object_id else ""
+            )
+            messagebox.showinfo(
+                "Send Video",
+                f"Sent to {folder_label} (folder {result.parent_id})."
+                f"{oid_s}\n\n{result.remote_basename}",
+            )
+            logger.info(
+                "Send Video ok path=%s parent=%s object_id=%s remote=%s",
+                path,
+                result.parent_id,
+                result.object_id,
+                result.remote_basename,
+            )
+
+        self._run_device_bg(
+            title="Send Video",
+            name="send-video",
+            work=work,
+            on_success=on_success,
+            busy_message=f"sending video to {folder_label}…",
+            progress_mode="indeterminate",
+        )
 
     def action_read_folder_list(self) -> None:
         """Device → List Folders (USB; run off the Tk thread)."""

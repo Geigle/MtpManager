@@ -20,9 +20,16 @@ from mtpmanager.domain.models import (
     TrackMetadata,
 )
 from mtpmanager.infra.mutagen_tags import write_metadata
-from mtpmanager.infra.remote_naming import DEFAULT_MUSIC_FOLDER_ID, sanitize_component
+from mtpmanager.infra.remote_naming import (
+    DEFAULT_MUSIC_FOLDER_ID,
+    DEFAULT_TV_FOLDER_ID,
+    DEFAULT_VIDEO_FOLDER_ID,
+    build_remote_path,
+    sanitize_component,
+    split_remote_path,
+)
 from mtpmanager.ports.device import DevicePort
-from mtpmanager.ports.transport import TransportError
+from mtpmanager.ports.transport import Transport, TransportError
 
 logger = logging.getLogger(__name__)
 
@@ -664,3 +671,81 @@ def delete_all_tracks(
 
 def send_test_file(device: DevicePort, path: str) -> None:
     device.send_file(path)
+
+
+# Ad-hoc video send destinations (Device → Send Video…).
+VIDEO_PARENT_CHOICES: frozenset[int] = frozenset(
+    {DEFAULT_VIDEO_FOLDER_ID, DEFAULT_TV_FOLDER_ID}
+)
+
+
+@dataclass(frozen=True)
+class SendVideoResult:
+    """Outcome of an ad-hoc video send."""
+
+    object_id: int | None
+    parent_id: int
+    remote_basename: str
+    path: str
+
+
+def send_video(
+    transport: Transport,
+    path: str,
+    *,
+    parent_id: int,
+    title: str | None = None,
+) -> SendVideoResult:
+    """Send a local video file under Video (120) or TV (124).
+
+    Uses the normal track-send path (``LIBMTP_Send_Track_From_File``) so
+    storage_id, filetype, and parent match the ZEN contract — same approach
+    as retail video restore. ObjectFileName is the sanitized host basename
+    (no library GUID).
+    """
+    parent = int(parent_id)
+    if parent not in VIDEO_PARENT_CHOICES:
+        raise ValueError(
+            f"parent_id must be Video ({DEFAULT_VIDEO_FOLDER_ID}) or "
+            f"TV ({DEFAULT_TV_FOLDER_ID}), got {parent}"
+        )
+    if not path or not os.path.isfile(path):
+        raise FileNotFoundError(f"Video file not found: {path!r}")
+
+    base = os.path.basename(path)
+    stem, ext = os.path.splitext(base)
+    if not ext:
+        ext = ".wmv"
+    display_title = (title or stem or "Video").strip() or "Video"
+    meta = TrackMetadata(
+        title=display_title,
+        artist="Unknown Artist",
+        album="Unknown Album",
+        tracknumber="01",
+    )
+    remote = build_remote_path(
+        meta,
+        ext,
+        music_folder_id=parent,
+        preferred_basename=base,
+    )
+    _, remote_base = split_remote_path(remote)
+    logger.info(
+        "send_video path=%s parent=%s remote=%s",
+        path,
+        parent,
+        remote_base,
+    )
+    object_id = transport.send_track(
+        path,
+        meta,
+        parent_id=parent,
+        guid=None,
+        preferred_basename=base,
+    )
+    return SendVideoResult(
+        object_id=object_id,
+        parent_id=parent,
+        remote_basename=remote_base,
+        path=path,
+    )

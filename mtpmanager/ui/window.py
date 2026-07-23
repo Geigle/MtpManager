@@ -84,6 +84,7 @@ MENU_CONNECT = "Connect"
 MENU_DISCONNECT = "Disconnect"
 MENU_DEVICE_INFO = "Device Info"
 MENU_CREATE_FOLDER = "Create Folder…"
+MENU_SEND_VIDEO = "Send Video… (experimental)"
 MENU_LIST_FOLDERS = "List Folders"
 MENU_LIST_FILES = "List Files (experimental)"
 MENU_LIST_TRACKS = "List Tracks (experimental)"
@@ -109,6 +110,7 @@ _DEVICE_MENU_LABELS = (
     MENU_DISCONNECT,
     MENU_DEVICE_INFO,
     MENU_CREATE_FOLDER,
+    MENU_SEND_VIDEO,
     MENU_LIST_FOLDERS,
     MENU_LIST_FILES,
     MENU_LIST_TRACKS,
@@ -495,11 +497,14 @@ class MainWindow:
         on_get_track_info=None,
         on_delete_all,
         on_refresh_device_index=None,
+        on_send_video=None,
     ) -> None:
         self.menu_device.entryconfig(MENU_CONNECT, command=on_connect)
         self.menu_device.entryconfig(MENU_DISCONNECT, command=on_disconnect)
         self.menu_device.entryconfig(MENU_DEVICE_INFO, command=on_device_info)
         self.menu_device.entryconfig(MENU_CREATE_FOLDER, command=on_create_folder)
+        if on_send_video is not None:
+            self.menu_device.entryconfig(MENU_SEND_VIDEO, command=on_send_video)
         self.menu_device.entryconfig(MENU_LIST_FOLDERS, command=on_list_folders)
         if on_list_files is not None:
             self.menu_device.entryconfig(MENU_LIST_FILES, command=on_list_files)
