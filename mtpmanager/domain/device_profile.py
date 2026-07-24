@@ -10,6 +10,46 @@ from mtpmanager.domain.models import DeviceInfo
 
 
 @dataclass(frozen=True)
+class VideoEncodeProfile:
+    """How to re-encode host video for a picky DAP (Device → Send Video).
+
+    Values mirror measured Creative retail demos for ZEN Vision:M:
+    AVI + MPEG-4 Part 2 (XVID/DX50) + single MP3 @ 44.1 kHz stereo,
+    typically 640×480 @ 25 fps. Encoding uses stock ffmpeg ``mpeg4`` +
+    ``-vtag XVID`` (no libxvid required).
+    """
+
+    id: str
+    display_name: str
+    # Output container extension (no dot), e.g. "avi".
+    container: str = "avi"
+    # Video encoder name for ffmpeg (-c:v).
+    video_codec: str = "mpeg4"
+    # FourCC / -vtag (demos use XVID; DX50 also seen).
+    video_tag: str = "XVID"
+    # Acceptable tags when deciding "already device-ready" (casefold).
+    acceptable_video_tags: tuple[str, ...] = ("XVID", "DX50")
+    # libavcodec name expected on already-good files (mpeg4).
+    probe_video_codec: str = "mpeg4"
+    # Target geometry (letterbox/pad into this frame).
+    width: int = 640
+    height: int = 480
+    fps: float = 25.0
+    # Quality scale for mpeg4 (lower = better; demos ~1–3 Mbps).
+    qscale_v: int = 5
+    # Audio: demos are MP3 stereo 44.1 kHz ~128k.
+    audio_codec: str = "libmp3lame"
+    probe_audio_codec: str = "mp3"
+    audio_bitrate: str = "128k"
+    audio_sample_rate: int = 44100
+    audio_channels: int = 2
+    # Short summary for UI checkbox help.
+    summary: str = (
+        "AVI · MPEG-4/XVID · 640×480 @ 25 fps · MP3 stereo 44.1 kHz"
+    )
+
+
+@dataclass(frozen=True)
 class DeviceProfile:
     """Describes a known player family for UI and device-specific behavior.
 
@@ -19,6 +59,9 @@ class DeviceProfile:
     *supported_audio_formats* lists extensions the player can play natively
     (lowercase, no dot). Sources already in these formats are sent as-is
     instead of re-encoding to the user's preferred target format.
+
+    *video_encode*, when set, is the Device → Send Video encode profile
+    for this player (e.g. ZEN Vision:M retail-demo AVI fingerprint).
     """
 
     id: str
@@ -29,6 +72,7 @@ class DeviceProfile:
     graphic_filename: str = "generic_player.png"
     # Native playable audio extensions (e.g. frozenset({"mp3", "wma", "wav"})).
     supported_audio_formats: frozenset[str] = frozenset({"mp3"})
+    video_encode: VideoEncodeProfile | None = None
 
     def accepts_audio_format(self, fmt: str) -> bool:
         """True if *fmt* (extension or dotted) is natively playable."""

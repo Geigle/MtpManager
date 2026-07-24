@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
+
 from tkinter import (
     BOTH,
     LEFT,
     RIGHT,
+    BooleanVar,
     Button,
+    Checkbutton,
     Entry,
     Frame,
     Label,
@@ -18,6 +22,7 @@ from tkinter import (
     simpledialog,
 )
 
+from mtpmanager.domain.device_profile import VideoEncodeProfile
 from mtpmanager.domain.models import DeviceInfo
 from mtpmanager.infra.app_config import VALID_SEND_FORMATS
 from mtpmanager.infra.remote_naming import (
@@ -197,12 +202,22 @@ def show_config_dialog(parent, *, send_format: str) -> str | None:
     return result[0]
 
 
+@dataclass(frozen=True)
+class SendVideoDialogResult:
+    """User choices from Device → Send Video…"""
+
+    parent_id: int
+    encode_for_device: bool
+
+
 def ask_video_destination(
     parent,
     *,
     filename: str = "",
-) -> int | None:
-    """Ask Video (120) vs TV (124) parent folder. Returns folder id or None."""
+    video_encode: VideoEncodeProfile | None = None,
+    encode_default: bool = True,
+) -> SendVideoDialogResult | None:
+    """Ask Video/TV parent and optional device encode. None if cancelled."""
     dlg = Toplevel(parent)
     dlg.title("Send Video")
     dlg.transient(parent)
@@ -214,11 +229,12 @@ def ask_video_destination(
     label = filename.strip() or "selected file"
     Label(
         body,
-        text=f"Send to device as:\n\n{label}",
+        text=f"Send to device:\n\n{label}",
         justify=LEFT,
-        wraplength=360,
+        wraplength=380,
     ).pack(anchor="w", pady=(0, 10))
 
+    Label(body, text="Destination folder:", anchor="w").pack(fill="x")
     choice = StringVar(value="video")
     Radiobutton(
         body,
@@ -237,23 +253,50 @@ def ask_video_destination(
         anchor="w",
     ).pack(fill="x", pady=2)
 
-    Label(
-        body,
-        text=(
-            "Parent folder only — ObjectFileName stays the file basename\n"
-            "(sanitized). ZEN Vision:M expects WMV/AVI-style video."
-        ),
-        justify=LEFT,
-        wraplength=360,
-    ).pack(anchor="w", pady=(10, 12))
+    encode_var = BooleanVar(value=bool(encode_default and video_encode is not None))
+    if video_encode is not None:
+        Checkbutton(
+            body,
+            text=f"Encode for {video_encode.display_name}",
+            variable=encode_var,
+            anchor="w",
+            justify=LEFT,
+        ).pack(fill="x", pady=(12, 2))
+        Label(
+            body,
+            text=(
+                f"{video_encode.summary}\n"
+                "Matches stock Creative demos (AVI/XVID + MP3). "
+                "Skips re-encode when the file already matches. "
+                "Uncheck to send the original file as-is."
+            ),
+            justify=LEFT,
+            wraplength=380,
+        ).pack(anchor="w", pady=(0, 8))
+    else:
+        Label(
+            body,
+            text=(
+                "No device video encode profile for this player — "
+                "file will be sent as-is.\n"
+                "ObjectFileName is the sanitized host basename."
+            ),
+            justify=LEFT,
+            wraplength=380,
+        ).pack(anchor="w", pady=(12, 8))
 
-    result: list[int | None] = [None]
+    result: list[SendVideoDialogResult | None] = [None]
 
     def on_send() -> None:
-        if choice.get() == "tv":
-            result[0] = DEFAULT_TV_FOLDER_ID
-        else:
-            result[0] = DEFAULT_VIDEO_FOLDER_ID
+        parent_id = (
+            DEFAULT_TV_FOLDER_ID
+            if choice.get() == "tv"
+            else DEFAULT_VIDEO_FOLDER_ID
+        )
+        result[0] = SendVideoDialogResult(
+            parent_id=int(parent_id),
+            encode_for_device=bool(encode_var.get()) and video_encode is not None,
+        )
         dlg.destroy()
 
     def on_cancel() -> None:
@@ -270,8 +313,8 @@ def ask_video_destination(
     dlg.protocol("WM_DELETE_WINDOW", on_cancel)
     dlg.grab_set()
     try:
-        px = parent.winfo_rootx() + max(0, (parent.winfo_width() - 380) // 2)
-        py = parent.winfo_rooty() + max(0, (parent.winfo_height() - 220) // 3)
+        px = parent.winfo_rootx() + max(0, (parent.winfo_width() - 400) // 2)
+        py = parent.winfo_rooty() + max(0, (parent.winfo_height() - 280) // 3)
         dlg.geometry(f"+{px}+{py}")
     except Exception:
         pass

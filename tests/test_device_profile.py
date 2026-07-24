@@ -51,6 +51,19 @@ class DeviceProfileTests(unittest.TestCase):
         self.assertTrue(ZEN_VISION_M.accepts_source_path("/lib/song.wav"))
         self.assertFalse(ZEN_VISION_M.accepts_source_path("/lib/song.flac"))
 
+    def test_zen_video_encode_profile(self) -> None:
+        ve = ZEN_VISION_M.video_encode
+        self.assertIsNotNone(ve)
+        assert ve is not None
+        self.assertEqual(ve.container, "avi")
+        self.assertEqual(ve.video_codec, "mpeg4")
+        self.assertEqual(ve.video_tag, "XVID")
+        self.assertEqual(ve.width, 640)
+        self.assertEqual(ve.height, 480)
+        self.assertEqual(ve.fps, 25.0)
+        self.assertEqual(ve.probe_audio_codec, "mp3")
+        self.assertIsNone(GENERIC.video_encode)
+
     def test_needs_transcode_passthrough_native(self) -> None:
         # Prefer passthrough of device-native formats over re-encode to target.
         self.assertFalse(

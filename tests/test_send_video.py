@@ -5,12 +5,15 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from mtpmanager.app.device_ops import (
     VIDEO_PARENT_CHOICES,
     SendVideoResult,
+    prepare_and_send_video,
     send_video,
 )
+from mtpmanager.domain.device_profiles import ZEN_VISION_M, ZEN_VISION_M_VIDEO
 from mtpmanager.domain.models import TrackMetadata
 from mtpmanager.infra.remote_naming import (
     DEFAULT_MUSIC_FOLDER_ID,
@@ -58,6 +61,15 @@ class SendVideoTests(unittest.TestCase):
             VIDEO_PARENT_CHOICES,
             frozenset({DEFAULT_VIDEO_FOLDER_ID, DEFAULT_TV_FOLDER_ID}),
         )
+
+    def test_zen_profile_has_video_encode(self) -> None:
+        self.assertIsNotNone(ZEN_VISION_M.video_encode)
+        assert ZEN_VISION_M.video_encode is not None
+        self.assertEqual(ZEN_VISION_M.video_encode.container, "avi")
+        self.assertEqual(ZEN_VISION_M.video_encode.video_tag, "XVID")
+        self.assertEqual(ZEN_VISION_M.video_encode.width, 640)
+        self.assertEqual(ZEN_VISION_M.video_encode.height, 480)
+        self.assertEqual(ZEN_VISION_M_VIDEO.id, ZEN_VISION_M.video_encode.id)
 
     def test_build_remote_path_under_video_parent(self) -> None:
         remote = build_remote_path(
@@ -139,6 +151,111 @@ class SendVideoTests(unittest.TestCase):
             )
             self.assertNotIn("&", result.remote_basename)
             self.assertTrue(result.remote_basename.endswith(".wmv"))
+
+    def test_prepare_skips_encode_when_compatible(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "demo.avi"
+            path.write_bytes(b"fake")
+            transport = _FakeTransport()
+            events: list[tuple] = []
+
+            def on_progress(kind, *args):
+                events.append((kind, *args))
+
+            with patch(
+                "mtpmanager.infra.ffmpeg_video.video_matches_encode_profile",
+                return_value=True,
+            ), patch(
+                "mtpmanager.infra.ffmpeg_video.convert_video_for_profile"
+            ) as convert:
+                result = prepare_and_send_video(
+                    transport,
+                    str(path),
+                    parent_id=DEFAULT_VIDEO_FOLDER_ID,
+                    encode_profile=ZEN_VISION_M_VIDEO,
+                    encode_for_device=True,
+                    on_progress=on_progress,
+                )
+            convert.assert_not_called()
+            self.assertFalse(result.encoded)
+            self.assertTrue(result.encode_skipped_compatible)
+            self.assertEqual(transport.calls[0]["path"], str(path))
+            kinds = [e[0] for e in events]
+            self.assertIn("phase", kinds)
+            self.assertIn("send", [e[1] for e in events if e[0] == "phase"])
+
+    def test_prepare_encodes_when_needed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "movie.wmv"
+            src.write_bytes(b"src")
+            encoded = Path(tmp) / "VIDEO_TRANSCODE_abc123.avi"
+            encoded.write_bytes(b"enc")
+            transport = _FakeTransport()
+            phases: list[str] = []
+
+            def on_progress(kind, *args):
+                if kind == "phase":
+                    phases.append(str(args[0]))
+
+            with patch(
+                "mtpmanager.infra.ffmpeg_video.video_matches_encode_profile",
+                return_value=False,
+            ), patch(
+                "mtpmanager.infra.ffmpeg_video.default_temp_video_path",
+                return_value=str(encoded),
+            ), patch(
+                "mtpmanager.infra.ffmpeg_video.convert_video_for_profile",
+                return_value=str(encoded),
+            ) as convert, patch(
+                "mtpmanager.infra.ffmpeg_video.cleanup_video_temp"
+            ) as cleanup:
+                result = prepare_and_send_video(
+                    transport,
+                    str(src),
+                    parent_id=DEFAULT_TV_FOLDER_ID,
+                    encode_profile=ZEN_VISION_M_VIDEO,
+                    encode_for_device=True,
+                    on_progress=on_progress,
+                )
+            convert.assert_called_once()
+            self.assertTrue(result.encoded)
+            self.assertFalse(result.encode_skipped_compatible)
+            self.assertEqual(result.parent_id, DEFAULT_TV_FOLDER_ID)
+            self.assertEqual(transport.calls[0]["path"], str(encoded))
+            self.assertTrue(
+                str(transport.calls[0]["preferred_basename"]).endswith(".avi")
+            )
+            self.assertEqual(phases, ["transcode", "send"])
+            cleanup.assert_called()
+
+    def test_prepare_no_encode_when_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "raw.mp4"
+            path.write_bytes(b"x")
+            transport = _FakeTransport()
+            with patch(
+                "mtpmanager.infra.ffmpeg_video.convert_video_for_profile"
+            ) as convert:
+                result = prepare_and_send_video(
+                    transport,
+                    str(path),
+                    parent_id=DEFAULT_VIDEO_FOLDER_ID,
+                    encode_profile=ZEN_VISION_M_VIDEO,
+                    encode_for_device=False,
+                )
+            convert.assert_not_called()
+            self.assertFalse(result.encoded)
+            self.assertEqual(transport.calls[0]["path"], str(path))
+
+
+class VideoEncodeProfileProbeTests(unittest.TestCase):
+    def test_vf_filter_and_match_helpers(self) -> None:
+        from mtpmanager.infra.ffmpeg_video import _vf_filter
+
+        vf = _vf_filter(ZEN_VISION_M_VIDEO)
+        self.assertIn("640:480", vf)
+        self.assertIn("fps=25", vf)
+        self.assertIn("yuv420p", vf)
 
 
 if __name__ == "__main__":

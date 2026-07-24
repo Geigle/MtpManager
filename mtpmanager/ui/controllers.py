@@ -1700,6 +1700,13 @@ class AppController:
         self.win.set_progress_status("")
         return True
 
+    def _reset_progress_bar_style(self) -> None:
+        """Restore default progress color after a phased job (Send Video)."""
+        try:
+            self.win.set_progress_bar_phase(None)
+        except Exception:
+            pass
+
     def _end_transfer_job(self) -> None:
         self._transfer_busy = False
         self._job_cancel.clear()
@@ -1713,6 +1720,10 @@ class AppController:
         self._stop_busy_progress()
         self._batch_track_by_path = {}
         self.win.set_progress_status("")
+        try:
+            self.win.set_progress_bar_phase(None)
+        except Exception:
+            pass
         # Listing/transfer just finished — pause auto-connect USB probes.
         self._device_probe_fails = 0
         self._mark_usb_quiet()
@@ -2506,7 +2517,7 @@ class AppController:
             messagebox.showerror("Create Folder", str(e))
 
     def action_send_video(self) -> None:
-        """Device → Send Video… — pick a file, choose Video or TV parent, send."""
+        """Device → Send Video… — pick file, folder + encode profile, send."""
         if not self._require_device_ready():
             return
         if self._transfer_busy:
@@ -2532,34 +2543,97 @@ class AppController:
             messagebox.showerror("Send Video", f"File not found:\n{path}")
             return
 
-        parent_id = ask_video_destination(
+        video_profile = None
+        if self._active_profile is not None:
+            video_profile = self._active_profile.video_encode
+
+        opts = ask_video_destination(
             self.win.root,
             filename=os.path.basename(path),
+            video_encode=video_profile,
+            encode_default=True,
         )
-        if parent_id is None:
+        if opts is None:
             return
-        folder_label = ZEN_VISION_M_FOLDER_IDS.get(int(parent_id), str(parent_id))
+        parent = int(opts.parent_id)
+        encode = bool(opts.encode_for_device) and video_profile is not None
+        folder_label = ZEN_VISION_M_FOLDER_IDS.get(parent, str(parent))
+        encode_note = (
+            f"Encode: {video_profile.display_name}\n"
+            if encode and video_profile is not None
+            else "Encode: off (send as-is)\n"
+        )
         if not messagebox.askyesno(
             "Send Video",
             f"Send this file to the device {folder_label} folder?\n\n"
             f"{path}\n\n"
-            f"Parent folder id: {parent_id}\n"
+            f"Parent folder id: {parent}\n"
+            f"{encode_note}"
             "Object name: sanitized host basename (not a library GUID).",
         ):
             return
 
         transport = self._transport()
         serial = self._device_serial or device_serial_key()
-        parent = int(parent_id)
+        profile = video_profile if encode else None
 
         def work(device):
-            # *device* is the live PyMTP session; send uses Transport protocol.
             _ = device
-            return device_ops.send_video(
+            gen = self._bg.generation
+            report = self._bg.progress_callback(gen)
+
+            def on_progress(kind: str, *args) -> None:
+                # Forward worker events to main-thread UI handler.
+                report(kind, *args)
+
+            return device_ops.prepare_and_send_video(
                 transport,
                 path,
                 parent_id=parent,
+                encode_profile=profile,
+                encode_for_device=encode,
+                on_progress=on_progress,
             )
+
+        def on_ui_event(kind: str, *rest) -> None:
+            if kind == "phase":
+                phase = str(rest[0]) if rest else ""
+                try:
+                    self.win.set_progress_bar_phase(
+                        "transcode" if phase == "transcode" else "send"
+                    )
+                except Exception:
+                    pass
+                if phase == "transcode":
+                    try:
+                        self.win.progress.configure(mode="determinate")
+                        self.win.progress["value"] = 0
+                    except Exception:
+                        pass
+                    self.win.set_progress_status("Encoding for device…")
+                elif phase == "send":
+                    self.win.set_progress_status("Sending to device…")
+                return
+            if kind == "progress":
+                if len(rest) >= 3:
+                    done, total, label = int(rest[0]), int(rest[1]), str(rest[2])
+                    try:
+                        self.win.progress.configure(mode="determinate")
+                        if total > 0:
+                            self.win.progress["value"] = max(
+                                0, min(100, int(round(100 * done / total)))
+                            )
+                    except Exception:
+                        pass
+                    if label:
+                        self.win.set_progress_status(label)
+                return
+            if kind == "status":
+                if rest:
+                    self.win.set_progress_status(str(rest[0]))
+                return
+            # Fall through to shared transfer progress shapes if any.
+            self._on_transfer_ui_event(kind, *rest)
 
         def on_success(result) -> None:
             try:
@@ -2579,17 +2653,26 @@ class AppController:
             oid_s = (
                 f" object id={result.object_id}" if result.object_id else ""
             )
+            if result.encoded:
+                how = "encoded for device, then sent"
+            elif result.encode_skipped_compatible:
+                how = "already device-compatible (encode skipped)"
+            else:
+                how = "sent as-is"
             messagebox.showinfo(
                 "Send Video",
                 f"Sent to {folder_label} (folder {result.parent_id})."
-                f"{oid_s}\n\n{result.remote_basename}",
+                f"{oid_s}\n\n{result.remote_basename}\n\n({how})",
             )
             logger.info(
-                "Send Video ok path=%s parent=%s object_id=%s remote=%s",
+                "Send Video ok path=%s parent=%s object_id=%s remote=%s "
+                "encoded=%s skipped_ok=%s",
                 path,
                 result.parent_id,
                 result.object_id,
                 result.remote_basename,
+                result.encoded,
+                result.encode_skipped_compatible,
             )
 
         self._run_device_bg(
@@ -2597,8 +2680,13 @@ class AppController:
             name="send-video",
             work=work,
             on_success=on_success,
-            busy_message=f"sending video to {folder_label}…",
-            progress_mode="indeterminate",
+            busy_message=(
+                f"preparing/sending video to {folder_label}…"
+                if encode
+                else f"sending video to {folder_label}…"
+            ),
+            on_progress=on_ui_event,
+            progress_mode="determinate",
         )
 
     def action_read_folder_list(self) -> None:

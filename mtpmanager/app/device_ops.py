@@ -678,6 +678,12 @@ VIDEO_PARENT_CHOICES: frozenset[int] = frozenset(
     {DEFAULT_VIDEO_FOLDER_ID, DEFAULT_TV_FOLDER_ID}
 )
 
+# on_progress(kind, *args) kinds used by Send Video worker:
+#   "phase", "transcode"|"send"     — UI progress bar color
+#   "progress", done, total, label  — determinate bar (0–100 domain)
+#   "status", message               — status line only
+SendVideoProgress = Callable[..., None]
+
 
 @dataclass(frozen=True)
 class SendVideoResult:
@@ -686,7 +692,10 @@ class SendVideoResult:
     object_id: int | None
     parent_id: int
     remote_basename: str
-    path: str
+    path: str  # path actually sent (may be temp encode)
+    source_path: str = ""
+    encoded: bool = False
+    encode_skipped_compatible: bool = False
 
 
 def send_video(
@@ -695,6 +704,7 @@ def send_video(
     *,
     parent_id: int,
     title: str | None = None,
+    preferred_basename: str | None = None,
 ) -> SendVideoResult:
     """Send a local video file under Video (120) or TV (124).
 
@@ -712,10 +722,14 @@ def send_video(
     if not path or not os.path.isfile(path):
         raise FileNotFoundError(f"Video file not found: {path!r}")
 
-    base = os.path.basename(path)
+    base = (preferred_basename or os.path.basename(path)).strip()
+    if not base:
+        base = os.path.basename(path)
     stem, ext = os.path.splitext(base)
     if not ext:
-        ext = ".wmv"
+        _, path_ext = os.path.splitext(path)
+        ext = path_ext or ".avi"
+        base = f"{stem or 'video'}{ext}"
     display_title = (title or stem or "Video").strip() or "Video"
     meta = TrackMetadata(
         title=display_title,
@@ -748,4 +762,112 @@ def send_video(
         parent_id=parent,
         remote_basename=remote_base,
         path=path,
+        source_path=path,
+        encoded=False,
     )
+
+
+def prepare_and_send_video(
+    transport: Transport,
+    source_path: str,
+    *,
+    parent_id: int,
+    encode_profile=None,
+    encode_for_device: bool = False,
+    on_progress: SendVideoProgress | None = None,
+    title: str | None = None,
+) -> SendVideoResult:
+    """Optional device-profile encode, then :func:`send_video`.
+
+    When *encode_for_device* and *encode_profile* are set, re-encodes to the
+    retail-demo fingerprint unless the source already matches. Temp encodes
+    are cleaned up after send (success or failure).
+    """
+    from mtpmanager.domain.device_profile import VideoEncodeProfile
+    from mtpmanager.infra.ffmpeg_video import (
+        cleanup_video_temp,
+        convert_video_for_profile,
+        default_temp_video_path,
+        video_matches_encode_profile,
+    )
+
+    def _emit(kind: str, *args) -> None:
+        if on_progress is None:
+            return
+        try:
+            on_progress(kind, *args)
+        except Exception:
+            logger.debug("send_video on_progress failed", exc_info=True)
+
+    src = source_path
+    if not src or not os.path.isfile(src):
+        raise FileNotFoundError(f"Video file not found: {src!r}")
+
+    profile: VideoEncodeProfile | None = encode_profile
+    send_path = src
+    temp_path: str | None = None
+    encoded = False
+    skipped_ok = False
+    source_stem = os.path.splitext(os.path.basename(src))[0] or "video"
+
+    try:
+        if encode_for_device and profile is not None:
+            if video_matches_encode_profile(src, profile):
+                skipped_ok = True
+                logger.info(
+                    "Send Video: source already matches profile %s — skip encode",
+                    profile.id,
+                )
+                _emit("status", "already device-compatible — skipping encode")
+            else:
+                _emit("phase", "transcode")
+                _emit("progress", 0, 100, "encoding for device…")
+                temp_path = default_temp_video_path(profile)
+
+                def _enc_progress(done: float, total: float, msg: str) -> None:
+                    if total and total > 0:
+                        # Reserve 0–85% of the bar for encode.
+                        pct = int(min(85, max(0, (done / total) * 85)))
+                        _emit("progress", pct, 100, msg)
+                    else:
+                        _emit("status", msg)
+
+                send_path = convert_video_for_profile(
+                    src,
+                    profile,
+                    dest_path=temp_path,
+                    on_progress=_enc_progress,
+                )
+                encoded = True
+                _emit("progress", 85, 100, "encode complete — sending…")
+
+        # ObjectFileName: keep host stem; use encoded extension when converted.
+        if encoded and profile is not None:
+            pref = f"{source_stem}.{profile.container.lstrip('.')}"
+        else:
+            pref = os.path.basename(src)
+
+        _emit("phase", "send")
+        _emit("status", "sending to device…")
+        _emit("progress", 90 if encoded or skipped_ok else 0, 100, "sending…")
+
+        result = send_video(
+            transport,
+            send_path,
+            parent_id=parent_id,
+            title=title or source_stem,
+            preferred_basename=pref,
+        )
+        _emit("progress", 100, 100, "done")
+        return SendVideoResult(
+            object_id=result.object_id,
+            parent_id=result.parent_id,
+            remote_basename=result.remote_basename,
+            path=result.path,
+            source_path=src,
+            encoded=encoded,
+            encode_skipped_compatible=skipped_ok,
+        )
+    finally:
+        if temp_path:
+            cleanup_video_temp(temp_path)
