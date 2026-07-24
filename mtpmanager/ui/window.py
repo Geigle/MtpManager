@@ -57,11 +57,6 @@ BG_TRANSFER_QUEUED = "#b8cbb8"  # desaturated green — in batch, waiting
 BG_TRANSFER_TRANSCODING = "#8faf8f"  # desaturated green — converting
 BG_TRANSFER_TRANSFERRING = "#bf8f8f"  # desaturated red — sending to device
 
-# Progressbar styles (Device → Send Video: red while encoding, default on send).
-PROGRESS_STYLE_DEFAULT = "Horizontal.TProgressbar"
-PROGRESS_STYLE_TRANSCODE = "Transcode.Horizontal.TProgressbar"
-PROGRESS_BAR_TRANSCODE_COLOR = "#c62828"  # red during video encode
-
 # Tree column ids (values order).
 TREE_COLS = ("title", "artist", "album", "year")
 
@@ -256,13 +251,8 @@ class MainWindow:
         )
         # Pack Cancel first on the right so the progress bar cannot cover it.
         self.btn_cancel_job.pack(side=RIGHT, padx=(8, 2), pady=2)
-        self.progress = ttk.Progressbar(
-            self.progress_row,
-            length=200,
-            style=PROGRESS_STYLE_DEFAULT,
-        )
+        self.progress = ttk.Progressbar(self.progress_row, length=200)
         self.progress.pack(side=LEFT, fill=X, expand=True, padx=(2, 0), pady=2)
-        self._configure_progress_styles()
 
         body = Frame(self.root)
         body.pack(side=TOP, fill=BOTH, expand=True)
@@ -793,66 +783,6 @@ class MainWindow:
     def selected_tree_iids(self) -> list[str]:
         """All selected row iids (multi-select)."""
         return list(self.tree.selection())
-
-    def _configure_progress_styles(self) -> None:
-        """Register red transcode progress style (best-effort; theme-dependent)."""
-        try:
-            style = ttk.Style(self.root)
-            # background = bar fill on most themes; aqua may ignore color.
-            style.configure(
-                PROGRESS_STYLE_TRANSCODE,
-                background=PROGRESS_BAR_TRANSCODE_COLOR,
-                troughcolor="#e0e0e0",
-            )
-        except Exception:
-            pass
-
-    def set_progress_bar_phase(self, phase: str | None) -> None:
-        """Tint progress bar by job phase.
-
-        *phase*:
-          - ``\"transcode\"`` — red (video encode)
-          - ``\"send\"`` / ``None`` / other — default theme color
-        """
-        style_name = (
-            PROGRESS_STYLE_TRANSCODE
-            if phase == "transcode"
-            else PROGRESS_STYLE_DEFAULT
-        )
-        try:
-            self.progress.configure(style=style_name)
-        except Exception:
-            pass
-
-    def _configure_progress_styles(self) -> None:
-        """Register red transcode progress style (best-effort; theme-dependent)."""
-        try:
-            style = ttk.Style(self.root)
-            # background = bar fill on most themes; aqua may ignore color.
-            style.configure(
-                PROGRESS_STYLE_TRANSCODE,
-                background=PROGRESS_BAR_TRANSCODE_COLOR,
-                troughcolor="#e0e0e0",
-            )
-        except Exception:
-            pass
-
-    def set_progress_bar_phase(self, phase: str | None) -> None:
-        """Tint progress bar by job phase.
-
-        *phase*:
-          - ``\"transcode\"`` — red (video encode)
-          - ``\"send\"`` / ``None`` / other — default theme color
-        """
-        style_name = (
-            PROGRESS_STYLE_TRANSCODE
-            if phase == "transcode"
-            else PROGRESS_STYLE_DEFAULT
-        )
-        try:
-            self.progress.configure(style=style_name)
-        except Exception:
-            pass
 
     def set_progress_status(self, text: str) -> None:
         """Update the status line above the progress bar (sync track, etc.)."""

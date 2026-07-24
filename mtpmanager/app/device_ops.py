@@ -679,7 +679,7 @@ VIDEO_PARENT_CHOICES: frozenset[int] = frozenset(
 )
 
 # on_progress(kind, *args) kinds used by Send Video worker:
-#   "phase", "transcode"|"send"     — UI progress bar color
+#   "phase", "transcode"|"send"     — status line phase labels
 #   "progress", done, total, label  — determinate bar (0–100 domain)
 #   "status", message               — status line only
 SendVideoProgress = Callable[..., None]

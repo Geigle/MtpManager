@@ -1700,13 +1700,6 @@ class AppController:
         self.win.set_progress_status("")
         return True
 
-    def _reset_progress_bar_style(self) -> None:
-        """Restore default progress color after a phased job (Send Video)."""
-        try:
-            self.win.set_progress_bar_phase(None)
-        except Exception:
-            pass
-
     def _end_transfer_job(self) -> None:
         self._transfer_busy = False
         self._job_cancel.clear()
@@ -1720,10 +1713,6 @@ class AppController:
         self._stop_busy_progress()
         self._batch_track_by_path = {}
         self.win.set_progress_status("")
-        try:
-            self.win.set_progress_bar_phase(None)
-        except Exception:
-            pass
         # Listing/transfer just finished — pause auto-connect USB probes.
         self._device_probe_fails = 0
         self._mark_usb_quiet()
@@ -2598,12 +2587,6 @@ class AppController:
         def on_ui_event(kind: str, *rest) -> None:
             if kind == "phase":
                 phase = str(rest[0]) if rest else ""
-                try:
-                    self.win.set_progress_bar_phase(
-                        "transcode" if phase == "transcode" else "send"
-                    )
-                except Exception:
-                    pass
                 if phase == "transcode":
                     try:
                         self.win.progress.configure(mode="determinate")
