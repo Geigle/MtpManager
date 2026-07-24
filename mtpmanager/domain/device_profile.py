@@ -10,48 +10,108 @@ from mtpmanager.domain.models import DeviceInfo
 
 
 @dataclass(frozen=True)
-class VideoEncodeProfile:
-    """How to re-encode host video for a picky DAP (Device → Send Video).
+class VideoEncodePreset:
+    """One mutually exclusive Send Video encode recipe (one notebook tab).
 
-    Values mirror measured Creative retail demos for ZEN Vision:M:
-    AVI + MPEG-4 Part 2 (XVID/DX50) + single MP3 @ 44.1 kHz stereo,
-    typically 640×480 (demos are 25 or ~29.97 fps). Encoding uses stock
-    ffmpeg ``mpeg4`` + ``-vtag XVID`` (no libxvid required).
-
-    Frame rate defaults to **source as-is**. Set *max_fps* > 0 on a
-    device-specific profile (e.g. ZEN Vision:M) to cap only when the source
-    is higher (60 → 30). ``max_fps=0`` means no cap.
+    Frame rate defaults to **source as-is**. Set *max_fps* > 0 to cap only
+    when the source is higher (e.g. ZEN Vision:M 60 → 30). ``max_fps=0``
+    means no cap.
     """
 
     id: str
     display_name: str
-    # Output container extension (no dot), e.g. "avi".
+    # Short tab label (mutually exclusive choice). Defaults to display_name.
+    tab_label: str = ""
+    # Output container extension (no dot), e.g. "avi" or "wmv".
     container: str = "avi"
+    # ffprobe format_name tokens that count as this container.
+    probe_containers: tuple[str, ...] = ("avi",)
     # Video encoder name for ffmpeg (-c:v).
     video_codec: str = "mpeg4"
-    # FourCC / -vtag (demos use XVID; DX50 also seen).
-    video_tag: str = "XVID"
-    # Acceptable tags when deciding "already device-ready" (casefold).
-    acceptable_video_tags: tuple[str, ...] = ("XVID", "DX50")
-    # libavcodec name expected on already-good files (mpeg4).
+    # FourCC / -vtag when needed (XVID, DX50); empty to omit.
+    video_tag: str = ""
+    # Acceptable tags when deciding "already device-ready" (empty = any).
+    acceptable_video_tags: tuple[str, ...] = ()
+    # libavcodec name expected on already-good files.
     probe_video_codec: str = "mpeg4"
     # Target geometry (letterbox/pad into this frame).
     width: int = 640
     height: int = 480
     # Cap when source exceeds this (fps). 0 = always keep source rate.
     max_fps: float = 0.0
-    # Quality scale for mpeg4 (lower = better; demos ~1–3 Mbps).
-    qscale_v: int = 5
-    # Audio: demos are MP3 stereo 44.1 kHz ~128k.
+    # Quality scale for mpeg4-style encoders (None = use video_bitrate).
+    qscale_v: int | None = 5
+    # Constant bitrate for video when not using qscale (e.g. "800k").
+    video_bitrate: str | None = None
+    # Audio encoder / probe names.
     audio_codec: str = "libmp3lame"
     probe_audio_codec: str = "mp3"
     audio_bitrate: str = "128k"
     audio_sample_rate: int = 44100
     audio_channels: int = 2
-    # Short summary for UI checkbox help.
-    summary: str = (
-        "AVI · MPEG-4/XVID · 640×480 · source fps · MP3 stereo 44.1 kHz"
-    )
+    # Human-readable sections for the dialog.
+    container_detail: str = ""
+    video_detail: str = ""
+    audio_detail: str = ""
+    summary: str = ""
+    experimental: bool = False
+
+    def detail_lines(self) -> list[str]:
+        """Lines for the options panel (container / video / audio)."""
+        lines: list[str] = []
+        c = self.container_detail or f"Container: {self.container.upper()}"
+        lines.append(c)
+        v = self.video_detail or (
+            f"Video: {self.video_codec}"
+            + (f" ({self.video_tag})" if self.video_tag else "")
+            + f" · {self.width}×{self.height}"
+        )
+        lines.append(v)
+        a = self.audio_detail or (
+            f"Audio: {self.probe_audio_codec.upper()} "
+            f"{self.audio_bitrate} · {self.audio_sample_rate} Hz · "
+            f"{self.audio_channels}ch"
+        )
+        lines.append(a)
+        if self.max_fps and self.max_fps > 0:
+            lines.append(f"Frame rate: keep source if ≤ {self.max_fps:g} fps, else cap")
+        else:
+            lines.append("Frame rate: keep source")
+        if self.experimental:
+            lines.append("⚠ Experimental — may not play on device")
+        return lines
+
+
+# Back-compat name used in older call sites / tests.
+VideoEncodeProfile = VideoEncodePreset
+
+
+@dataclass(frozen=True)
+class DeviceVideoOptions:
+    """Device-specific Send Video options (absent on the generic profile).
+
+    *presets* are mutually exclusive encode recipes shown as notebook tabs.
+    """
+
+    device_display_name: str
+    presets: tuple[VideoEncodePreset, ...]
+    default_preset_id: str
+
+    def default_preset(self) -> VideoEncodePreset:
+        p = self.preset_by_id(self.default_preset_id)
+        if p is not None:
+            return p
+        if self.presets:
+            return self.presets[0]
+        raise ValueError(f"no video presets for {self.device_display_name}")
+
+    def preset_by_id(self, preset_id: str | None) -> VideoEncodePreset | None:
+        if not preset_id:
+            return None
+        for p in self.presets:
+            if p.id == preset_id:
+                return p
+        return None
 
 
 @dataclass(frozen=True)
@@ -65,8 +125,8 @@ class DeviceProfile:
     (lowercase, no dot). Sources already in these formats are sent as-is
     instead of re-encoding to the user's preferred target format.
 
-    *video_encode*, when set, is the Device → Send Video encode profile
-    for this player (e.g. ZEN Vision:M retail-demo AVI fingerprint).
+    *video_options*, when set, is the Device → Send Video notebook of encode
+    presets for this player (e.g. ZEN Vision:M). Generic has None.
     """
 
     id: str
@@ -77,7 +137,14 @@ class DeviceProfile:
     graphic_filename: str = "generic_player.png"
     # Native playable audio extensions (e.g. frozenset({"mp3", "wma", "wav"})).
     supported_audio_formats: frozenset[str] = frozenset({"mp3"})
-    video_encode: VideoEncodeProfile | None = None
+    video_options: DeviceVideoOptions | None = None
+
+    @property
+    def video_encode(self) -> VideoEncodePreset | None:
+        """Default encode preset when present (compat with older call sites)."""
+        if self.video_options is None:
+            return None
+        return self.video_options.default_preset()
 
     def accepts_audio_format(self, fmt: str) -> bool:
         """True if *fmt* (extension or dotted) is natively playable."""

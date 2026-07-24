@@ -21,8 +21,9 @@ from tkinter import (
     messagebox,
     simpledialog,
 )
+from tkinter import ttk
 
-from mtpmanager.domain.device_profile import VideoEncodeProfile
+from mtpmanager.domain.device_profile import DeviceVideoOptions, VideoEncodePreset
 from mtpmanager.domain.models import DeviceInfo
 from mtpmanager.infra.app_config import VALID_SEND_FORMATS
 from mtpmanager.infra.remote_naming import (
@@ -208,18 +209,76 @@ class SendVideoDialogResult:
 
     parent_id: int
     encode_for_device: bool
-    # When True, encode ignores profile.max_fps (e.g. try 60 fps on ZEN).
+    # Selected VideoEncodePreset.id when encoding with device options.
+    preset_id: str | None = None
+    # When True, encode ignores preset.max_fps (e.g. try 60 fps on ZEN).
     ignore_max_fps: bool = False
+
+
+def _fill_preset_panel(parent: Frame, preset: VideoEncodePreset) -> None:
+    """Render container / video / audio detail blocks for one preset tab."""
+    for child in parent.winfo_children():
+        child.destroy()
+
+    sections = (
+        ("Container", preset.container_detail or preset.container.upper()),
+        ("Video codec", preset.video_detail or preset.video_codec),
+        ("Audio codec", preset.audio_detail or preset.probe_audio_codec),
+    )
+    for title, text in sections:
+        Label(parent, text=title, font=("", 11, "bold"), anchor="w").pack(
+            fill="x", pady=(6, 0)
+        )
+        Label(
+            parent,
+            text=text,
+            justify=LEFT,
+            wraplength=420,
+            anchor="w",
+        ).pack(fill="x", padx=(8, 0))
+
+    extra: list[str] = []
+    if preset.max_fps and preset.max_fps > 0:
+        extra.append(
+            f"Frame rate: keep source if ≤ {preset.max_fps:g} fps, else cap"
+        )
+    else:
+        extra.append("Frame rate: keep source")
+    if preset.qscale_v is not None:
+        extra.append(f"Video quality: qscale {preset.qscale_v}")
+    elif preset.video_bitrate:
+        extra.append(f"Video bitrate: {preset.video_bitrate}")
+    extra.append(
+        f"Audio: {preset.audio_bitrate} · {preset.audio_sample_rate} Hz · "
+        f"{preset.audio_channels} channel(s)"
+    )
+    if preset.experimental:
+        extra.append("⚠ Experimental — may not play on this device")
+
+    Label(parent, text="Parameters", font=("", 11, "bold"), anchor="w").pack(
+        fill="x", pady=(10, 0)
+    )
+    Label(
+        parent,
+        text="\n".join(extra),
+        justify=LEFT,
+        wraplength=420,
+        anchor="w",
+    ).pack(fill="x", padx=(8, 0), pady=(0, 6))
 
 
 def ask_video_destination(
     parent,
     *,
     filename: str = "",
-    video_encode: VideoEncodeProfile | None = None,
+    video_options: DeviceVideoOptions | None = None,
     encode_default: bool = True,
 ) -> SendVideoDialogResult | None:
-    """Ask Video/TV parent and optional device encode. None if cancelled."""
+    """Ask Video/TV parent and optional device encode preset. None if cancelled.
+
+    *video_options* is only set for known players (e.g. ZEN Vision:M). The
+    generic device profile passes None — no format notebook is shown.
+    """
     dlg = Toplevel(parent)
     dlg.title("Send Video")
     dlg.transient(parent)
@@ -233,7 +292,7 @@ def ask_video_destination(
         body,
         text=f"Send to device:\n\n{label}",
         justify=LEFT,
-        wraplength=380,
+        wraplength=440,
     ).pack(anchor="w", pady=(0, 10))
 
     Label(body, text="Destination folder:", anchor="w").pack(fill="x")
@@ -255,78 +314,129 @@ def ask_video_destination(
         anchor="w",
     ).pack(fill="x", pady=2)
 
-    encode_var = BooleanVar(value=bool(encode_default and video_encode is not None))
+    has_options = video_options is not None and bool(video_options.presets)
+    encode_var = BooleanVar(value=bool(encode_default and has_options))
     ignore_max_fps_var = BooleanVar(value=False)
-    high_fps_cb = None
-    profile_has_fps_cap = bool(
-        video_encode is not None and float(video_encode.max_fps or 0) > 0
-    )
+    high_fps_cb: Checkbutton | None = None
+    notebook: ttk.Notebook | None = None
+    preset_by_tab: dict[int, VideoEncodePreset] = {}
+    default_preset = video_options.default_preset() if has_options else None
 
-    if video_encode is not None:
+    def _selected_preset() -> VideoEncodePreset | None:
+        if notebook is None or not has_options:
+            return default_preset
+        try:
+            idx = int(notebook.index("current"))
+        except Exception:
+            return default_preset
+        return preset_by_tab.get(idx, default_preset)
+
+    def _sync_high_fps_for_preset(preset: VideoEncodePreset | None) -> None:
+        if high_fps_cb is None:
+            return
+        cap = float(preset.max_fps or 0) if preset is not None else 0.0
+        encode_on = bool(encode_var.get())
+        if encode_on and cap > 0:
+            try:
+                high_fps_cb.configure(
+                    state="normal",
+                    text=(
+                        f"Ignore max frame rate ({cap:g} fps) (experimental)"
+                    ),
+                )
+            except Exception:
+                pass
+        else:
+            ignore_max_fps_var.set(False)
+            try:
+                high_fps_cb.configure(state="disabled")
+            except Exception:
+                pass
+
+    def _on_tab_changed(_event=None) -> None:
+        _sync_high_fps_for_preset(_selected_preset())
+
+    if has_options and video_options is not None:
+        Label(
+            body,
+            text=f"Device options — {video_options.device_display_name}",
+            font=("", 11, "bold"),
+            anchor="w",
+        ).pack(fill="x", pady=(14, 2))
+
         Checkbutton(
             body,
-            text=f"Encode for {video_encode.display_name}",
+            text="Encode for this device",
             variable=encode_var,
             anchor="w",
             justify=LEFT,
-        ).pack(fill="x", pady=(12, 2))
+        ).pack(fill="x", pady=(2, 4))
+
         Label(
             body,
             text=(
-                f"{video_encode.summary}\n"
-                "Matches stock Creative demos (AVI/XVID + MP3). "
-                "Skips re-encode when the file already matches. "
-                "Uncheck to send the original file as-is."
+                "Each tab is a mutually exclusive format recipe "
+                "(container + video + audio). Default is "
+                "AVI · XviD / MPEG-4 SP · MP3."
             ),
             justify=LEFT,
-            wraplength=380,
+            wraplength=440,
+        ).pack(anchor="w", pady=(0, 6))
+
+        notebook = ttk.Notebook(body)
+        notebook.pack(fill=BOTH, expand=True, pady=(0, 4))
+
+        for i, preset in enumerate(video_options.presets):
+            tab = Frame(notebook, padx=10, pady=6)
+            notebook.add(tab, text=preset.tab_label)
+            _fill_preset_panel(tab, preset)
+            preset_by_tab[i] = preset
+            if default_preset is not None and preset.id == default_preset.id:
+                notebook.select(i)
+
+        notebook.bind("<<NotebookTabChanged>>", _on_tab_changed)
+
+        high_fps_cb = Checkbutton(
+            body,
+            text="Ignore max frame rate (experimental)",
+            variable=ignore_max_fps_var,
+            anchor="w",
+            justify=LEFT,
+        )
+        high_fps_cb.pack(fill="x", pady=(6, 2))
+        Label(
+            body,
+            text=(
+                "Keeps the source frame rate even when above the selected "
+                "recipe’s cap. Likely to fail or glitch — experiments only."
+            ),
+            justify=LEFT,
+            wraplength=440,
         ).pack(anchor="w", pady=(0, 4))
 
-        if profile_has_fps_cap:
-            high_fps_cb = Checkbutton(
-                body,
-                text=(
-                    f"Ignore max frame rate "
-                    f"({video_encode.max_fps:g} fps) (experimental)"
-                ),
-                variable=ignore_max_fps_var,
-                anchor="w",
-                justify=LEFT,
-            )
-            high_fps_cb.pack(fill="x", pady=(6, 2))
-            Label(
-                body,
-                text=(
-                    "Keeps the source frame rate even when above the device "
-                    "profile cap. Likely to fail or glitch on ZEN — for "
-                    "experiments only."
-                ),
-                justify=LEFT,
-                wraplength=380,
-            ).pack(anchor="w", pady=(0, 8))
+        def _sync_encode_state(*_args) -> None:
+            on = bool(encode_var.get())
+            try:
+                if notebook is not None:
+                    for i in range(len(video_options.presets)):
+                        notebook.tab(i, state="normal" if on else "disabled")
+            except Exception:
+                pass
+            _sync_high_fps_for_preset(_selected_preset() if on else None)
 
-            def _sync_high_fps_state(*_args) -> None:
-                try:
-                    if encode_var.get():
-                        high_fps_cb.configure(state="normal")
-                    else:
-                        ignore_max_fps_var.set(False)
-                        high_fps_cb.configure(state="disabled")
-                except Exception:
-                    pass
-
-            encode_var.trace_add("write", _sync_high_fps_state)
-            _sync_high_fps_state()
+        encode_var.trace_add("write", _sync_encode_state)
+        _sync_encode_state()
+        _on_tab_changed()
     else:
         Label(
             body,
             text=(
-                "No device video encode profile for this player — "
+                "No device-specific video options for this player — "
                 "file will be sent as-is.\n"
                 "ObjectFileName is the sanitized host basename."
             ),
             justify=LEFT,
-            wraplength=380,
+            wraplength=440,
         ).pack(anchor="w", pady=(12, 8))
 
     result: list[SendVideoDialogResult | None] = [None]
@@ -337,14 +447,15 @@ def ask_video_destination(
             if choice.get() == "tv"
             else DEFAULT_VIDEO_FOLDER_ID
         )
-        do_encode = bool(encode_var.get()) and video_encode is not None
+        do_encode = bool(encode_var.get()) and has_options
+        preset = _selected_preset() if do_encode else None
+        cap = float(preset.max_fps or 0) if preset is not None else 0.0
         result[0] = SendVideoDialogResult(
             parent_id=int(parent_id),
             encode_for_device=do_encode,
+            preset_id=preset.id if preset is not None else None,
             ignore_max_fps=(
-                do_encode
-                and profile_has_fps_cap
-                and bool(ignore_max_fps_var.get())
+                do_encode and cap > 0 and bool(ignore_max_fps_var.get())
             ),
         )
         dlg.destroy()
@@ -354,7 +465,7 @@ def ask_video_destination(
         dlg.destroy()
 
     btn_row = Frame(body)
-    btn_row.pack(fill="x")
+    btn_row.pack(fill="x", pady=(10, 0))
     Button(btn_row, text="Cancel", width=10, command=on_cancel).pack(
         side=RIGHT, padx=(6, 0)
     )
@@ -363,8 +474,8 @@ def ask_video_destination(
     dlg.protocol("WM_DELETE_WINDOW", on_cancel)
     dlg.grab_set()
     try:
-        px = parent.winfo_rootx() + max(0, (parent.winfo_width() - 400) // 2)
-        py = parent.winfo_rooty() + max(0, (parent.winfo_height() - 320) // 3)
+        px = parent.winfo_rootx() + max(0, (parent.winfo_width() - 480) // 2)
+        py = parent.winfo_rooty() + max(0, (parent.winfo_height() - 420) // 3)
         dlg.geometry(f"+{px}+{py}")
     except Exception:
         pass

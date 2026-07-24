@@ -18,7 +18,7 @@ from datetime import timedelta
 
 from ffmpeg import FFmpeg, Progress
 
-from mtpmanager.domain.device_profile import VideoEncodeProfile
+from mtpmanager.domain.device_profile import VideoEncodePreset, VideoEncodeProfile
 
 logger = logging.getLogger(__name__)
 
@@ -136,7 +136,7 @@ def output_fps_for_source(source_fps: float, max_fps: float) -> float | None:
     """Return fps to force in the filter, or None to keep the source rate.
 
     *max_fps* ≤ 0 means no cap (always keep source) — the default for
-    ``VideoEncodeProfile``. Device profiles (e.g. ZEN Vision:M) set a
+    ``VideoEncodePreset``. Device profiles (e.g. ZEN Vision:M) set a
     positive cap:
 
     - Source unknown (≤0) → None
@@ -161,8 +161,10 @@ def _stream_types(data: dict) -> tuple[list[dict], list[dict]]:
     return vs, aus
 
 
-def video_matches_encode_profile(path: str, profile: VideoEncodeProfile) -> bool:
-    """True when *path* already looks like a retail-demo-compatible encode.
+def video_matches_encode_profile(
+    path: str, profile: VideoEncodePreset | VideoEncodeProfile
+) -> bool:
+    """True when *path* already matches the selected encode preset closely.
 
     Strict enough to skip re-encode of stock Creative AVIs; loose enough that
     a slightly different bitrate/fps demo still passes (Xtreme @ 29.97 + DX50).
@@ -172,11 +174,14 @@ def video_matches_encode_profile(path: str, profile: VideoEncodeProfile) -> bool
         return False
     fmt = data.get("format") or {}
     format_name = str(fmt.get("format_name") or "").casefold()
-    want_container = (profile.container or "avi").casefold()
-    if want_container not in format_name.split(","):
-        # format_name can be "avi" or compound; require avi token.
-        if want_container not in format_name:
-            return False
+    tokens = {t.strip() for t in format_name.split(",") if t.strip()}
+    want = tuple(
+        c.casefold()
+        for c in (profile.probe_containers or (profile.container or "avi",))
+        if c
+    )
+    if not any(c in tokens or c in format_name for c in want):
+        return False
 
     vs, aus = _stream_types(data)
     if len(vs) != 1 or len(aus) != 1:
@@ -185,10 +190,11 @@ def video_matches_encode_profile(path: str, profile: VideoEncodeProfile) -> bool
     v, a = vs[0], aus[0]
     if str(v.get("codec_name") or "").casefold() != profile.probe_video_codec.casefold():
         return False
-    tag = str(v.get("codec_tag_string") or "").strip().upper()
-    ok_tags = {t.upper() for t in profile.acceptable_video_tags}
-    if tag not in ok_tags:
-        return False
+    ok_tags = {t.upper() for t in profile.acceptable_video_tags if t}
+    if ok_tags:
+        tag = str(v.get("codec_tag_string") or "").strip().upper()
+        if tag not in ok_tags:
+            return False
     if str(v.get("pix_fmt") or "").casefold() != "yuv420p":
         return False
     try:
@@ -211,7 +217,7 @@ def video_matches_encode_profile(path: str, profile: VideoEncodeProfile) -> bool
 
 
 def _vf_filter(
-    profile: VideoEncodeProfile,
+    profile: VideoEncodePreset | VideoEncodeProfile,
     *,
     force_fps: float | None = None,
 ) -> str:
@@ -232,16 +238,42 @@ def _vf_filter(
     return ",".join(parts)
 
 
+def _build_output_options(
+    profile: VideoEncodePreset | VideoEncodeProfile,
+    *,
+    force_fps: float | None,
+    container_ext: str,
+) -> dict:
+    """ffmpeg output options for AVI/mpeg4 or WMV/WMA-style presets."""
+    out: dict = {
+        "map": ["0:v:0", "0:a:0?"],
+        "c:v": profile.video_codec,
+        "vf": _vf_filter(profile, force_fps=force_fps),
+        "c:a": profile.audio_codec,
+        "b:a": profile.audio_bitrate,
+        "ac": str(int(profile.audio_channels)),
+        "ar": str(int(profile.audio_sample_rate)),
+        "f": container_ext if container_ext != "wmv" else "asf",
+    }
+    if profile.video_tag:
+        out["vtag"] = profile.video_tag
+    if profile.qscale_v is not None:
+        out["qscale:v"] = str(int(profile.qscale_v))
+    elif profile.video_bitrate:
+        out["b:v"] = profile.video_bitrate
+    return out
+
+
 def convert_video_for_profile(
     src_path: str,
-    profile: VideoEncodeProfile,
+    profile: VideoEncodePreset | VideoEncodeProfile,
     *,
     dest_path: str | None = None,
     temp_dir: str | None = None,
     on_progress: ProgressCallback | None = None,
     ignore_max_fps: bool = False,
 ) -> str:
-    """Re-encode *src_path* to the device video profile; return output path.
+    """Re-encode *src_path* to the selected device video preset; return path.
 
     *ignore_max_fps*: when True, do not apply *profile.max_fps* (keep source
     rate even if above the device cap — experimental; may break playback).
@@ -277,7 +309,7 @@ def convert_video_for_profile(
     max_fps = 0.0 if ignore_max_fps else float(profile.max_fps or 0)
     force_fps = output_fps_for_source(source_fps, max_fps)
     logger.info(
-        "Video convert start src=%s dest=%s profile=%s duration=%.1fs "
+        "Video convert start src=%s dest=%s preset=%s duration=%.1fs "
         "source_fps=%.3f max_fps=%s force_fps=%s ignore_max_fps=%s",
         src_path,
         dest_path,
@@ -294,18 +326,9 @@ def convert_video_for_profile(
         except Exception:
             logger.debug("video on_progress failed", exc_info=True)
 
-    out_opts: dict = {
-        "map": ["0:v:0", "0:a:0?"],
-        "c:v": profile.video_codec,
-        "vtag": profile.video_tag,
-        "qscale:v": str(int(profile.qscale_v)),
-        "vf": _vf_filter(profile, force_fps=force_fps),
-        "c:a": profile.audio_codec,
-        "b:a": profile.audio_bitrate,
-        "ac": str(int(profile.audio_channels)),
-        "ar": str(int(profile.audio_sample_rate)),
-        "f": ext,
-    }
+    out_opts = _build_output_options(
+        profile, force_fps=force_fps, container_ext=ext
+    )
 
     ff = FFmpeg().option("y").input(src_path).output(dest_path, out_opts)
 
@@ -374,7 +397,7 @@ def cleanup_video_temp(path: str | None) -> None:
 
 
 def default_temp_video_path(
-    profile: VideoEncodeProfile,
+    profile: VideoEncodePreset | VideoEncodeProfile,
     *,
     temp_dir: str | None = None,
 ) -> str:

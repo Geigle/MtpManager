@@ -787,7 +787,7 @@ def prepare_and_send_video(
     *ignore_max_fps*: when encoding, skip the profile's max_fps cap (keep
     source rate above the device limit — experimental).
     """
-    from mtpmanager.domain.device_profile import VideoEncodeProfile
+    from mtpmanager.domain.device_profile import VideoEncodePreset
     from mtpmanager.infra.ffmpeg_video import (
         cleanup_video_temp,
         convert_video_for_profile,
@@ -807,7 +807,7 @@ def prepare_and_send_video(
     if not src or not os.path.isfile(src):
         raise FileNotFoundError(f"Video file not found: {src!r}")
 
-    profile: VideoEncodeProfile | None = encode_profile
+    profile: VideoEncodePreset | None = encode_profile
     send_path = src
     temp_path: str | None = None
     encoded = False

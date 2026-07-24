@@ -2532,30 +2532,35 @@ class AppController:
             messagebox.showerror("Send Video", f"File not found:\n{path}")
             return
 
-        video_profile = None
+        video_options = None
         if self._active_profile is not None:
-            video_profile = self._active_profile.video_encode
+            video_options = self._active_profile.video_options
 
         opts = ask_video_destination(
             self.win.root,
             filename=os.path.basename(path),
-            video_encode=video_profile,
+            video_options=video_options,
             encode_default=True,
         )
         if opts is None:
             return
         parent = int(opts.parent_id)
-        encode = bool(opts.encode_for_device) and video_profile is not None
-        ignore_max_fps = bool(opts.ignore_max_fps) and encode
+        encode = bool(opts.encode_for_device) and video_options is not None
+        preset = None
+        if encode and video_options is not None:
+            preset = video_options.preset_by_id(opts.preset_id)
+            if preset is None:
+                preset = video_options.default_preset()
+        ignore_max_fps = bool(opts.ignore_max_fps) and encode and preset is not None
         folder_label = ZEN_VISION_M_FOLDER_IDS.get(parent, str(parent))
-        if encode and video_profile is not None:
-            encode_note = f"Encode: {video_profile.display_name}\n"
+        if encode and preset is not None:
+            encode_note = f"Encode: {preset.display_name}\n"
             if ignore_max_fps:
                 encode_note += (
                     "Max fps cap: ignored (experimental — may not play)\n"
                 )
-            elif float(video_profile.max_fps or 0) > 0:
-                encode_note += f"Max fps cap: {video_profile.max_fps:g}\n"
+            elif float(preset.max_fps or 0) > 0:
+                encode_note += f"Max fps cap: {preset.max_fps:g}\n"
         else:
             encode_note = "Encode: off (send as-is)\n"
         if not messagebox.askyesno(
@@ -2570,7 +2575,6 @@ class AppController:
 
         transport = self._transport()
         serial = self._device_serial or device_serial_key()
-        profile = video_profile if encode else None
 
         def work(device):
             _ = device
@@ -2585,8 +2589,8 @@ class AppController:
                 transport,
                 path,
                 parent_id=parent,
-                encode_profile=profile,
-                encode_for_device=encode,
+                encode_profile=preset,
+                encode_for_device=encode and preset is not None,
                 ignore_max_fps=ignore_max_fps,
                 on_progress=on_progress,
             )

@@ -13,7 +13,13 @@ from mtpmanager.app.device_ops import (
     prepare_and_send_video,
     send_video,
 )
-from mtpmanager.domain.device_profiles import ZEN_VISION_M, ZEN_VISION_M_VIDEO
+from mtpmanager.domain.device_profiles import (
+    ZEN_AVI_XVID_MP3,
+    ZEN_VISION_M,
+    ZEN_VISION_M_VIDEO,
+    ZEN_VISION_M_VIDEO_OPTIONS,
+    ZEN_WMV_WMA,
+)
 from mtpmanager.domain.models import TrackMetadata
 from mtpmanager.infra.remote_naming import (
     DEFAULT_MUSIC_FOLDER_ID,
@@ -62,14 +68,15 @@ class SendVideoTests(unittest.TestCase):
             frozenset({DEFAULT_VIDEO_FOLDER_ID, DEFAULT_TV_FOLDER_ID}),
         )
 
-    def test_zen_profile_has_video_encode(self) -> None:
-        self.assertIsNotNone(ZEN_VISION_M.video_encode)
-        assert ZEN_VISION_M.video_encode is not None
-        self.assertEqual(ZEN_VISION_M.video_encode.container, "avi")
-        self.assertEqual(ZEN_VISION_M.video_encode.video_tag, "XVID")
-        self.assertEqual(ZEN_VISION_M.video_encode.width, 640)
-        self.assertEqual(ZEN_VISION_M.video_encode.height, 480)
-        self.assertEqual(ZEN_VISION_M_VIDEO.id, ZEN_VISION_M.video_encode.id)
+    def test_zen_profile_has_video_options(self) -> None:
+        opts = ZEN_VISION_M.video_options
+        self.assertIsNotNone(opts)
+        assert opts is not None
+        self.assertIs(opts, ZEN_VISION_M_VIDEO_OPTIONS)
+        self.assertEqual(len(opts.presets), 3)
+        self.assertEqual(opts.default_preset_id, ZEN_AVI_XVID_MP3.id)
+        self.assertEqual(ZEN_VISION_M_VIDEO.id, opts.default_preset().id)
+        self.assertEqual(opts.default_preset().video_tag, "XVID")
 
     def test_build_remote_path_under_video_parent(self) -> None:
         remote = build_remote_path(
@@ -311,11 +318,34 @@ class VideoEncodeProfileProbeTests(unittest.TestCase):
         self.assertIsNone(output_fps_for_source(0.0, 30.0))
 
     def test_zen_profile_has_max_fps_default_does_not(self) -> None:
-        from mtpmanager.domain.device_profile import VideoEncodeProfile
+        from mtpmanager.domain.device_profile import VideoEncodePreset
 
-        default = VideoEncodeProfile(id="x", display_name="x")
+        default = VideoEncodePreset(id="x", display_name="x")
         self.assertEqual(default.max_fps, 0.0)
         self.assertEqual(ZEN_VISION_M_VIDEO.max_fps, 30.0)
+        self.assertEqual(ZEN_WMV_WMA.max_fps, 30.0)
+
+    def test_build_output_options_wmv(self) -> None:
+        from mtpmanager.infra.ffmpeg_video import _build_output_options
+
+        opts = _build_output_options(ZEN_WMV_WMA, force_fps=None, container_ext="wmv")
+        self.assertEqual(opts["c:v"], "wmv2")
+        self.assertEqual(opts["c:a"], "wmav2")
+        self.assertEqual(opts["b:v"], "800k")
+        self.assertEqual(opts["f"], "asf")
+        self.assertNotIn("vtag", opts)
+        self.assertNotIn("qscale:v", opts)
+
+    def test_build_output_options_xvid(self) -> None:
+        from mtpmanager.infra.ffmpeg_video import _build_output_options
+
+        opts = _build_output_options(
+            ZEN_AVI_XVID_MP3, force_fps=30.0, container_ext="avi"
+        )
+        self.assertEqual(opts["c:v"], "mpeg4")
+        self.assertEqual(opts["vtag"], "XVID")
+        self.assertEqual(opts["qscale:v"], "5")
+        self.assertIn("fps=30", opts["vf"])
 
 
 if __name__ == "__main__":
