@@ -22,6 +22,7 @@ class AppConfigTests(unittest.TestCase):
             self.assertFalse(cfg.stable_mode)
             self.assertFalse(cfg.store_tracks_in_artist_folder)
             self.assertFalse(cfg.store_tracks_in_album_folder)
+            self.assertFalse(cfg.show_broken_video_presets)
             self.assertEqual(cfg.active_mode(), "experimental")
 
     def test_round_trip(self) -> None:
@@ -33,6 +34,7 @@ class AppConfigTests(unittest.TestCase):
                     stable_mode=True,
                     store_tracks_in_artist_folder=True,
                     store_tracks_in_album_folder=True,
+                    show_broken_video_presets=True,
                 ),
                 path=dest,
             )
@@ -41,12 +43,14 @@ class AppConfigTests(unittest.TestCase):
             self.assertTrue(loaded.stable_mode)
             self.assertTrue(loaded.store_tracks_in_artist_folder)
             self.assertTrue(loaded.store_tracks_in_album_folder)
+            self.assertTrue(loaded.show_broken_video_presets)
             self.assertEqual(loaded.active_mode(), "stable")
             data = json.loads(dest.read_text(encoding="utf-8"))
             self.assertEqual(data["send_format"], "wma")
             self.assertTrue(data["stable_mode"])
             self.assertTrue(data["store_tracks_in_artist_folder"])
             self.assertTrue(data["store_tracks_in_album_folder"])
+            self.assertTrue(data["show_broken_video_presets"])
 
     def test_album_folder_requires_artist_folder(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

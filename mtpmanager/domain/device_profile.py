@@ -55,6 +55,8 @@ class VideoEncodePreset:
     audio_detail: str = ""
     summary: str = ""
     experimental: bool = False
+    # Hidden from Send Video unless Config enables broken video presets.
+    broken: bool = False
 
     def detail_lines(self) -> list[str]:
         """Lines for the options panel (container / video / audio)."""
@@ -77,7 +79,9 @@ class VideoEncodePreset:
             lines.append(f"Frame rate: keep source if ≤ {self.max_fps:g} fps, else cap")
         else:
             lines.append("Frame rate: keep source")
-        if self.experimental:
+        if self.broken:
+            lines.append("⚠ Broken — hidden unless enabled in Config")
+        elif self.experimental:
             lines.append("⚠ Experimental — may not play on device")
         return lines
 
@@ -112,6 +116,14 @@ class DeviceVideoOptions:
             if p.id == preset_id:
                 return p
         return None
+
+    def visible_presets(
+        self, *, include_broken: bool = False
+    ) -> tuple[VideoEncodePreset, ...]:
+        """Presets shown in Send Video (broken ones gated by Config)."""
+        if include_broken:
+            return self.presets
+        return tuple(p for p in self.presets if not p.broken)
 
 
 @dataclass(frozen=True)

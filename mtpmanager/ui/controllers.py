@@ -244,21 +244,31 @@ class AppController:
         return self._active_profile.supported_audio_formats
 
     def on_config(self) -> None:
-        """Open Config dialog; persist send format on Save."""
-        new_fmt = show_config_dialog(
+        """Open Config dialog; persist preferences on Save."""
+        result = show_config_dialog(
             self.win.root,
             send_format=self._config.normalized_send_format(),
+            show_broken_video_presets=bool(
+                self._config.show_broken_video_presets
+            ),
         )
-        if new_fmt is None:
+        if result is None:
             return
-        self._config.send_format = new_fmt
+        self._config.send_format = result.send_format
+        self._config.show_broken_video_presets = bool(
+            result.show_broken_video_presets
+        )
         try:
             save_app_config(self._config)
         except OSError as e:
             logger.exception("Failed to save config")
             messagebox.showerror("Config", f"Could not save settings:\n{e}")
             return
-        logger.info("Config send_format=%s", new_fmt)
+        logger.info(
+            "Config send_format=%s show_broken_video_presets=%s",
+            result.send_format,
+            result.show_broken_video_presets,
+        )
 
     def on_stable_mode_toggle(self) -> None:
         """Config → Stable Mode checkbutton: switch transport and persist."""
@@ -2541,6 +2551,9 @@ class AppController:
             filename=os.path.basename(path),
             video_options=video_options,
             encode_default=True,
+            include_broken_presets=bool(
+                self._config.show_broken_video_presets
+            ),
         )
         if opts is None:
             return

@@ -74,6 +74,15 @@ class DeviceProfileTests(unittest.TestCase):
         self.assertEqual(wmv.container, "wmv")
         self.assertEqual(wmv.video_codec, "wmv2")
         self.assertEqual(wmv.audio_codec, "wmav2")
+        self.assertTrue(wmv.broken)
+        # Hidden by default; Config can re-enable.
+        visible = [p.id for p in opts.visible_presets(include_broken=False)]
+        self.assertNotIn("zen_wmv_wma", visible)
+        self.assertIn("zen_avi_xvid_mp3", visible)
+        self.assertIn(
+            "zen_wmv_wma",
+            [p.id for p in opts.visible_presets(include_broken=True)],
+        )
 
     def test_needs_transcode_passthrough_native(self) -> None:
         # Prefer passthrough of device-native formats over re-encode to target.

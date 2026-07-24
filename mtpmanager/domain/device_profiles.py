@@ -76,8 +76,8 @@ ZEN_AVI_DIVX_MP3 = VideoEncodePreset(
 
 ZEN_WMV_WMA = VideoEncodePreset(
     id="zen_wmv_wma",
-    tab_label="WMV · WMA",
-    display_name="WMV · WMA",
+    tab_label="WMV · WMA (broken)",
+    display_name="WMV · WMA (broken)",
     container="wmv",
     probe_containers=("asf", "wmv"),
     video_codec="wmv2",
@@ -88,7 +88,7 @@ ZEN_WMV_WMA = VideoEncodePreset(
     height=480,
     max_fps=30.0,
     qscale_v=None,
-    video_bitrate="800k",
+    video_bitrate="480k",
     audio_codec="wmav2",
     probe_audio_codec="wmav2",
     audio_bitrate="128k",
@@ -96,12 +96,13 @@ ZEN_WMV_WMA = VideoEncodePreset(
     audio_channels=2,
     container_detail="Container: WMV / ASF",
     video_detail=(
-        "Video: WMV2 (Windows Media Video) · 800 kbps · "
+        "Video: WMV2 (Windows Media Video) · 480 kbps · "
         "640×480 pad · yuv420p"
     ),
     audio_detail="Audio: WMA v2 · 128 kbps · 44.1 kHz · stereo",
-    summary="PlaysForSure-era path: WMV + WMA (theoretical support)",
-    experimental=False,
+    summary="Broken — does not play reliably; enable in Config to show",
+    experimental=True,
+    broken=True,
 )
 
 # Default preset alias (tests / simple imports).

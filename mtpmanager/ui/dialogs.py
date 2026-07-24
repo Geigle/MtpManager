@@ -129,8 +129,21 @@ def show_device_info_dialog(
     parent.wait_window(dlg)
 
 
-def show_config_dialog(parent, *, send_format: str) -> str | None:
-    """Edit app preferences. Returns new send_format on Save, or None if cancelled.
+@dataclass(frozen=True)
+class ConfigDialogResult:
+    """Values saved from Config → Config…"""
+
+    send_format: str
+    show_broken_video_presets: bool = False
+
+
+def show_config_dialog(
+    parent,
+    *,
+    send_format: str,
+    show_broken_video_presets: bool = False,
+) -> ConfigDialogResult | None:
+    """Edit app preferences. Returns result on Save, or None if cancelled.
 
     Transfer mode (Stable vs PyMTP) is a separate Config menu checkbutton.
     """
@@ -169,17 +182,46 @@ def show_config_dialog(parent, *, send_format: str) -> str | None:
             "on = mtp-sendtr subprocess per track."
         ),
         justify=LEFT,
-        wraplength=340,
+        wraplength=360,
     ).pack(anchor="w", pady=(0, 12))
 
-    result: list[str | None] = [None]
+    Label(
+        body,
+        text="Send Video (device-specific)",
+        font=("", 11, "bold"),
+        anchor="w",
+    ).pack(fill="x", pady=(4, 2))
+
+    broken_var = BooleanVar(value=bool(show_broken_video_presets))
+    Checkbutton(
+        body,
+        text="Show broken video encode presets (experimental)",
+        variable=broken_var,
+        anchor="w",
+        justify=LEFT,
+    ).pack(fill="x", pady=(0, 2))
+    Label(
+        body,
+        text=(
+            "When enabled, Device → Send Video can offer recipes marked "
+            "broken (e.g. ZEN Vision:M WMV · WMA). They are hidden by "
+            "default because they do not play reliably."
+        ),
+        justify=LEFT,
+        wraplength=360,
+    ).pack(anchor="w", pady=(0, 12))
+
+    result: list[ConfigDialogResult | None] = [None]
 
     def on_save() -> None:
         raw = (fmt_var.get() or "MP3").strip().lower()
         if raw not in VALID_SEND_FORMATS:
             messagebox.showerror("Config", f"Invalid format: {raw}", parent=dlg)
             return
-        result[0] = raw
+        result[0] = ConfigDialogResult(
+            send_format=raw,
+            show_broken_video_presets=bool(broken_var.get()),
+        )
         dlg.destroy()
 
     def on_cancel() -> None:
@@ -188,14 +230,16 @@ def show_config_dialog(parent, *, send_format: str) -> str | None:
 
     btn_row = Frame(body)
     btn_row.pack(fill="x")
-    Button(btn_row, text="Cancel", width=10, command=on_cancel).pack(side=RIGHT, padx=(6, 0))
+    Button(btn_row, text="Cancel", width=10, command=on_cancel).pack(
+        side=RIGHT, padx=(6, 0)
+    )
     Button(btn_row, text="Save", width=10, command=on_save).pack(side=RIGHT)
 
     dlg.protocol("WM_DELETE_WINDOW", on_cancel)
     dlg.grab_set()
     try:
-        px = parent.winfo_rootx() + max(0, (parent.winfo_width() - 340) // 2)
-        py = parent.winfo_rooty() + max(0, (parent.winfo_height() - 200) // 3)
+        px = parent.winfo_rootx() + max(0, (parent.winfo_width() - 380) // 2)
+        py = parent.winfo_rooty() + max(0, (parent.winfo_height() - 280) // 3)
         dlg.geometry(f"+{px}+{py}")
     except Exception:
         pass
@@ -252,7 +296,9 @@ def _fill_preset_panel(parent: Frame, preset: VideoEncodePreset) -> None:
         f"Audio: {preset.audio_bitrate} · {preset.audio_sample_rate} Hz · "
         f"{preset.audio_channels} channel(s)"
     )
-    if preset.experimental:
+    if preset.broken:
+        extra.append("⚠ Broken — does not play reliably on this device")
+    elif preset.experimental:
         extra.append("⚠ Experimental — may not play on this device")
 
     Label(parent, text="Parameters", font=("", 11, "bold"), anchor="w").pack(
@@ -273,11 +319,13 @@ def ask_video_destination(
     filename: str = "",
     video_options: DeviceVideoOptions | None = None,
     encode_default: bool = True,
+    include_broken_presets: bool = False,
 ) -> SendVideoDialogResult | None:
     """Ask Video/TV parent and optional device encode preset. None if cancelled.
 
     *video_options* is only set for known players (e.g. ZEN Vision:M). The
     generic device profile passes None — no format notebook is shown.
+    *include_broken_presets* comes from Config (show broken recipes like WMV).
     """
     dlg = Toplevel(parent)
     dlg.title("Send Video")
@@ -314,13 +362,22 @@ def ask_video_destination(
         anchor="w",
     ).pack(fill="x", pady=2)
 
-    has_options = video_options is not None and bool(video_options.presets)
+    visible: tuple[VideoEncodePreset, ...] = ()
+    if video_options is not None:
+        visible = video_options.visible_presets(
+            include_broken=bool(include_broken_presets)
+        )
+    has_options = bool(visible)
     encode_var = BooleanVar(value=bool(encode_default and has_options))
     ignore_max_fps_var = BooleanVar(value=False)
     high_fps_cb: Checkbutton | None = None
     notebook: ttk.Notebook | None = None
     preset_by_tab: dict[int, VideoEncodePreset] = {}
-    default_preset = video_options.default_preset() if has_options else None
+    default_preset: VideoEncodePreset | None = None
+    if has_options and video_options is not None:
+        default_preset = video_options.default_preset()
+        if default_preset not in visible:
+            default_preset = visible[0]
 
     def _selected_preset() -> VideoEncodePreset | None:
         if notebook is None or not has_options:
@@ -386,7 +443,7 @@ def ask_video_destination(
         notebook = ttk.Notebook(body)
         notebook.pack(fill=BOTH, expand=True, pady=(0, 4))
 
-        for i, preset in enumerate(video_options.presets):
+        for i, preset in enumerate(visible):
             tab = Frame(notebook, padx=10, pady=6)
             notebook.add(tab, text=preset.tab_label)
             _fill_preset_panel(tab, preset)
@@ -418,7 +475,7 @@ def ask_video_destination(
             on = bool(encode_var.get())
             try:
                 if notebook is not None:
-                    for i in range(len(video_options.presets)):
+                    for i in range(len(visible)):
                         notebook.tab(i, state="normal" if on else "disabled")
             except Exception:
                 pass

@@ -331,7 +331,7 @@ class VideoEncodeProfileProbeTests(unittest.TestCase):
         opts = _build_output_options(ZEN_WMV_WMA, force_fps=None, container_ext="wmv")
         self.assertEqual(opts["c:v"], "wmv2")
         self.assertEqual(opts["c:a"], "wmav2")
-        self.assertEqual(opts["b:v"], "800k")
+        self.assertEqual(opts["b:v"], "480k")
         self.assertEqual(opts["f"], "asf")
         self.assertNotIn("vtag", opts)
         self.assertNotIn("qscale:v", opts)
