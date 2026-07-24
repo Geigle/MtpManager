@@ -140,19 +140,43 @@ class PymtpDevice:
             return False
 
     def session_alive(self) -> bool:
-        """True if the open session still answers a lightweight query.
+        """True if the open session still answers a lightweight USB query.
 
         After unplug, libmtp may leave a non-NULL device pointer so
         :meth:`is_connected` stays True. Call this to detect a dead session
         and force reconnect logic.
 
-        Uses model name only (one PTP property). Does **not** call battery or
-        storage APIs — those are reserved for :meth:`get_info` diagnostics.
+        **Must not** use ``get_modelname`` / ``get_manufacturer`` /
+        ``get_serialnumber``: libmtp returns those from cached deviceinfo with
+        **no USB traffic**, so they stay "alive" after physical unplug and
+        block auto-reconnect forever.
+
+        Uses ``LIBMTP_Get_Storage`` (real PTP GetStorageIDs). Battery is
+        avoided — historically flaky on recovering ZENs after long jobs.
         """
         if not self.is_connected():
             return False
         try:
-            _ = self._mtp.get_modelname()
+            from mtpmanager.infra.pymtp_wrapper import _device_ptr
+
+            mtp = self._mtp
+            lib = getattr(mtp, "mtp", None)
+            addr = _device_ptr(getattr(mtp, "device", None))
+            get_storage = getattr(lib, "LIBMTP_Get_Storage", None) if lib else None
+            if addr and get_storage is not None:
+                # 0 = success; -1 (or other non-zero) = device gone / bus error.
+                ret = int(get_storage(addr, 0))
+                if ret != 0:
+                    logger.debug(
+                        "MTP session probe Get_Storage failed (ret=%s)",
+                        ret,
+                    )
+                    return False
+                return True
+
+            # Fallback when bindings lack Get_Storage: friendly name is a live
+            # PTP device property (unlike model/manufacturer strings).
+            _ = mtp.get_devicename()
             return True
         except Exception:
             logger.debug(
@@ -174,11 +198,31 @@ class PymtpDevice:
             return name
 
     def disconnect(self) -> None:
+        """Close the session and clear the device pointer.
+
+        After a physical unplug, ``LIBMTP_Release_Device`` may error; still
+        clear ``device`` so :meth:`is_connected` is False and auto-connect can
+        open a fresh session on replug.
+        """
         try:
             self._mtp.disconnect()
             logger.info("Disconnected MTP device.")
         except pymtp.NotConnected:
             logger.info("No MTP device present.")
+        except Exception:
+            logger.exception(
+                "Disconnect raised; clearing session pointer for reconnect"
+            )
+            try:
+                self._mtp.device = None
+            except Exception:
+                pass
+        # Ensure reconnect path is not blocked by a stale non-NULL pointer.
+        if getattr(self._mtp, "device", None) is not None:
+            try:
+                self._mtp.device = None
+            except Exception:
+                pass
 
     def _safe_device_str(self, method: str, default: str = "") -> str:
         """Call a pymtp string getter; return *default* on any failure."""

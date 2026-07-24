@@ -2,19 +2,34 @@
 
 from __future__ import annotations
 
+import ctypes
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from mtpmanager.infra.pymtp_device import PymtpDevice
+
+
+class _FakeLib:
+    """Stand-in for pymtp.MTP.mtp (ctypes libmtp bindings)."""
+
+    def __init__(self) -> None:
+        self.storage_ret = 0
+        self.storage_calls = 0
+
+    def LIBMTP_Get_Storage(self, _addr, _sortby):
+        self.storage_calls += 1
+        return self.storage_ret
 
 
 class _FakeMtp:
     """Minimal pymtp.MTP stand-in with controllable failures."""
 
     def __init__(self) -> None:
-        self.device = object()  # "connected"
+        # Non-NULL ctypes-like pointer so _device_ptr can resolve an address.
+        self.device = ctypes.c_void_p(0x1000)
         self.fail: set[str] = set()
         self.calls: list[str] = []
+        self.mtp = _FakeLib()
 
     def _record(self, name: str):
         self.calls.append(name)
@@ -61,6 +76,13 @@ class _FakeMtp:
         self._record("get_usedspace_percent")
         return 50.0
 
+    def disconnect(self):
+        self._record("disconnect")
+        if "disconnect" in self.fail:
+            # Simulate Release_Device error after unplug; leave stale pointer.
+            raise RuntimeError("Could not close session")
+        self.device = None
+
 
 class DeviceInfoSoftFailTests(unittest.TestCase):
     def _device(self) -> tuple[PymtpDevice, _FakeMtp]:
@@ -105,12 +127,56 @@ class DeviceInfoSoftFailTests(unittest.TestCase):
         self.assertEqual(info.total, 0)
         self.assertEqual(info.used, 0)
 
-    def test_session_alive_uses_modelname_only(self) -> None:
+    def test_session_alive_uses_get_storage_not_modelname(self) -> None:
+        """Liveness must hit USB (Get_Storage); modelname is cached-only."""
         dev, fake = self._device()
-        self.assertTrue(dev.session_alive())
-        self.assertEqual(fake.calls, ["get_modelname"])
-        fake.fail.add("get_modelname")
+        with patch(
+            "mtpmanager.infra.pymtp_wrapper._device_ptr",
+            return_value=0x1000,
+        ):
+            self.assertTrue(dev.session_alive())
+        self.assertEqual(fake.mtp.storage_calls, 1)
+        self.assertNotIn("get_modelname", fake.calls)
+        self.assertNotIn("get_batterylevel", fake.calls)
+
+    def test_session_alive_false_when_get_storage_fails(self) -> None:
+        """Physical unplug: Get_Storage returns -1 → dead session."""
+        dev, fake = self._device()
+        fake.mtp.storage_ret = -1
+        with patch(
+            "mtpmanager.infra.pymtp_wrapper._device_ptr",
+            return_value=0x1000,
+        ):
+            self.assertFalse(dev.session_alive())
+        self.assertEqual(fake.mtp.storage_calls, 1)
+        # Cached modelname must not be consulted as a substitute.
+        self.assertNotIn("get_modelname", fake.calls)
+
+    def test_session_alive_false_when_not_connected(self) -> None:
+        dev, fake = self._device()
+        fake.device = None
         self.assertFalse(dev.session_alive())
+        self.assertEqual(fake.mtp.storage_calls, 0)
+
+    def test_session_alive_fallback_without_get_storage(self) -> None:
+        dev, fake = self._device()
+        fake.mtp = object()  # no LIBMTP_Get_Storage
+        with patch(
+            "mtpmanager.infra.pymtp_wrapper._device_ptr",
+            return_value=0x1000,
+        ):
+            self.assertTrue(dev.session_alive())
+        self.assertIn("get_devicename", fake.calls)
+        self.assertNotIn("get_modelname", fake.calls)
+
+    def test_disconnect_clears_pointer_even_on_error(self) -> None:
+        """Stale pointer after failed Release would block auto-reconnect."""
+        dev, fake = self._device()
+        fake.fail.add("disconnect")
+        self.assertTrue(dev.is_connected())
+        dev.disconnect()
+        self.assertFalse(dev.is_connected())
+        self.assertIsNone(fake.device)
 
 
 if __name__ == "__main__":
