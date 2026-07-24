@@ -305,6 +305,132 @@ def read_metadata(path: str) -> TrackMetadata:
     return TrackMetadata(title=base or "Unknown Title")
 
 
+def write_metadata(path: str, meta: TrackMetadata) -> bool:
+    """Best-effort write of *meta* into a local audio file. Returns True if written.
+
+    Supports MP3 (EasyID3) and WMA/ASF. Other containers (including many video
+    types) are left unchanged when mutagen cannot write tags.
+    """
+    if not path or not os.path.isfile(path):
+        return False
+    try:
+        if is_format(path, "mp3"):
+            return _write_id3(path, meta)
+        if is_format(path, "wma"):
+            return _write_asf(path, meta)
+        # FLAC / OGG if present as retrieved formats
+        if is_format(path, "flac"):
+            return _write_flac(path, meta)
+        if is_format(path, "ogg") or is_format(path, "vorbis"):
+            return _write_ogg(path, meta)
+    except Exception as exc:
+        logger.warning("Tag write failed for %s: %s", path, exc)
+        return False
+    logger.debug("No tag writer for %s; leaving device file as-is", path)
+    return False
+
+
+def _set_easy(tag: Any, key: str, value: str) -> None:
+    text = (value or "").strip()
+    if not text:
+        return
+    try:
+        tag[key] = text
+    except Exception:
+        pass
+
+
+def _write_id3(path: str, meta: TrackMetadata) -> bool:
+    try:
+        tag = EasyID3(path)
+    except Exception:
+        try:
+            audio = MP3(path)
+            audio.add_tags()
+            audio.save()
+            tag = EasyID3(path)
+        except Exception as exc:
+            logger.debug("EasyID3 create failed for %s: %s", path, exc)
+            return False
+    _set_easy(tag, "title", meta.title)
+    _set_easy(tag, "artist", meta.artist)
+    _set_easy(tag, "album", meta.album)
+    _set_easy(tag, "albumartist", meta.albumartist)
+    _set_easy(tag, "composer", meta.composer)
+    _set_easy(tag, "genre", meta.genre)
+    _set_easy(tag, "tracknumber", str(meta.tracknumber or "").split("/")[0])
+    if meta.date:
+        _set_easy(tag, "date", meta.date)
+    tag.save(path)
+    return True
+
+
+def _write_asf(path: str, meta: TrackMetadata) -> bool:
+    audio = ASF(path)
+    if audio.tags is None:
+        audio.add_tags()
+    tags = audio.tags
+
+    def put(key: str, value: str) -> None:
+        text = (value or "").strip()
+        if not text:
+            return
+        try:
+            tags[key] = text
+        except Exception:
+            pass
+
+    put("Title", meta.title)
+    put("Author", meta.artist)
+    put("WM/AlbumTitle", meta.album)
+    put("WM/AlbumArtist", meta.albumartist)
+    put("WM/Composer", meta.composer)
+    put("WM/Genre", meta.genre)
+    put("WM/TrackNumber", str(meta.tracknumber or "").split("/")[0])
+    if meta.date:
+        put("WM/Year", meta.date[:4] if len(meta.date) >= 4 else meta.date)
+    audio.save()
+    return True
+
+
+def _write_flac(path: str, meta: TrackMetadata) -> bool:
+    audio = FLAC(path)
+    def put(key: str, value: str) -> None:
+        text = (value or "").strip()
+        if text:
+            audio[key] = text
+    put("title", meta.title)
+    put("artist", meta.artist)
+    put("album", meta.album)
+    put("albumartist", meta.albumartist)
+    put("composer", meta.composer)
+    put("genre", meta.genre)
+    put("tracknumber", str(meta.tracknumber or "").split("/")[0])
+    if meta.date:
+        put("date", meta.date)
+    audio.save()
+    return True
+
+
+def _write_ogg(path: str, meta: TrackMetadata) -> bool:
+    audio = OggVorbis(path)
+    def put(key: str, value: str) -> None:
+        text = (value or "").strip()
+        if text:
+            audio[key] = text
+    put("title", meta.title)
+    put("artist", meta.artist)
+    put("album", meta.album)
+    put("albumartist", meta.albumartist)
+    put("composer", meta.composer)
+    put("genre", meta.genre)
+    put("tracknumber", str(meta.tracknumber or "").split("/")[0])
+    if meta.date:
+        put("date", meta.date)
+    audio.save()
+    return True
+
+
 class MutagenTagReader:
     def read_metadata(self, path: str) -> TrackMetadata:
         return read_metadata(path)

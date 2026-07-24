@@ -70,6 +70,8 @@ MENU_SYNC_FOLDER = "Sync Folder…"
 MENU_SYNC_SELECTED = "Sync Selected Tracks"
 MENU_RESUME_SYNC = "Resume Sync"
 MENU_CANCEL_JOB = "Cancel Current Job"
+MENU_PACKAGE_RETAIL = "Package Retail Demos… (experimental)"
+MENU_RESTORE_RETAIL = "Restore Retail Package… (experimental)"
 
 # Config menu
 MENU_STABLE_MODE = "Stable Mode"
@@ -82,9 +84,11 @@ MENU_CONNECT = "Connect"
 MENU_DISCONNECT = "Disconnect"
 MENU_DEVICE_INFO = "Device Info"
 MENU_CREATE_FOLDER = "Create Folder…"
+MENU_SEND_VIDEO = "Send Video… (experimental)"
 MENU_LIST_FOLDERS = "List Folders"
 MENU_LIST_FILES = "List Files (experimental)"
 MENU_LIST_TRACKS = "List Tracks (experimental)"
+MENU_GET_TRACKS_FROM_DEVICE = "Get Tracks from Device… (experimental)"
 MENU_DELETE_TRACK = "Delete Track (experimental)"
 MENU_GET_FILE_INFO = "Get File Info (experimental)"
 MENU_GET_TRACK_INFO = "Get Track Info (experimental)"
@@ -106,9 +110,11 @@ _DEVICE_MENU_LABELS = (
     MENU_DISCONNECT,
     MENU_DEVICE_INFO,
     MENU_CREATE_FOLDER,
+    MENU_SEND_VIDEO,
     MENU_LIST_FOLDERS,
     MENU_LIST_FILES,
     MENU_LIST_TRACKS,
+    MENU_GET_TRACKS_FROM_DEVICE,
     MENU_REFRESH_DEVICE_INDEX,
     MENU_DELETE_TRACK,
     MENU_GET_FILE_INFO,
@@ -150,6 +156,9 @@ class MainWindow:
         self.menu_transfer.add_command(label=MENU_SYNC_FOLDER)
         self.menu_transfer.add_command(label=MENU_SYNC_SELECTED, state=DISABLED)
         self.menu_transfer.add_command(label=MENU_RESUME_SYNC, state=DISABLED)
+        self.menu_transfer.add_separator()
+        self.menu_transfer.add_command(label=MENU_PACKAGE_RETAIL)
+        self.menu_transfer.add_command(label=MENU_RESTORE_RETAIL)
         self.menu_transfer.add_separator()
         self.menu_transfer.add_command(label=MENU_CANCEL_JOB, state=DISABLED)
 
@@ -397,6 +406,8 @@ class MainWindow:
         on_sync_selected=None,
         on_resume_sync=None,
         on_cancel_job=None,
+        on_package_retail=None,
+        on_restore_retail=None,
     ) -> None:
         self.menu_transfer.entryconfig(MENU_SYNC_ENTIRE, command=on_sync_entire)
         self.menu_transfer.entryconfig(MENU_SYNC_FOLDER, command=on_sync_folder)
@@ -406,6 +417,14 @@ class MainWindow:
             )
         if on_resume_sync is not None:
             self.menu_transfer.entryconfig(MENU_RESUME_SYNC, command=on_resume_sync)
+        if on_package_retail is not None:
+            self.menu_transfer.entryconfig(
+                MENU_PACKAGE_RETAIL, command=on_package_retail
+            )
+        if on_restore_retail is not None:
+            self.menu_transfer.entryconfig(
+                MENU_RESTORE_RETAIL, command=on_restore_retail
+            )
         if on_cancel_job is not None:
             self.menu_transfer.entryconfig(MENU_CANCEL_JOB, command=on_cancel_job)
             self._cancel_job_command = on_cancel_job
@@ -472,21 +491,29 @@ class MainWindow:
         on_list_folders,
         on_list_files=None,
         on_list_tracks=None,
+        on_get_tracks_from_device=None,
         on_delete_track=None,
         on_get_file_info,
         on_get_track_info=None,
         on_delete_all,
         on_refresh_device_index=None,
+        on_send_video=None,
     ) -> None:
         self.menu_device.entryconfig(MENU_CONNECT, command=on_connect)
         self.menu_device.entryconfig(MENU_DISCONNECT, command=on_disconnect)
         self.menu_device.entryconfig(MENU_DEVICE_INFO, command=on_device_info)
         self.menu_device.entryconfig(MENU_CREATE_FOLDER, command=on_create_folder)
+        if on_send_video is not None:
+            self.menu_device.entryconfig(MENU_SEND_VIDEO, command=on_send_video)
         self.menu_device.entryconfig(MENU_LIST_FOLDERS, command=on_list_folders)
         if on_list_files is not None:
             self.menu_device.entryconfig(MENU_LIST_FILES, command=on_list_files)
         if on_list_tracks is not None:
             self.menu_device.entryconfig(MENU_LIST_TRACKS, command=on_list_tracks)
+        if on_get_tracks_from_device is not None:
+            self.menu_device.entryconfig(
+                MENU_GET_TRACKS_FROM_DEVICE, command=on_get_tracks_from_device
+            )
         if on_refresh_device_index is not None:
             self.menu_device.entryconfig(
                 MENU_REFRESH_DEVICE_INDEX, command=on_refresh_device_index

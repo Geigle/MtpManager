@@ -28,6 +28,7 @@ What libmtp/pymtp/MtpManager implement vs leave unbound:
 from __future__ import annotations
 
 import ctypes
+import logging
 import ctypes.util
 import os
 import sys
@@ -214,6 +215,28 @@ def _configure_libmtp_ctypes() -> None:
     if hasattr(lib, "LIBMTP_destroy_track_t"):
         lib.LIBMTP_destroy_track_t.argtypes = [track_p]
         lib.LIBMTP_destroy_track_t.restype = None
+
+    # int Get_File_To_File(dev, uint32_t id, char *path, progress_cb, data)
+    if hasattr(lib, "LIBMTP_Get_File_To_File"):
+        lib.LIBMTP_Get_File_To_File.argtypes = [
+            dev_p,
+            ctypes.c_uint32,
+            ctypes.c_char_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+        ]
+        lib.LIBMTP_Get_File_To_File.restype = ctypes.c_int
+
+    # int Get_Track_To_File(dev, uint32_t id, char *path, progress_cb, data)
+    if hasattr(lib, "LIBMTP_Get_Track_To_File"):
+        lib.LIBMTP_Get_Track_To_File.argtypes = [
+            dev_p,
+            ctypes.c_uint32,
+            ctypes.c_char_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+        ]
+        lib.LIBMTP_Get_Track_To_File.restype = ctypes.c_int
 
 
 _configure_libmtp_ctypes()
@@ -425,18 +448,43 @@ _ProgressFunc = ctypes.CFUNCTYPE(
 )
 
 
+def _next_node_ptr(node, *, ptr_type=None):
+    """Capture linked-list ``next`` as a stable POINTER before free.
+
+    Reading ``node.next`` after destroy is undefined. Some ctypes layouts also
+    need an explicit cast through ``c_void_p`` so a non-NULL next is not lost.
+    """
+    nxt = getattr(node, "next", None)
+    if not nxt:
+        return None
+    try:
+        addr = ctypes.cast(nxt, ctypes.c_void_p).value
+    except (TypeError, ValueError, ctypes.ArgumentError):
+        return nxt if _ptr_truthy(nxt) else None
+    if addr in (None, 0):
+        return None
+    if ptr_type is None:
+        return nxt
+    try:
+        return ctypes.cast(addr, ptr_type)
+    except (TypeError, ValueError, ctypes.ArgumentError):
+        return nxt
+
+
 def _get_tracklisting(self, callback=None):
     """Return track snapshots (Python 3 / NULL-safe); free each C track node.
 
     Stock walks the linked list without a NULL-safe head check, leaves C
     strings allocated, and uses an untyped progress callback. We snapshot
-    fields into Python and ``LIBMTP_destroy_track_t`` each node before
-    following ``next`` (libmtp docs: destroy one node at a time — does not
-    free the rest of the chain).
+    fields into Python and ``LIBMTP_destroy_track_t`` each node after saving
+    the *next* pointer address (libmtp: destroy one node at a time).
+
+    Note: on Creative ZEN Vision:M, bulk Get_Tracklisting is often
+    **incomplete** (e.g. one demo track). Product List Tracks uses
+    filelisting + per-id Get_Trackmetadata (mtp-tracks algorithm) instead.
 
     *callback*, if given, is ``callback(sent, total)`` where *sent*/*total*
     are object-handle indices from libmtp (not yet the final track count).
-    The expensive work is inside this C call (per-track metadata GETs).
     """
     if self.device is None:
         raise NotConnected
@@ -465,8 +513,10 @@ def _get_tracklisting(self, callback=None):
         return []
 
     destroy = getattr(self.mtp, "LIBMTP_destroy_track_t", None)
+    track_p = type(head)
     ret: list = []
     cur = head
+    walked = 0
     while _ptr_truthy(cur):
         try:
             node = cur.contents
@@ -474,7 +524,9 @@ def _get_tracklisting(self, callback=None):
             break
         snap = _snapshot_track(node)
         ret.append(snap)
-        nxt = getattr(node, "next", None)
+        walked += 1
+        # MUST capture next address before destroy frees this node.
+        nxt = _next_node_ptr(node, ptr_type=track_p)
         if destroy is not None:
             try:
                 destroy(cur)
@@ -484,6 +536,8 @@ def _get_tracklisting(self, callback=None):
             break
         cur = nxt
 
+    _log = logging.getLogger(__name__)
+    _log.info("get_tracklisting walk complete count=%s", walked)
     return ret
 
 
@@ -664,6 +718,61 @@ def _get_track_metadata(self, track_id):
                 pass
 
 
+def _get_object_to_file(self, lib_fn_name: str, object_id: int, target, callback=None):
+    """Shared download path for Get_File_To_File / Get_Track_To_File.
+
+    Stock pymtp passes a Python ``str`` path without argtypes — on arm64/Py3
+    that can truncate to the first character. We encode a full UTF-8 buffer
+    and type the C call.
+    """
+    if self.device is None:
+        raise NotConnected
+
+    dev = _device_ptr(self.device)
+    if not dev:
+        raise NotConnected
+
+    path_b = _as_c_char_p(target)
+    if not path_b:
+        raise ValueError("Download target path must be non-empty")
+    path_buf = ctypes.create_string_buffer(path_b)
+
+    c_progress = None
+    if callback is not None:
+
+        def _c_progress(sent, total, _data):
+            try:
+                callback(int(sent), int(total))
+            except Exception:
+                pass
+            return 0
+
+        c_progress = _ProgressFunc(_c_progress)
+
+    fn = getattr(self.mtp, lib_fn_name)
+    ret = fn(
+        dev,
+        ctypes.c_uint32(int(object_id)),
+        path_buf,
+        c_progress,
+        None,
+    )
+    _ = c_progress
+    if int(ret) != 0:
+        _debug_stack(self)
+        raise CommandFailed
+
+
+def _get_file_to_file(self, file_id, target, callback=None):
+    """Download any object by id to *target* (typed path + progress)."""
+    _get_object_to_file(self, "LIBMTP_Get_File_To_File", file_id, target, callback)
+
+
+def _get_track_to_file(self, track_id, target, callback=None):
+    """Download a track object by id to *target* (typed path + progress)."""
+    _get_object_to_file(self, "LIBMTP_Get_Track_To_File", track_id, target, callback)
+
+
 # Monkey-patch stock methods so all callers get the fixed behavior.
 _MTP.debug_stack = _debug_stack
 _MTP.send_track_from_file = _send_track_from_file
@@ -676,3 +785,5 @@ _MTP.set_devicename = _set_devicename
 _MTP.delete_object = _delete_object
 _MTP.get_file_metadata = _get_file_metadata
 _MTP.get_track_metadata = _get_track_metadata
+_MTP.get_file_to_file = _get_file_to_file
+_MTP.get_track_to_file = _get_track_to_file

@@ -60,6 +60,8 @@ Do **not**:
 | Device profiles / graphics | `domain/device_profile.py`, `domain/device_profiles.py`, `assets/devices/` |
 | App config (send format, …) | `infra/app_config.py` (`config.json` under data dir) |
 | Track listing / media filter (ZEN) | `domain/device_media.py` + `pymtp_device.list_tracks` (filelisting + media filter) + on-demand tags via `device_ops.enrich_track_refs` / `get_track_metadata` + `tests/test_device_media.py` |
+| Export map / retail zip / restore | `infra/device_export_map.py`, `infra/retail_package.py`, `app/retail_ops.py` + `tests/test_device_export_map.py`, `tests/test_retail_package.py` |
+| Send Video (Video 120 / TV 124) | `DeviceVideoOptions` + presets in `device_profile.py` / `device_profiles.py`; encode `infra/ffmpeg_video.py`; `app/device_ops.prepare_and_send_video`; notebook UI `dialogs.ask_video_destination`; `tests/test_send_video.py` |
 
 ---
 

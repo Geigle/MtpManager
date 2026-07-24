@@ -178,10 +178,24 @@ Debriefs remain the forensic narrative; this file is what we keep doing.
 
 **Context:** Skip-if-present called `list_files` at the start of every sync job. Full `get_filelisting` walks are USB-heavy and appear to poison ZEN sessions when repeated. Admin List Files/Tracks did the same walk every menu click.
 
-**Decision:** Persist device inventory in SQLite (`devices` + `device_files` in `library_index.db`, keyed by device serial). **Seed once** after Experimental connect (background `list_files` → replace rows). **Skip-if-present** and **List Files / List Tracks / delete pickers** read the cache only. **Update incrementally** on successful send (`record_send`) and successful delete (`remove_by_item_id`). **Device → Refresh Device Index…** forces one live listing. No per-sync `list_files`.
+**Decision:** Persist device inventory in SQLite (`devices` + `device_files` in `library_index.db`), keyed by **MTP serial alone** when present. If serial is missing/placeholder, key by a fingerprint of **manufacturer + model only** (never friendly name). **Seed once** after Experimental connect (background `list_files` → replace rows). **Skip-if-present** and **List Files / List Tracks / delete pickers** read the cache only. **Update incrementally** on successful send (`record_send`) and successful delete (`remove_by_item_id`). **Device → Refresh Device Index…** forces one live listing. No per-sync `list_files`.
 
-**Rationale:** One listing per connect is enough for app-driven sync/delete; external device changes need explicit refresh.
+**Rationale:** One listing per connect is enough for app-driven sync/delete; external device changes need explicit refresh. Friendly name is user-editable (Device Info) and must not re-key or orphan the inventory. Serial is the stable hardware identity; mfr+model is the best no-serial fallback (two identical models without serials share one bucket — preferred over rename-fragile keys).
 
-**Consequences:** Cache can go stale if another tool writes the player; user Refresh or reconnect. Stable Mode without a serial may not skip. MTP `item_id` remains best-effort (volatile across rebuilds); skip keys on GUID stem / ObjectFileName.
+**Consequences:** Cache can go stale if another tool writes the player; user Refresh or reconnect. Stable Mode without a serial may not skip. MTP `item_id` remains best-effort (volatile across rebuilds); skip keys on GUID stem / ObjectFileName. Same-model players without serials share one index.
 
 **Source:** `infra/device_index.py`; `ui/controllers.py` connect seed + skip path; `tests/test_device_index.py`.
+
+---
+
+## D14 — Retail package zip for Creative demos (iFlash restore)
+
+**Context:** iFlash-upgraded ZENs lack stock Creative demo media. Full device exports mix user content with demos; restore needs a portable subset plus editable metadata.
+
+**Decision:** **Transfer → Package Retail Demos…** filters a Get Tracks `device_media_map.json` to `flags.looks_like_retail_demo` host files, writes a zip (`restore_map.json` + `media/`). **Transfer → Restore Retail Package…** extracts and sends with **no GUID** ObjectFileName (`preferred_basename` / original short name), tags from `desired_tags`, and fatal batch abort. Reduced map is re-editable (`include_in_restore`, tags, notes).
+
+**Rationale:** Separate study map (verbose full export) from transfer payload (small, retail-only). Keep retail ObjectFileNames for a stock-like on-device browser; library GUID mode stays for user music.
+
+**Consequences:** Heuristic demos can false-positive; user edits full map flags before package or reduced map before restore. Video filetypes prefer ZEN Video folder parent when original parent is unknown.
+
+**Source:** `infra/retail_package.py`, `app/retail_ops.py`; `tests/test_retail_package.py`.

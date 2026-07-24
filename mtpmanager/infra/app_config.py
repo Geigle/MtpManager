@@ -29,6 +29,8 @@ class AppConfig:
     store_tracks_in_artist_folder: bool = False
     # When True (requires artist folders), create Music/<artist>/<album> and send there.
     store_tracks_in_album_folder: bool = False
+    # When True, Send Video shows broken device presets (e.g. ZEN WMV·WMA).
+    show_broken_video_presets: bool = False
     version: int = CONFIG_VERSION
 
     def normalized_send_format(self) -> str:
@@ -82,6 +84,9 @@ def load_app_config(*, path: Path | None = None) -> AppConfig:
         stable_mode=_as_bool(raw.get("stable_mode"), False),
         store_tracks_in_artist_folder=artist,
         store_tracks_in_album_folder=album,
+        show_broken_video_presets=_as_bool(
+            raw.get("show_broken_video_presets"), False
+        ),
         version=int(raw.get("version", CONFIG_VERSION) or CONFIG_VERSION),
     )
     cfg.send_format = cfg.normalized_send_format()
@@ -100,6 +105,7 @@ def save_app_config(config: AppConfig, *, path: Path | None = None) -> Path:
         "stable_mode": bool(config.stable_mode),
         "store_tracks_in_artist_folder": artist,
         "store_tracks_in_album_folder": album,
+        "show_broken_video_presets": bool(config.show_broken_video_presets),
     }
     text = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
     tmp = dest.with_suffix(dest.suffix + ".tmp")

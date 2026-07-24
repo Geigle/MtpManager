@@ -131,7 +131,7 @@ class PymtpDeleteObjectTests(unittest.TestCase):
 
 
 class PymtpTrackListingTests(unittest.TestCase):
-    """Patched get_tracklisting kept for diagnostics (not bulk List Tracks UX)."""
+    """Patched get_tracklisting (diagnostic); product List Tracks uses file+meta."""
 
     def test_get_tracklisting_is_patched(self) -> None:
         self.assertIs(pymtp.MTP.get_tracklisting, pymtp._get_tracklisting)
@@ -143,6 +143,16 @@ class PymtpTrackListingTests(unittest.TestCase):
         self.assertIn("_ptr_truthy", src)
         self.assertIn("_ProgressFunc", src)
         self.assertIn("callback", src)
+        # Linked-list next must be captured before destroy.
+        self.assertIn("_next_node_ptr", src)
+
+    def test_next_node_ptr_null_safe(self) -> None:
+        from types import SimpleNamespace
+
+        from mtpmanager.infra import pymtp_wrapper as wrap
+
+        self.assertIsNone(wrap._next_node_ptr(SimpleNamespace(next=None)))
+        self.assertIsNone(wrap._next_node_ptr(SimpleNamespace()))
 
     def test_get_tracklisting_requires_connection(self) -> None:
         mtp = pymtp.MTP()
@@ -157,6 +167,29 @@ class PymtpTrackListingTests(unittest.TestCase):
         self.assertIs(fn.argtypes[0], ctypes.c_void_p)
         self.assertIs(fn.argtypes[1], ctypes.c_void_p)
         self.assertIs(fn.argtypes[2], ctypes.c_void_p)
+
+
+class PymtpDownloadTests(unittest.TestCase):
+    """Experimental retrieve uses patched get_file_to_file / get_track_to_file."""
+
+    def test_get_file_to_file_is_patched(self) -> None:
+        self.assertIs(pymtp.MTP.get_file_to_file, pymtp._get_file_to_file)
+        src = inspect.getsource(pymtp.MTP.get_file_to_file)
+        self.assertIn("LIBMTP_Get_File_To_File", src)
+        self.assertIn("_as_c_char_p", inspect.getsource(pymtp._get_object_to_file))
+        self.assertIn("create_string_buffer", inspect.getsource(pymtp._get_object_to_file))
+
+    def test_get_track_to_file_is_patched(self) -> None:
+        self.assertIs(pymtp.MTP.get_track_to_file, pymtp._get_track_to_file)
+
+    def test_download_argtypes(self) -> None:
+        import ctypes
+
+        fn = pymtp._pymtp._libmtp.LIBMTP_Get_File_To_File
+        self.assertEqual(len(fn.argtypes), 5)
+        self.assertIs(fn.argtypes[0], ctypes.c_void_p)
+        self.assertIs(fn.argtypes[1], ctypes.c_uint32)
+        self.assertIs(fn.argtypes[2], ctypes.c_char_p)
 
 
 class PymtpGetFileMetadataTests(unittest.TestCase):

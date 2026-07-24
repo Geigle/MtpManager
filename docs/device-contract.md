@@ -33,8 +33,8 @@ Captured via **Device → List Folders** on a real Creative ZEN Vision:M (same l
 | 108 | My Recordings | |
 | 112 | My Organizer | |
 | 116 | Pictures | |
-| 120 | Video | |
-| 124 | TV | |
+| **120** | Video | **Device → Send Video…** when user picks Video (`DEFAULT_VIDEO_FOLDER_ID`) |
+| **124** | TV | **Device → Send Video…** when user picks TV show (`DEFAULT_TV_FOLDER_ID`) |
 | 128 | ZENcast | Podcasts |
 | 132 | My Slideshows | |
 

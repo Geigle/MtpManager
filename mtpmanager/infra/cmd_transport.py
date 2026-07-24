@@ -245,6 +245,7 @@ class CmdTransport:
         *,
         parent_id: int | None = None,
         guid: str | None = None,
+        preferred_basename: str | None = None,
     ) -> int | None:
         _, file_extension = os.path.splitext(path)
         # GUID mode: always flat under Music (ignore artist/album parents).
@@ -259,6 +260,7 @@ class CmdTransport:
             file_extension or ".mp3",
             music_folder_id=folder_id,
             guid=guid,
+            preferred_basename=preferred_basename,
         )
         cmd = [
             self.binary,

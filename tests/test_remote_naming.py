@@ -13,6 +13,8 @@ from mtpmanager.domain.track_id import (
 from mtpmanager.infra.remote_naming import (
     DEFAULT_MUSIC_FOLDER_ID,
     DEFAULT_STORAGE_ID,
+    DEFAULT_TV_FOLDER_ID,
+    DEFAULT_VIDEO_FOLDER_ID,
     MAX_REMOTE_BASENAME,
     ZEN_VISION_M_FOLDER_IDS,
     ZEN_VISION_M_FOLDER_NAMES,
@@ -107,7 +109,11 @@ class RemoteNamingTests(unittest.TestCase):
         }
         self.assertEqual(dict(ZEN_VISION_M_FOLDER_IDS), expected)
         self.assertEqual(DEFAULT_MUSIC_FOLDER_ID, 100)
+        self.assertEqual(DEFAULT_VIDEO_FOLDER_ID, 120)
+        self.assertEqual(DEFAULT_TV_FOLDER_ID, 124)
         self.assertEqual(ZEN_VISION_M_FOLDER_IDS[DEFAULT_MUSIC_FOLDER_ID], "Music")
+        self.assertEqual(ZEN_VISION_M_FOLDER_IDS[DEFAULT_VIDEO_FOLDER_ID], "Video")
+        self.assertEqual(ZEN_VISION_M_FOLDER_IDS[DEFAULT_TV_FOLDER_ID], "TV")
         self.assertEqual(ZEN_VISION_M_FOLDER_NAMES["music"], 100)
         self.assertEqual(ZEN_VISION_M_FOLDER_NAMES["zencast"], 128)
         # Immutable reference map — do not invent nested remote paths.

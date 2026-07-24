@@ -11,6 +11,7 @@ Full title/artist/album still go in MTP tag fields; only the wire name is a GUID
 
 from __future__ import annotations
 
+import os
 import re
 from types import MappingProxyType
 
@@ -35,8 +36,8 @@ MAX_REMOTE_BASENAME = 56
 # real Vision:M. Same layout as historical mtp-folders output. These are
 # *object IDs*, not path strings — never invent "Music/Artist/Album".
 #
-# Track send always targets MUSIC (100). Other IDs are reference only until
-# playlist/photo/video send is implemented.
+# Track send targets MUSIC (100). Video send (Device → Send Video) targets
+# VIDEO (120) or TV (124) via parent_id. Other IDs are reference only.
 # ---------------------------------------------------------------------------
 ZEN_VISION_M_FOLDER_IDS: MappingProxyType[int, str] = MappingProxyType(
     {
@@ -62,6 +63,14 @@ ZEN_VISION_M_FOLDER_NAMES: MappingProxyType[str, int] = MappingProxyType(
 DEFAULT_MUSIC_FOLDER_ID = 100
 assert DEFAULT_MUSIC_FOLDER_ID in ZEN_VISION_M_FOLDER_IDS
 assert ZEN_VISION_M_FOLDER_IDS[DEFAULT_MUSIC_FOLDER_ID] == "Music"
+
+# Device → Send Video… destination folders (ZEN Vision:M top-level IDs).
+DEFAULT_VIDEO_FOLDER_ID = 120
+DEFAULT_TV_FOLDER_ID = 124
+assert DEFAULT_VIDEO_FOLDER_ID in ZEN_VISION_M_FOLDER_IDS
+assert ZEN_VISION_M_FOLDER_IDS[DEFAULT_VIDEO_FOLDER_ID] == "Video"
+assert DEFAULT_TV_FOLDER_ID in ZEN_VISION_M_FOLDER_IDS
+assert ZEN_VISION_M_FOLDER_IDS[DEFAULT_TV_FOLDER_ID] == "TV"
 
 # Storage Media on the ZEN Vision:M (mtp-detect: StorageID 0x00010001).
 # storage_id 0 makes get_suggested_storage_id fail after the bulk transfer.
@@ -89,12 +98,15 @@ def build_remote_path(
     music_folder_id: int = DEFAULT_MUSIC_FOLDER_ID,
     max_basename: int = MAX_REMOTE_BASENAME,
     guid: str | None = None,
+    preferred_basename: str | None = None,
 ) -> str:
     """Build a short remote path under the device Music folder.
 
     When *guid* is a valid 32-char hex track id, the object name is
     ``{guid}{ext}`` (flat inventory key for list_files + host DB join).
-    Otherwise falls back to the legacy short title form (tests / rare paths).
+    When *preferred_basename* is set (and no GUID), use that sanitized name
+    (retail restore of original ObjectFileNames). Otherwise falls back to the
+    legacy short title form.
 
     mtp-sendtr uses dirname(remote) as parent id and basename as object name.
     Nested Artist/Album paths are *not* created (parse_path only looks up
@@ -116,6 +128,20 @@ def build_remote_path(
 
     # Leave room for extension inside the device name limit.
     body_max = max(8, max_basename - len(ext))
+
+    pref = (preferred_basename or "").strip()
+    if pref:
+        stem, pref_ext = os.path.splitext(pref)
+        use_ext = pref_ext if pref_ext else ext
+        stem = sanitize_component(stem or "track", body_max)
+        basename = f"{stem}{use_ext if use_ext.startswith('.') else f'.{use_ext}'}"
+        if len(basename) > max_basename:
+            # Keep extension; trim stem.
+            stem_max = max(1, max_basename - len(use_ext if use_ext.startswith('.') else f'.{use_ext}'))
+            stem = sanitize_component(stem, stem_max)
+            use_ext = use_ext if use_ext.startswith(".") else f".{use_ext}"
+            basename = f"{stem}{use_ext}"
+        return f"{int(music_folder_id)}/{basename}"
 
     track_no = str(meta.tracknumber).split("/")[0].strip() or "00"
     # Prefer compact "08 Title.mp3"; fall back to title-only if still long.

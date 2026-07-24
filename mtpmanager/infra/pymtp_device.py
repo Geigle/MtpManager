@@ -9,7 +9,7 @@ import time
 from collections.abc import Callable
 
 import mtpmanager.infra.pymtp_wrapper as pymtp
-from mtpmanager.domain.device_media import track_refs_from_files
+from mtpmanager.domain.device_media import apply_track_info, track_refs_from_files
 from mtpmanager.domain.models import (
     DeviceInfo,
     DeviceTrackInfo,
@@ -201,11 +201,14 @@ class PymtpDevice:
     def get_identity(self) -> DeviceInfo:
         """Minimal identity for connect / auto-connect / profile matching.
 
-        Only friendly name, manufacturer, and model — no battery or storage
-        walks (those freeze recovering ZENs after long transfer sessions).
+        Friendly name, manufacturer, model, and serial number — no battery or
+        storage walks (those freeze recovering ZENs after long transfer
+        sessions). Serial is required so multi-device inventories do not
+        collapse into one ``default`` key.
         """
         return DeviceInfo(
             name=self._safe_device_str("get_devicename"),
+            serial=self._safe_device_str("get_serialnumber"),
             manufacturer=self._safe_device_str("get_manufacturer"),
             model=self._safe_device_str("get_modelname"),
         )
@@ -515,6 +518,135 @@ class PymtpDevice:
         )
         return info
 
+    def get_file_to_file(
+        self,
+        object_id: int,
+        dest_path: str,
+        *,
+        on_progress: Callable[[int, int], None] | None = None,
+    ) -> None:
+        """Download any object by id to *dest_path* (experimental)."""
+        oid = int(object_id)
+        if oid <= 0:
+            raise ValueError(f"Invalid object id: {object_id}")
+        dest = str(dest_path or "").strip()
+        if not dest:
+            raise ValueError("Destination path required")
+        logger.info("get_file_to_file id=%s dest=%s", oid, dest)
+
+        def _cb(sent: int, total: int) -> None:
+            if on_progress is None:
+                return
+            try:
+                on_progress(int(sent), int(total))
+            except Exception:
+                logger.debug("get_file_to_file progress failed", exc_info=True)
+
+        try:
+            self._mtp.get_file_to_file(
+                oid, dest, callback=_cb if on_progress else None
+            )
+        except pymtp.NotConnected as exc:
+            raise TransportError(
+                "PyMTP download failed: device not connected. "
+                "Use Device → Connect first.",
+                fatal=True,
+                path=dest,
+            ) from exc
+        except OSError as exc:
+            raise TransportError(
+                f"PyMTP download failed: {exc}. Dest: {dest}",
+                fatal=True,
+                path=dest,
+            ) from exc
+        except pymtp.CommandFailed as exc:
+            try:
+                self._mtp.debug_stack()
+            except Exception:
+                logger.debug("Could not dump libmtp error stack", exc_info=True)
+            stack_text = _collect_errorstack(self._mtp)
+            detail = str(exc).strip() or "CommandFailed"
+            logger.error(
+                "PyMTP get_file_to_file failed id=%s dest=%s detail=%s\n%s",
+                oid,
+                dest,
+                detail,
+                stack_text or "(no libmtp errorstack text)",
+            )
+            msg = (
+                f"PyMTP download failed ({detail}) for object id={oid}. "
+                f"Dest: {dest}"
+            )
+            if stack_text:
+                msg = f"{msg}\n{stack_text}"
+            raise TransportError(msg, fatal=True, path=dest) from exc
+        logger.info("get_file_to_file ok id=%s dest=%s", oid, dest)
+
+    def get_track_to_file(
+        self,
+        object_id: int,
+        dest_path: str,
+        *,
+        on_progress: Callable[[int, int], None] | None = None,
+    ) -> None:
+        """Download a track-typed object by id (experimental). Prefer file path for mixed media."""
+        oid = int(object_id)
+        if oid <= 0:
+            raise ValueError(f"Invalid object id: {object_id}")
+        dest = str(dest_path or "").strip()
+        if not dest:
+            raise ValueError("Destination path required")
+        logger.info("get_track_to_file id=%s dest=%s", oid, dest)
+
+        def _cb(sent: int, total: int) -> None:
+            if on_progress is None:
+                return
+            try:
+                on_progress(int(sent), int(total))
+            except Exception:
+                logger.debug("get_track_to_file progress failed", exc_info=True)
+
+        try:
+            self._mtp.get_track_to_file(
+                oid, dest, callback=_cb if on_progress else None
+            )
+        except pymtp.NotConnected as exc:
+            raise TransportError(
+                "PyMTP track download failed: device not connected. "
+                "Use Device → Connect first.",
+                fatal=True,
+                path=dest,
+            ) from exc
+        except OSError as exc:
+            raise TransportError(
+                f"PyMTP track download failed: {exc}. Dest: {dest}",
+                fatal=True,
+                path=dest,
+            ) from exc
+        except pymtp.CommandFailed as exc:
+            try:
+                self._mtp.debug_stack()
+            except Exception:
+                logger.debug("Could not dump libmtp error stack", exc_info=True)
+            stack_text = _collect_errorstack(self._mtp)
+            detail = str(exc).strip() or "CommandFailed"
+            logger.error(
+                "PyMTP get_track_to_file failed id=%s dest=%s detail=%s\n%s",
+                oid,
+                dest,
+                detail,
+                stack_text or "(no libmtp errorstack text)",
+            )
+            # Fall back to generic file download (works for video/non-track too).
+            logger.info(
+                "get_track_to_file failed (%s); retrying get_file_to_file id=%s",
+                detail,
+                oid,
+            )
+            self.get_file_to_file(oid, dest, on_progress=on_progress)
+            return
+        logger.info("get_track_to_file ok id=%s dest=%s", oid, dest)
+
     def send_file(self, path: str, remote_name: str | None = None) -> None:
         keep: list[bytes] = []
         fname = remote_name or "000_TEST_FILE.mp3"
@@ -527,34 +659,122 @@ class PymtpDevice:
     def list_tracks(
         self,
         on_progress: Callable[[int, int, str], None] | None = None,
+        *,
+        load_tags: bool = True,
+        stop_on_fatal: bool = True,
     ) -> list[DeviceTrackRef]:
-        """Experimental: music/video tracks via **file listing + media filter**.
+        """Experimental track list — **mtp-tracks algorithm**.
 
-        Full ``LIBMTP_Get_Tracklisting*`` is unusable as a bulk path on ZEN
-        Vision:M (multi-hour USB walks, zero-packet noise, historically
-        incomplete results). List Tracks / Delete All use the fast complete
-        file listing instead. Rows are id + filename (empty artist/title);
-        load tags on demand via ``get_track_metadata`` (Get Track Info or
-        List Tracks → Load tags for selection).
+        1. ``get_filelisting`` (complete, fast on ZEN)
+        2. Media filter (audio/video-ish)
+        3. Per-id ``get_track_metadata`` for tags (same as CLI ``mtp-tracks``
+           which uses Get_Files_And_Folders + Get_Trackmetadata — **not**
+           bulk Get_Tracklisting, which is incomplete on this device)
 
-        *on_progress* is optional (listing is usually ~1s); kept for port
-        compatibility. Never touch Tk here.
+        *load_tags*: when False, return id/filename rows only (fast filter).
+        *stop_on_fatal*: abort remaining tag fetches on fatal TransportError.
+        Never touch Tk here.
         """
         if on_progress is not None:
             try:
-                on_progress(0, 0, "listing device files (track filter)…")
+                on_progress(0, 0, "listing device files…")
             except Exception:
                 logger.debug("list_tracks progress callback failed", exc_info=True)
 
-        logger.info("list_tracks (via get_filelisting + media filter)")
+        logger.info(
+            "list_tracks (mtp-tracks style: filelisting + Get_Trackmetadata)"
+        )
         t0 = time.monotonic()
         files = self.list_files()
-        result = track_refs_from_files(files)
+        refs = track_refs_from_files(files)
+        total = len(refs)
+        logger.info(
+            "list_tracks candidates=%s of %s files (tags=%s)",
+            total,
+            len(files),
+            load_tags,
+        )
+
+        if not load_tags or total == 0:
+            if on_progress is not None:
+                try:
+                    on_progress(
+                        total,
+                        total or 1,
+                        f"found {total} track(s)",
+                    )
+                except Exception:
+                    logger.debug(
+                        "list_tracks progress callback failed", exc_info=True
+                    )
+            return refs
+
+        out: list[DeviceTrackRef] = []
+        updated = 0
+        failed = 0
+        for i, ref in enumerate(refs):
+            oid = int(ref.item_id or 0)
+            label = (ref.name or "").strip() or f"id={oid}"
+            if on_progress is not None:
+                try:
+                    on_progress(
+                        i,
+                        total,
+                        f"track tags {i + 1}/{total}  {label}",
+                    )
+                except Exception:
+                    logger.debug(
+                        "list_tracks progress callback failed", exc_info=True
+                    )
+            if oid <= 0:
+                out.append(ref)
+                failed += 1
+                continue
+            try:
+                info = self.get_track_metadata(oid)
+            except TransportError as exc:
+                logger.warning(
+                    "list_tracks tag miss id=%s fatal=%s: %s",
+                    oid,
+                    exc.fatal,
+                    exc,
+                )
+                out.append(ref)
+                failed += 1
+                if stop_on_fatal and exc.fatal:
+                    # Keep remaining as filename-only.
+                    out.extend(refs[i + 1 :])
+                    logger.error(
+                        "list_tracks aborted after fatal tag error id=%s "
+                        "got=%s remaining=%s",
+                        oid,
+                        len(out),
+                        total - len(out),
+                    )
+                    break
+                continue
+            except Exception:
+                logger.exception("list_tracks unexpected tag error id=%s", oid)
+                out.append(ref)
+                failed += 1
+                continue
+            out.append(apply_track_info(ref, info))
+            updated += 1
+
+        out.sort(
+            key=lambda e: (
+                (e.artist or "").casefold(),
+                (e.title or "").casefold(),
+                (e.name or "").casefold(),
+                e.item_id,
+            )
+        )
         elapsed = time.monotonic() - t0
         logger.info(
-            "list_tracks ok count=%s of %s files elapsed=%.1fs",
-            len(result),
-            len(files),
+            "list_tracks ok count=%s tagged=%s failed=%s elapsed=%.1fs",
+            len(out),
+            updated,
+            failed,
             elapsed,
         )
         if elapsed >= 15.0:
@@ -566,12 +786,121 @@ class PymtpDevice:
         if on_progress is not None:
             try:
                 on_progress(
-                    len(result),
-                    len(result),
-                    f"found {len(result)} track(s)",
+                    len(out),
+                    len(out) or 1,
+                    f"found {len(out)} track(s) ({updated} tagged)",
                 )
             except Exception:
                 logger.debug("list_tracks progress callback failed", exc_info=True)
+        return out
+
+    def list_tracks_from_files(
+        self,
+        on_progress: Callable[[int, int, str], None] | None = None,
+    ) -> list[DeviceTrackRef]:
+        """Fast track-ish listing: filelisting + media filter (ids/filenames only)."""
+        return self.list_tracks(on_progress=on_progress, load_tags=False)
+
+    def list_tracks_via_tracklisting(
+        self,
+        on_progress: Callable[[int, int, str], None] | None = None,
+    ) -> list[DeviceTrackRef]:
+        """Diagnostic: bulk ``LIBMTP_Get_Tracklisting*`` (often incomplete on ZEN)."""
+        if on_progress is not None:
+            try:
+                on_progress(0, 0, "listing tracks (Get_Tracklisting)…")
+            except Exception:
+                logger.debug(
+                    "list_tracks_via_tracklisting progress failed",
+                    exc_info=True,
+                )
+
+        def _cb(sent: int, total: int) -> None:
+            if on_progress is None:
+                return
+            try:
+                on_progress(
+                    int(sent),
+                    max(int(total), int(sent), 1),
+                    f"track listing {int(sent)}/{int(total) or '?'}…",
+                )
+            except Exception:
+                logger.debug(
+                    "list_tracks_via_tracklisting progress failed",
+                    exc_info=True,
+                )
+
+        logger.info(
+            "list_tracks_via_tracklisting (Get_Tracklisting* — diagnostic)"
+        )
+        t0 = time.monotonic()
+        try:
+            raw = self._mtp.get_tracklisting(callback=_cb)
+        except pymtp.NotConnected as exc:
+            raise TransportError(
+                "PyMTP track listing failed: device not connected. "
+                "Use Device → Connect first.",
+                fatal=True,
+            ) from exc
+        except pymtp.CommandFailed as exc:
+            try:
+                self._mtp.debug_stack()
+            except Exception:
+                logger.debug("Could not dump libmtp error stack", exc_info=True)
+            stack_text = _collect_errorstack(self._mtp)
+            detail = str(exc).strip() or "CommandFailed"
+            logger.error(
+                "PyMTP get_tracklisting failed detail=%s\n%s",
+                detail,
+                stack_text or "(no libmtp errorstack text)",
+            )
+            raise TransportError(
+                f"PyMTP track listing failed ({detail}).",
+                fatal=True,
+            ) from exc
+
+        result: list[DeviceTrackRef] = []
+        for snap in raw or []:
+            oid = int(getattr(snap, "item_id", 0) or 0)
+            if oid <= 0:
+                continue
+            result.append(
+                DeviceTrackRef(
+                    item_id=oid,
+                    name=str(getattr(snap, "filename", "") or ""),
+                    title=str(getattr(snap, "title", "") or ""),
+                    artist=str(getattr(snap, "artist", "") or ""),
+                    parent_id=int(getattr(snap, "parent_id", 0) or 0),
+                    storage_id=int(getattr(snap, "storage_id", 0) or 0),
+                    filetype=int(getattr(snap, "filetype", 0) or 0),
+                )
+            )
+        result.sort(
+            key=lambda e: (
+                (e.artist or "").casefold(),
+                (e.title or "").casefold(),
+                (e.name or "").casefold(),
+                e.item_id,
+            )
+        )
+        elapsed = time.monotonic() - t0
+        logger.info(
+            "list_tracks_via_tracklisting ok count=%s elapsed=%.1fs",
+            len(result),
+            elapsed,
+        )
+        if on_progress is not None:
+            try:
+                on_progress(
+                    len(result),
+                    len(result) or 1,
+                    f"found {len(result)} track(s)",
+                )
+            except Exception:
+                logger.debug(
+                    "list_tracks_via_tracklisting progress failed",
+                    exc_info=True,
+                )
         return result
 
     def send_track(
@@ -581,12 +910,14 @@ class PymtpDevice:
         *,
         parent_id: int | None = None,
         guid: str | None = None,
+        preferred_basename: str | None = None,
     ) -> int | None:
         """Transport.send_track — push audio with metadata via libmtp.
 
         Uses the same ZEN remote contract as CmdTransport: numeric folder parent
         (Music under GUID mode), explicit storage id, and a short object
-        basename (GUID when provided). Tags keep full title/artist/album.
+        basename (GUID when provided; else preferred_basename for retail
+        restore). Tags keep full title/artist/album.
 
         On failure raises TransportError (fatal). Does not fall back to CMD.
         Returns the new object id when libmtp reports one.
@@ -605,6 +936,7 @@ class PymtpDevice:
             ext,
             music_folder_id=folder_id,
             guid=guid,
+            preferred_basename=preferred_basename,
         )
         parent_id, basename = split_remote_path(remote)
 
