@@ -60,7 +60,7 @@ class DeviceProfileTests(unittest.TestCase):
         self.assertEqual(ve.video_tag, "XVID")
         self.assertEqual(ve.width, 640)
         self.assertEqual(ve.height, 480)
-        self.assertEqual(ve.fps, 25.0)
+        self.assertEqual(ve.max_fps, 30.0)
         self.assertEqual(ve.probe_audio_codec, "mp3")
         self.assertIsNone(GENERIC.video_encode)
 

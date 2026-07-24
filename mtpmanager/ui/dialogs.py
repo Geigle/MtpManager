@@ -208,6 +208,8 @@ class SendVideoDialogResult:
 
     parent_id: int
     encode_for_device: bool
+    # When True, encode ignores profile.max_fps (e.g. try 60 fps on ZEN).
+    ignore_max_fps: bool = False
 
 
 def ask_video_destination(
@@ -254,6 +256,12 @@ def ask_video_destination(
     ).pack(fill="x", pady=2)
 
     encode_var = BooleanVar(value=bool(encode_default and video_encode is not None))
+    ignore_max_fps_var = BooleanVar(value=False)
+    high_fps_cb = None
+    profile_has_fps_cap = bool(
+        video_encode is not None and float(video_encode.max_fps or 0) > 0
+    )
+
     if video_encode is not None:
         Checkbutton(
             body,
@@ -272,7 +280,43 @@ def ask_video_destination(
             ),
             justify=LEFT,
             wraplength=380,
-        ).pack(anchor="w", pady=(0, 8))
+        ).pack(anchor="w", pady=(0, 4))
+
+        if profile_has_fps_cap:
+            high_fps_cb = Checkbutton(
+                body,
+                text=(
+                    f"Ignore max frame rate "
+                    f"({video_encode.max_fps:g} fps) (experimental)"
+                ),
+                variable=ignore_max_fps_var,
+                anchor="w",
+                justify=LEFT,
+            )
+            high_fps_cb.pack(fill="x", pady=(6, 2))
+            Label(
+                body,
+                text=(
+                    "Keeps the source frame rate even when above the device "
+                    "profile cap. Likely to fail or glitch on ZEN — for "
+                    "experiments only."
+                ),
+                justify=LEFT,
+                wraplength=380,
+            ).pack(anchor="w", pady=(0, 8))
+
+            def _sync_high_fps_state(*_args) -> None:
+                try:
+                    if encode_var.get():
+                        high_fps_cb.configure(state="normal")
+                    else:
+                        ignore_max_fps_var.set(False)
+                        high_fps_cb.configure(state="disabled")
+                except Exception:
+                    pass
+
+            encode_var.trace_add("write", _sync_high_fps_state)
+            _sync_high_fps_state()
     else:
         Label(
             body,
@@ -293,9 +337,15 @@ def ask_video_destination(
             if choice.get() == "tv"
             else DEFAULT_VIDEO_FOLDER_ID
         )
+        do_encode = bool(encode_var.get()) and video_encode is not None
         result[0] = SendVideoDialogResult(
             parent_id=int(parent_id),
-            encode_for_device=bool(encode_var.get()) and video_encode is not None,
+            encode_for_device=do_encode,
+            ignore_max_fps=(
+                do_encode
+                and profile_has_fps_cap
+                and bool(ignore_max_fps_var.get())
+            ),
         )
         dlg.destroy()
 
@@ -314,7 +364,7 @@ def ask_video_destination(
     dlg.grab_set()
     try:
         px = parent.winfo_rootx() + max(0, (parent.winfo_width() - 400) // 2)
-        py = parent.winfo_rooty() + max(0, (parent.winfo_height() - 280) // 3)
+        py = parent.winfo_rooty() + max(0, (parent.winfo_height() - 320) // 3)
         dlg.geometry(f"+{px}+{py}")
     except Exception:
         pass

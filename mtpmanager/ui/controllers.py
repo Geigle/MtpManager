@@ -2546,12 +2546,18 @@ class AppController:
             return
         parent = int(opts.parent_id)
         encode = bool(opts.encode_for_device) and video_profile is not None
+        ignore_max_fps = bool(opts.ignore_max_fps) and encode
         folder_label = ZEN_VISION_M_FOLDER_IDS.get(parent, str(parent))
-        encode_note = (
-            f"Encode: {video_profile.display_name}\n"
-            if encode and video_profile is not None
-            else "Encode: off (send as-is)\n"
-        )
+        if encode and video_profile is not None:
+            encode_note = f"Encode: {video_profile.display_name}\n"
+            if ignore_max_fps:
+                encode_note += (
+                    "Max fps cap: ignored (experimental — may not play)\n"
+                )
+            elif float(video_profile.max_fps or 0) > 0:
+                encode_note += f"Max fps cap: {video_profile.max_fps:g}\n"
+        else:
+            encode_note = "Encode: off (send as-is)\n"
         if not messagebox.askyesno(
             "Send Video",
             f"Send this file to the device {folder_label} folder?\n\n"
@@ -2581,6 +2587,7 @@ class AppController:
                 parent_id=parent,
                 encode_profile=profile,
                 encode_for_device=encode,
+                ignore_max_fps=ignore_max_fps,
                 on_progress=on_progress,
             )
 

@@ -774,6 +774,7 @@ def prepare_and_send_video(
     parent_id: int,
     encode_profile=None,
     encode_for_device: bool = False,
+    ignore_max_fps: bool = False,
     on_progress: SendVideoProgress | None = None,
     title: str | None = None,
 ) -> SendVideoResult:
@@ -782,6 +783,9 @@ def prepare_and_send_video(
     When *encode_for_device* and *encode_profile* are set, re-encodes to the
     retail-demo fingerprint unless the source already matches. Temp encodes
     are cleaned up after send (success or failure).
+
+    *ignore_max_fps*: when encoding, skip the profile's max_fps cap (keep
+    source rate above the device limit — experimental).
     """
     from mtpmanager.domain.device_profile import VideoEncodeProfile
     from mtpmanager.infra.ffmpeg_video import (
@@ -809,6 +813,7 @@ def prepare_and_send_video(
     encoded = False
     skipped_ok = False
     source_stem = os.path.splitext(os.path.basename(src))[0] or "video"
+    skip_cap = bool(ignore_max_fps) and encode_for_device
 
     try:
         if encode_for_device and profile is not None:
@@ -832,11 +837,18 @@ def prepare_and_send_video(
                     else:
                         _emit("status", msg)
 
+                if skip_cap:
+                    logger.info(
+                        "Send Video: ignore_max_fps — not applying profile "
+                        "max_fps=%s (experimental)",
+                        profile.max_fps,
+                    )
                 send_path = convert_video_for_profile(
                     src,
                     profile,
                     dest_path=temp_path,
                     on_progress=_enc_progress,
+                    ignore_max_fps=skip_cap,
                 )
                 encoded = True
                 _emit("progress", 85, 100, "encode complete — sending…")

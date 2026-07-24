@@ -15,8 +15,12 @@ class VideoEncodeProfile:
 
     Values mirror measured Creative retail demos for ZEN Vision:M:
     AVI + MPEG-4 Part 2 (XVID/DX50) + single MP3 @ 44.1 kHz stereo,
-    typically 640×480 @ 25 fps. Encoding uses stock ffmpeg ``mpeg4`` +
-    ``-vtag XVID`` (no libxvid required).
+    typically 640×480 (demos are 25 or ~29.97 fps). Encoding uses stock
+    ffmpeg ``mpeg4`` + ``-vtag XVID`` (no libxvid required).
+
+    Frame rate defaults to **source as-is**. Set *max_fps* > 0 on a
+    device-specific profile (e.g. ZEN Vision:M) to cap only when the source
+    is higher (60 → 30). ``max_fps=0`` means no cap.
     """
 
     id: str
@@ -34,7 +38,8 @@ class VideoEncodeProfile:
     # Target geometry (letterbox/pad into this frame).
     width: int = 640
     height: int = 480
-    fps: float = 25.0
+    # Cap when source exceeds this (fps). 0 = always keep source rate.
+    max_fps: float = 0.0
     # Quality scale for mpeg4 (lower = better; demos ~1–3 Mbps).
     qscale_v: int = 5
     # Audio: demos are MP3 stereo 44.1 kHz ~128k.
@@ -45,7 +50,7 @@ class VideoEncodeProfile:
     audio_channels: int = 2
     # Short summary for UI checkbox help.
     summary: str = (
-        "AVI · MPEG-4/XVID · 640×480 @ 25 fps · MP3 stereo 44.1 kHz"
+        "AVI · MPEG-4/XVID · 640×480 · source fps · MP3 stereo 44.1 kHz"
     )
 
 

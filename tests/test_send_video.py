@@ -218,6 +218,8 @@ class SendVideoTests(unittest.TestCase):
                     on_progress=on_progress,
                 )
             convert.assert_called_once()
+            kwargs = convert.call_args.kwargs
+            self.assertFalse(kwargs.get("ignore_max_fps", False))
             self.assertTrue(result.encoded)
             self.assertFalse(result.encode_skipped_compatible)
             self.assertEqual(result.parent_id, DEFAULT_TV_FOLDER_ID)
@@ -227,6 +229,35 @@ class SendVideoTests(unittest.TestCase):
             )
             self.assertEqual(phases, ["transcode", "send"])
             cleanup.assert_called()
+
+    def test_prepare_passes_ignore_max_fps(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "hi.mp4"
+            src.write_bytes(b"src")
+            encoded = Path(tmp) / "VIDEO_TRANSCODE_xyz.avi"
+            encoded.write_bytes(b"enc")
+            transport = _FakeTransport()
+            with patch(
+                "mtpmanager.infra.ffmpeg_video.video_matches_encode_profile",
+                return_value=False,
+            ), patch(
+                "mtpmanager.infra.ffmpeg_video.default_temp_video_path",
+                return_value=str(encoded),
+            ), patch(
+                "mtpmanager.infra.ffmpeg_video.convert_video_for_profile",
+                return_value=str(encoded),
+            ) as convert, patch(
+                "mtpmanager.infra.ffmpeg_video.cleanup_video_temp"
+            ):
+                prepare_and_send_video(
+                    transport,
+                    str(src),
+                    parent_id=DEFAULT_VIDEO_FOLDER_ID,
+                    encode_profile=ZEN_VISION_M_VIDEO,
+                    encode_for_device=True,
+                    ignore_max_fps=True,
+                )
+            self.assertTrue(convert.call_args.kwargs.get("ignore_max_fps"))
 
     def test_prepare_no_encode_when_disabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -249,13 +280,42 @@ class SendVideoTests(unittest.TestCase):
 
 
 class VideoEncodeProfileProbeTests(unittest.TestCase):
-    def test_vf_filter_and_match_helpers(self) -> None:
+    def test_vf_filter_keeps_source_fps_by_default(self) -> None:
         from mtpmanager.infra.ffmpeg_video import _vf_filter
 
         vf = _vf_filter(ZEN_VISION_M_VIDEO)
         self.assertIn("640:480", vf)
-        self.assertIn("fps=25", vf)
+        self.assertNotIn("fps=", vf)
         self.assertIn("yuv420p", vf)
+
+    def test_vf_filter_caps_when_force_fps(self) -> None:
+        from mtpmanager.infra.ffmpeg_video import _vf_filter
+
+        vf = _vf_filter(ZEN_VISION_M_VIDEO, force_fps=30.0)
+        self.assertIn("fps=30", vf)
+
+    def test_output_fps_for_source(self) -> None:
+        from mtpmanager.infra.ffmpeg_video import output_fps_for_source
+
+        # Default (max_fps=0): always keep source, even for 60 fps.
+        self.assertIsNone(output_fps_for_source(60.0, 0.0))
+        self.assertIsNone(output_fps_for_source(25.0, 0.0))
+        # ZEN Vision:M max_fps=30: keep demo rates, cap only when higher.
+        self.assertIsNone(output_fps_for_source(25.0, 30.0))
+        self.assertIsNone(output_fps_for_source(30000 / 1001, 30.0))  # ~29.97
+        self.assertIsNone(output_fps_for_source(24.0, 30.0))
+        self.assertIsNone(output_fps_for_source(30.0, 30.0))
+        self.assertEqual(output_fps_for_source(60.0, 30.0), 30.0)
+        self.assertEqual(output_fps_for_source(59.94, 30.0), 30.0)
+        # Unknown source → leave alone.
+        self.assertIsNone(output_fps_for_source(0.0, 30.0))
+
+    def test_zen_profile_has_max_fps_default_does_not(self) -> None:
+        from mtpmanager.domain.device_profile import VideoEncodeProfile
+
+        default = VideoEncodeProfile(id="x", display_name="x")
+        self.assertEqual(default.max_fps, 0.0)
+        self.assertEqual(ZEN_VISION_M_VIDEO.max_fps, 30.0)
 
 
 if __name__ == "__main__":

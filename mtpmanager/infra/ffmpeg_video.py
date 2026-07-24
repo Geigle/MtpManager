@@ -96,6 +96,64 @@ def probe_duration_seconds(path: str) -> float:
     return 0.0
 
 
+def _parse_rate(value: object) -> float:
+    """Parse ffprobe rate strings like ``25/1`` or ``30000/1001``."""
+    if value is None:
+        return 0.0
+    text = str(value).strip()
+    if not text or text in ("0/0", "N/A", "nan"):
+        return 0.0
+    if "/" in text:
+        num_s, den_s = text.split("/", 1)
+        try:
+            num, den = float(num_s), float(den_s)
+        except (TypeError, ValueError):
+            return 0.0
+        if den == 0:
+            return 0.0
+        return num / den
+    try:
+        return float(text)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def probe_video_fps(path: str) -> float:
+    """Best-effort source video frame rate (0 if unknown)."""
+    data = probe_media(path)
+    vs, _ = _stream_types(data)
+    if not vs:
+        return 0.0
+    v = vs[0]
+    # Prefer average when present; fall back to r_frame_rate.
+    fps = _parse_rate(v.get("avg_frame_rate"))
+    if fps <= 0:
+        fps = _parse_rate(v.get("r_frame_rate"))
+    return fps if fps > 0 else 0.0
+
+
+def output_fps_for_source(source_fps: float, max_fps: float) -> float | None:
+    """Return fps to force in the filter, or None to keep the source rate.
+
+    *max_fps* ≤ 0 means no cap (always keep source) — the default for
+    ``VideoEncodeProfile``. Device profiles (e.g. ZEN Vision:M) set a
+    positive cap:
+
+    - Source unknown (≤0) → None
+    - Source ≤ *max_fps* → None (keep 25, 29.97, 24, …)
+    - Source > *max_fps* → *max_fps* (e.g. 60 → 30)
+    """
+    cap = float(max_fps) if max_fps and max_fps > 0 else 0.0
+    src = float(source_fps) if source_fps else 0.0
+    if cap <= 0:
+        return None  # default: never force a frame rate
+    if src <= 0:
+        return None
+    if src > cap + 1e-6:
+        return cap
+    return None
+
+
 def _stream_types(data: dict) -> tuple[list[dict], list[dict]]:
     streams = data.get("streams") or []
     vs = [s for s in streams if s.get("codec_type") == "video"]
@@ -152,14 +210,26 @@ def video_matches_encode_profile(path: str, profile: VideoEncodeProfile) -> bool
     return True
 
 
-def _vf_filter(profile: VideoEncodeProfile) -> str:
+def _vf_filter(
+    profile: VideoEncodeProfile,
+    *,
+    force_fps: float | None = None,
+) -> str:
+    """Build the video filter chain.
+
+    *force_fps*: when set (source above profile.max_fps), insert ``fps=…``.
+    When None, source frame rate is left unchanged (25, 29.97, etc.).
+    """
     w, h = int(profile.width), int(profile.height)
-    fps = float(profile.fps) if profile.fps else 25.0
-    return (
-        f"scale={w}:{h}:force_original_aspect_ratio=decrease,"
-        f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,"
-        f"setsar=1,fps={fps:g},format=yuv420p"
-    )
+    parts = [
+        f"scale={w}:{h}:force_original_aspect_ratio=decrease",
+        f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2",
+        "setsar=1",
+    ]
+    if force_fps is not None and force_fps > 0:
+        parts.append(f"fps={force_fps:g}")
+    parts.append("format=yuv420p")
+    return ",".join(parts)
 
 
 def convert_video_for_profile(
@@ -169,8 +239,12 @@ def convert_video_for_profile(
     dest_path: str | None = None,
     temp_dir: str | None = None,
     on_progress: ProgressCallback | None = None,
+    ignore_max_fps: bool = False,
 ) -> str:
     """Re-encode *src_path* to the device video profile; return output path.
+
+    *ignore_max_fps*: when True, do not apply *profile.max_fps* (keep source
+    rate even if above the device cap — experimental; may break playback).
 
     *on_progress(done_sec, total_sec, message)* is optional (worker thread).
     Raises ``RuntimeError`` / ``OSError`` / ffmpeg errors on failure.
@@ -199,12 +273,20 @@ def convert_video_for_profile(
             pass
 
     duration = probe_duration_seconds(src_path)
+    source_fps = probe_video_fps(src_path)
+    max_fps = 0.0 if ignore_max_fps else float(profile.max_fps or 0)
+    force_fps = output_fps_for_source(source_fps, max_fps)
     logger.info(
-        "Video convert start src=%s dest=%s profile=%s duration=%.1fs",
+        "Video convert start src=%s dest=%s profile=%s duration=%.1fs "
+        "source_fps=%.3f max_fps=%s force_fps=%s ignore_max_fps=%s",
         src_path,
         dest_path,
         profile.id,
         duration,
+        source_fps,
+        f"{max_fps:g}" if max_fps > 0 else "none",
+        f"{force_fps:g}" if force_fps is not None else "keep",
+        ignore_max_fps,
     )
     if on_progress is not None:
         try:
@@ -217,7 +299,7 @@ def convert_video_for_profile(
         "c:v": profile.video_codec,
         "vtag": profile.video_tag,
         "qscale:v": str(int(profile.qscale_v)),
-        "vf": _vf_filter(profile),
+        "vf": _vf_filter(profile, force_fps=force_fps),
         "c:a": profile.audio_codec,
         "b:a": profile.audio_bitrate,
         "ac": str(int(profile.audio_channels)),
