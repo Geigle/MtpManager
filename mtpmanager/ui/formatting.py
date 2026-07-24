@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from mtpmanager.domain.library import year_from_date
 from mtpmanager.domain.models import (
     DeviceInfo,
     DeviceTrackInfo,
@@ -9,12 +10,97 @@ from mtpmanager.domain.models import (
     FileEntry,
     FolderEntry,
     Track,
+    TrackMetadata,
 )
 
 
 def track_summary(track: Track) -> str:
     m = track.meta
     return f"{m.title[:30]}, {m.artist[:30]}, {m.album[:30]}, ({m.tracknumber})"
+
+
+def format_duration(seconds: float | int | None) -> str:
+    """Human duration for selection detail (m:ss or h:mm:ss)."""
+    try:
+        total = int(round(float(seconds or 0)))
+    except (TypeError, ValueError):
+        return ""
+    if total <= 0:
+        return ""
+    h, rem = divmod(total, 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f"{h}:{m:02d}:{s:02d}"
+    return f"{m}:{s:02d}"
+
+
+def _meta_line_bits(meta: TrackMetadata) -> list[str]:
+    bits: list[str] = []
+    year = year_from_date(meta.date or "")
+    if year:
+        bits.append(year)
+    tn = str(meta.tracknumber or "").strip()
+    if tn and tn not in ("0",):
+        bits.append(f"#{tn}")
+    dur = format_duration(meta.length_sec)
+    if dur:
+        bits.append(dur)
+    return bits
+
+
+def track_selection_detail(track: Track) -> str:
+    """Multi-line left-panel detail for a single selected library track."""
+    m = track.meta
+    lines: list[str] = [
+        (m.title or "").strip() or "Unknown Title",
+        (m.artist or "").strip() or "Unknown Artist",
+        (m.album or "").strip() or "Unknown Album",
+    ]
+    bits = _meta_line_bits(m)
+    if bits:
+        lines.append(" · ".join(bits))
+    genre = (m.genre or "").strip()
+    if genre and genre.casefold() not in ("unknown genre", "unknown"):
+        lines.append(genre)
+    return "\n".join(lines)
+
+
+def artist_selection_detail(artist: str, track_count: int) -> str:
+    """Left-panel detail for an artist group header selection."""
+    name = (artist or "").strip() or "Unknown Artist"
+    n = max(0, int(track_count))
+    noun = "track" if n == 1 else "tracks"
+    return f"{name}\n{n} {noun}"
+
+
+def album_selection_detail(
+    album: str,
+    *,
+    artist: str = "",
+    track_count: int = 0,
+    year: str = "",
+) -> str:
+    """Left-panel detail for an album group header selection."""
+    lines = [(album or "").strip() or "Unknown Album"]
+    art = (artist or "").strip()
+    if art:
+        lines.append(art)
+    y = (year or "").strip()
+    n = max(0, int(track_count))
+    noun = "track" if n == 1 else "tracks"
+    tail_bits: list[str] = []
+    if y:
+        tail_bits.append(y)
+    tail_bits.append(f"{n} {noun}")
+    lines.append(" · ".join(tail_bits))
+    return "\n".join(lines)
+
+
+def multi_selection_detail(track_count: int) -> str:
+    """Left-panel detail when multiple rows/tracks are selected."""
+    n = max(0, int(track_count))
+    noun = "track" if n == 1 else "tracks"
+    return f"{n} {noun} selected"
 
 
 def device_info_summary(info: DeviceInfo) -> str:

@@ -274,6 +274,10 @@ class MainWindow:
         )
         self.lbl_mode_title.pack(padx=6, pady=(8, 0), anchor="w")
 
+        # Startup-only PyMTP blurb; after first selection this label shows
+        # track/album/artist context (see set_context_detail).
+        self._startup_hint_active = True
+        self._context_detail = ""
         self.lbl_mode_help = Label(
             leftframe,
             text=EXPERIMENTAL_HINT,
@@ -383,10 +387,34 @@ class MainWindow:
             self.device_panel.pack_forget()
         else:
             self.lbl_mode_title.configure(text="Device")
-            self.lbl_mode_help.configure(text=EXPERIMENTAL_HINT)
+            # Keep startup hint only until the user selects something; after
+            # that restore the last selection context (not the long blurb).
+            if self._startup_hint_active:
+                self.lbl_mode_help.configure(text=EXPERIMENTAL_HINT)
+            else:
+                self.lbl_mode_help.configure(text=self._context_detail)
             if not self.device_panel.winfo_ismapped():
                 self.device_panel.pack(padx=3, pady=3, fill=X)
         self.apply_mode_actions()
+
+    def is_startup_hint_active(self) -> bool:
+        """True while left panel still shows the first-run experimental blurb."""
+        return bool(self._startup_hint_active)
+
+    def set_context_detail(self, text: str) -> None:
+        """Replace startup hint with selection / contextual left-panel text.
+
+        Called on tree selection changes. No-op for the visible label while
+        Stable Mode help is showing; text is still stored and restored when
+        returning to PyMTP mode.
+        """
+        self._startup_hint_active = False
+        self._context_detail = text or ""
+        if self._mode == "experimental":
+            try:
+                self.lbl_mode_help.configure(text=self._context_detail)
+            except Exception:
+                pass
 
     def set_library_menu_commands(
         self,

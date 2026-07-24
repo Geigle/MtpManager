@@ -17,7 +17,7 @@ from mtpmanager.app.transfer import transfer_track, transfer_tracks
 from mtpmanager.app.transfer_queue import BatchTransferQueue
 from mtpmanager.domain.device_profile import DeviceProfile, match_device_profile
 from mtpmanager.domain.device_profiles import BUILTIN_PROFILES
-from mtpmanager.domain.library import Library, primary_artist
+from mtpmanager.domain.library import Library, primary_artist, year_from_date
 from mtpmanager.domain.library_sort import (
     SortPrimary,
     group_by_album,
@@ -84,6 +84,12 @@ from mtpmanager.ui.dialogs import (
     show_folder_list_dialog,
     show_track_info_dialog,
     show_track_list_dialog,
+)
+from mtpmanager.ui.formatting import (
+    album_selection_detail,
+    artist_selection_detail,
+    multi_selection_detail,
+    track_selection_detail,
 )
 from mtpmanager.ui.window import MainWindow
 
@@ -547,12 +553,66 @@ class AppController:
         return tracks
 
     def _on_tree_selection_changed(self, _event=None) -> None:
-        """Refresh Transfer → Sync Selected enablement from multi-select."""
+        """Refresh Sync Selected enablement + left-panel selection detail."""
         if self._library_busy or not self.win._tracks_interactive:
             self.win.set_sync_selected_enabled(False)
             return
         tracks = self._tracks_from_selected_iids(quiet=True)
         self.win.set_sync_selected_enabled(bool(tracks), count=len(tracks))
+        self._refresh_selection_detail(tracks)
+
+    def _refresh_selection_detail(self, tracks: list[Track] | None = None) -> None:
+        """Update left-panel label from the current tree selection.
+
+        Keeps the first-run experimental hint until the user selects a row.
+        After that the same label shows track / album / artist context.
+        """
+        iids = self.win.selected_tree_iids()
+        if not iids:
+            if self.win.is_startup_hint_active():
+                return
+            self.win.set_context_detail("")
+            return
+
+        if tracks is None:
+            tracks = self._tracks_from_selected_iids(quiet=True)
+
+        # Multi-select (or multi-row expansion): compact count.
+        if len(iids) > 1:
+            self.win.set_context_detail(multi_selection_detail(len(tracks)))
+            return
+
+        iid = iids[0]
+        tags = set(self.win.tree.item(iid, "tags"))
+        seed = self._group_seed_by_iid.get(iid)
+
+        if "group_artist" in tags and seed is not None:
+            self.win.set_context_detail(
+                artist_selection_detail(primary_artist(seed), len(tracks))
+            )
+            return
+        if "group_album" in tags and seed is not None:
+            year = year_from_date(seed.meta.date or "") or ""
+            self.win.set_context_detail(
+                album_selection_detail(
+                    seed.meta.album or "Unknown Album",
+                    artist=primary_artist(seed),
+                    track_count=len(tracks),
+                    year=year,
+                )
+            )
+            return
+
+        track = self._track_by_iid.get(iid)
+        if track is not None:
+            self.win.set_context_detail(track_selection_detail(track))
+            return
+
+        # Year group or unknown row: fall back to expanded track count.
+        if tracks:
+            self.win.set_context_detail(multi_selection_detail(len(tracks)))
+        elif not self.win.is_startup_hint_active():
+            self.win.set_context_detail("")
 
     def _prepare_context_menu(self, row_iid: str, tags) -> None:
         """Update group/multi-select menu labels before popup."""
@@ -693,6 +753,8 @@ class AppController:
         self._group_seed_by_iid.clear()
         self._context_group_seed = None
         self._pending_album_art = []
+        # Tree selection is gone; keep startup hint, else clear context label.
+        self._refresh_selection_detail([])
         tracks = list(self.library.tracks)
         if not tracks:
             self.win.set_tracks_usable(self._library_root_reachable())
