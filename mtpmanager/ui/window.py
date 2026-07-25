@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Literal
 
 from pathlib import Path
@@ -48,6 +49,15 @@ EXPERIMENTAL_HINT = (
     "Right-click a track to sync. Output format: Config → Config…\n\n"
     "If send fails, try Config → Stable Mode (mtp-sendtr)."
 )
+
+# Fixed left column (context + device). Text wrap stays slightly inside width.
+_LEFT_PANEL_WIDTH = 220
+_LEFT_TEXT_WRAP = 200
+# Device subframe: fixed height for title + caption + graphic / Stable help.
+_DEVICE_PANEL_HEIGHT = 240
+# Device profile art is scaled into this fixed slot (height-priority).
+_DEVICE_GRAPHIC_HEIGHT = 140
+_DEVICE_GRAPHIC_MAX_WIDTH = 180
 
 _PATH_DISPLAY_MAX = 72
 _DEAD_TRACK_FG = "gray50"
@@ -257,48 +267,74 @@ class MainWindow:
         body = Frame(self.root)
         body.pack(side=TOP, fill=BOTH, expand=True)
 
-        leftframe = Frame(body)
+        # Fixed-width left column: context (selection) + device subframes.
+        leftframe = Frame(body, width=_LEFT_PANEL_WIDTH)
         leftframe["borderwidth"] = 3
         leftframe["relief"] = "sunken"
         leftframe.pack(side=LEFT, fill=Y)
+        leftframe.pack_propagate(False)
+        self.leftframe = leftframe
 
         rightframe = Frame(body)
         rightframe["borderwidth"] = 3
         rightframe["relief"] = "sunken"
         rightframe.pack(side=RIGHT, fill=BOTH, expand=True)
 
-        # Left panel: PyMTP device session is front-and-center; Stable Mode
-        # replaces this with help text (toggle under Config).
-        self.lbl_mode_title = Label(
-            leftframe, text="Device", font=("", 11, "bold")
+        # --- Device subframe: fixed height, locked to bottom of leftframe ---
+        # Pack BOTTOM first so Selection fills the remaining space above.
+        self.device_panel = Frame(
+            leftframe, width=_LEFT_PANEL_WIDTH - 6, height=_DEVICE_PANEL_HEIGHT
         )
-        self.lbl_mode_title.pack(padx=6, pady=(8, 0), anchor="w")
+        self.device_panel.pack(side=BOTTOM, fill=X, padx=3, pady=(2, 6))
+        self.device_panel.pack_propagate(False)
 
-        # Startup-only PyMTP blurb; after first selection this label shows
-        # track/album/artist context (see set_context_detail).
-        self._startup_hint_active = True
-        self._context_detail = ""
-        self.lbl_mode_help = Label(
-            leftframe,
-            text=EXPERIMENTAL_HINT,
-            wraplength=200,
+        self.lbl_device_title = Label(
+            self.device_panel, text="Device", font=("", 11, "bold")
+        )
+        self.lbl_device_title.pack(padx=6, pady=(2, 0), anchor="w")
+
+        self._device_caption = ""
+        self.lbl_device_caption = Label(
+            self.device_panel,
+            text="",
+            wraplength=_LEFT_TEXT_WRAP,
             justify=LEFT,
         )
-        self.lbl_mode_help.pack(padx=6, pady=(6, 4), anchor="w")
-
-        self.device_panel = Frame(leftframe)
-        self.device_panel.pack(padx=3, pady=3, fill=X)
-
-        self.lbl_device_caption = Label(
-            self.device_panel, text="", wraplength=200, justify=LEFT
-        )
         self.lbl_device_caption.pack(padx=6, pady=(4, 0), anchor="w")
-        self.lbl_device_graphic = Label(self.device_panel)
-        self.lbl_device_graphic.pack(padx=6, pady=6)
+        # Fixed-height slot so profile art cannot grow the device panel.
+        self.device_graphic_slot = Frame(
+            self.device_panel, height=_DEVICE_GRAPHIC_HEIGHT
+        )
+        self.device_graphic_slot.pack(padx=6, pady=6, fill=X)
+        self.device_graphic_slot.pack_propagate(False)
+        self.lbl_device_graphic = Label(self.device_graphic_slot)
+        self.lbl_device_graphic.place(relx=0.5, rely=0.5, anchor="center")
         self._device_photo: PhotoImage | None = None
         self._device_photo_cache: dict[str, PhotoImage] = {}
         # Album art thumbs for group rows (must keep refs for Tk).
         self._album_art_cache: dict[str, PhotoImage] = {}
+
+        # --- Context subframe: startup hint, then selection metadata ---
+        # Fills all space above the bottom-locked device panel.
+        self.context_panel = Frame(leftframe)
+        self.context_panel.pack(
+            side=TOP, fill=BOTH, expand=True, padx=3, pady=(6, 2)
+        )
+
+        self.lbl_context_title = Label(
+            self.context_panel, text="Selection", font=("", 11, "bold")
+        )
+        self.lbl_context_title.pack(padx=6, pady=(2, 0), anchor="w")
+
+        self._startup_hint_active = True
+        self._context_detail = ""
+        self.lbl_context_detail = Label(
+            self.context_panel,
+            text=EXPERIMENTAL_HINT,
+            wraplength=_LEFT_TEXT_WRAP,
+            justify=LEFT,
+        )
+        self.lbl_context_detail.pack(padx=6, pady=(4, 6), anchor="nw")
 
         Label(rightframe, text="Tracks").pack()
         tree_frame = Frame(rightframe)
@@ -377,44 +413,45 @@ class MainWindow:
         return self._mode
 
     def apply_mode_ui(self, mode: Mode) -> None:
-        """Refresh left-panel copy and Device menu for the active transfer mode."""
+        """Refresh device subframe + Device menu for the active transfer mode.
+
+        Context subframe (selection detail) is independent of mode: it keeps
+        the startup hint or last selection text either way.
+        """
         self._mode = mode
         stable = mode == "stable"
         self.var_stable_mode.set(stable)
         if stable:
-            self.lbl_mode_title.configure(text="Stable Mode")
-            self.lbl_mode_help.configure(text=STABLE_MODE_HELP)
-            self.device_panel.pack_forget()
+            self.lbl_device_title.configure(text="Stable Mode")
+            self.lbl_device_caption.configure(text=STABLE_MODE_HELP)
+            self.lbl_device_graphic.configure(image="")
+            if self.device_graphic_slot.winfo_ismapped():
+                self.device_graphic_slot.pack_forget()
         else:
-            self.lbl_mode_title.configure(text="Device")
-            # Keep startup hint only until the user selects something; after
-            # that restore the last selection context (not the long blurb).
-            if self._startup_hint_active:
-                self.lbl_mode_help.configure(text=EXPERIMENTAL_HINT)
-            else:
-                self.lbl_mode_help.configure(text=self._context_detail)
-            if not self.device_panel.winfo_ismapped():
-                self.device_panel.pack(padx=3, pady=3, fill=X)
+            self.lbl_device_title.configure(text="Device")
+            self.lbl_device_caption.configure(text=self._device_caption)
+            if self._device_photo is not None:
+                self.lbl_device_graphic.configure(image=self._device_photo)
+            if not self.device_graphic_slot.winfo_ismapped():
+                self.device_graphic_slot.pack(padx=6, pady=6, fill=X)
         self.apply_mode_actions()
 
     def is_startup_hint_active(self) -> bool:
-        """True while left panel still shows the first-run experimental blurb."""
+        """True while the context subframe still shows the first-run blurb."""
         return bool(self._startup_hint_active)
 
     def set_context_detail(self, text: str) -> None:
-        """Replace startup hint with selection / contextual left-panel text.
+        """Update the context subframe (selection metadata).
 
-        Called on tree selection changes. No-op for the visible label while
-        Stable Mode help is showing; text is still stored and restored when
-        returning to PyMTP mode.
+        Replaces the first-run experimental hint. Always updates the visible
+        label (including under Stable Mode) so selection still has a home.
         """
         self._startup_hint_active = False
         self._context_detail = text or ""
-        if self._mode == "experimental":
-            try:
-                self.lbl_mode_help.configure(text=self._context_detail)
-            except Exception:
-                pass
+        try:
+            self.lbl_context_detail.configure(text=self._context_detail)
+        except Exception:
+            pass
 
     def set_library_menu_commands(
         self,
@@ -870,35 +907,81 @@ class MainWindow:
         image_path: Path | str | None,
         *,
         caption: str = "",
-        max_width: int = 180,
+        max_width: int = _DEVICE_GRAPHIC_MAX_WIDTH,
+        max_height: int = _DEVICE_GRAPHIC_HEIGHT,
     ) -> None:
-        """Show device art in the left panel, or clear when *image_path* is None."""
+        """Show device art in the fixed graphic slot, or clear when *image_path* is None.
+
+        Images are scaled to fit ``max_width`` × ``max_height`` (default 180×140).
+        Caption/photo are remembered so Stable Mode can borrow the device
+        caption label for help text and restore art when PyMTP mode returns.
+        """
         if image_path is None:
             self._device_photo = None
-            self.lbl_device_graphic.configure(image="")
-            self.lbl_device_caption.configure(text="")
+            self._device_caption = ""
+            if self._mode != "stable":
+                self.lbl_device_graphic.configure(image="")
+                self.lbl_device_caption.configure(text="")
             return
 
         path = Path(image_path)
-        key = f"{path.resolve()}:{max_width}"
+        key = f"{path.resolve()}:{max_width}x{max_height}"
         photo = self._device_photo_cache.get(key)
         if photo is None:
             if not path.is_file():
                 self.set_device_graphic(None)
                 return
             try:
-                raw = PhotoImage(file=str(path))
-                # Downscale large PNGs to fit the left column.
-                factor = max(1, int(raw.width() / max_width))
-                photo = raw.subsample(factor, factor) if factor > 1 else raw
+                photo = self._load_device_photo(
+                    path, max_width=max_width, max_height=max_height
+                )
+                if photo is None:
+                    self.set_device_graphic(None)
+                    return
                 self._device_photo_cache[key] = photo
             except Exception:
                 self.set_device_graphic(None)
                 return
 
         self._device_photo = photo  # prevent GC
-        self.lbl_device_graphic.configure(image=photo)
-        self.lbl_device_caption.configure(text=caption or "")
+        self._device_caption = caption or ""
+        if self._mode != "stable":
+            self.lbl_device_graphic.configure(image=photo)
+            self.lbl_device_caption.configure(text=self._device_caption)
+            if not self.device_graphic_slot.winfo_ismapped():
+                self.device_graphic_slot.pack(padx=6, pady=6, fill=X)
+
+    def _load_device_photo(
+        self,
+        path: Path,
+        *,
+        max_width: int,
+        max_height: int,
+    ) -> PhotoImage | None:
+        """Load *path* scaled to fit inside max_width × max_height.
+
+        Prefers Pillow (LANCZOS) when available so tall assets (e.g. 540×900)
+        land cleanly in the 140px slot; falls back to integer PhotoImage
+        subsample.
+        """
+        max_width = max(1, int(max_width))
+        max_height = max(1, int(max_height))
+        try:
+            from PIL import Image, ImageTk
+
+            im = Image.open(path)
+            im = im.convert("RGBA") if im.mode not in ("RGB", "RGBA") else im
+            im.thumbnail((max_width, max_height), Image.Resampling.LANCZOS)
+            return ImageTk.PhotoImage(im, master=self.root)
+        except Exception:
+            pass
+
+        raw = PhotoImage(file=str(path), master=self.root)
+        # Integer downsample so both width and height stay within the slot.
+        sx = raw.width() / max_width
+        sy = raw.height() / max_height
+        factor = max(1, int(math.ceil(max(sx, sy))))
+        return raw.subsample(factor, factor) if factor > 1 else raw
 
     def mainloop(self) -> None:
         self.root.mainloop()
