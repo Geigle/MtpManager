@@ -10,11 +10,14 @@ from mtpmanager.domain.device_media import (
     guid_stems_from_files,
     looks_like_music,
     looks_like_track,
+    looks_like_video,
     merge_track_refs,
     music_refs_from_files,
     refs_needing_device_tags,
     resolve_device_tracks_for_display,
     track_refs_from_files,
+    video_folder_label,
+    video_refs_from_files,
 )
 from mtpmanager.domain.models import (
     DeviceTrackInfo,
@@ -143,6 +146,42 @@ class MusicRefsFromFilesTests(unittest.TestCase):
         ]
         refs = music_refs_from_files(files)
         self.assertEqual([r.item_id for r in refs], [10, 12])
+
+
+class LooksLikeVideoTests(unittest.TestCase):
+    def test_accepts_video_filetype_and_ext(self) -> None:
+        self.assertTrue(looks_like_video(_file(1, "clip.avi", filetype=9)))
+        self.assertTrue(looks_like_video(_file(2, "show.wmv", filetype=0)))
+
+    def test_accepts_mp4_under_video_folder(self) -> None:
+        self.assertTrue(
+            looks_like_video(_file(3, "movie.mp4", filetype=6, parent_id=120))
+        )
+        self.assertTrue(
+            looks_like_video(_file(4, "ep.m4v", filetype=0, parent_id=124))
+        )
+
+    def test_rejects_audio_under_music(self) -> None:
+        self.assertFalse(looks_like_video(_file(5, "a.mp3", filetype=2)))
+        # mp4 under Music is not treated as device-video tab content
+        self.assertFalse(
+            looks_like_video(_file(6, "audio.mp4", filetype=6, parent_id=100))
+        )
+
+
+class VideoRefsFromFilesTests(unittest.TestCase):
+    def test_filters_and_keeps_video_parents(self) -> None:
+        files = [
+            _file(10, "a.mp3", filetype=2, parent_id=100),
+            _file(11, "clip.avi", filetype=9, parent_id=120),
+            _file(12, "show.wmv", filetype=8, parent_id=124),
+            _file(13, "notes.txt", filetype=0),
+        ]
+        refs = video_refs_from_files(files)
+        self.assertEqual([r.item_id for r in refs], [11, 12])
+        self.assertEqual(video_folder_label(120), "Video")
+        self.assertEqual(video_folder_label(124), "TV")
+        self.assertEqual(video_folder_label(99), "Other")
 
 
 class ApplyTrackInfoTests(unittest.TestCase):
@@ -297,6 +336,32 @@ class GuidJoinTests(unittest.TestCase):
 
         need = refs_needing_device_tags(refs, by_guid)
         self.assertEqual([r.item_id for r in need], [3])
+
+    def test_unknown_title_falls_back_to_filename(self) -> None:
+        """Device tags often leave video title as the Unknown Title placeholder."""
+        refs = [
+            DeviceTrackRef(
+                item_id=10,
+                name="Holiday_Clip.avi",
+                title="Unknown Title",
+                artist="Unknown Artist",
+                album="Unknown Album",
+                filetype=9,
+                parent_id=120,
+            ),
+            DeviceTrackRef(
+                item_id=11,
+                name="Real.wmv",
+                title="Real Title",
+                artist="Dir",
+                album="",
+                filetype=8,
+                parent_id=124,
+            ),
+        ]
+        tracks = resolve_device_tracks_for_display(refs, {})
+        self.assertEqual(tracks[0].meta.title, "Holiday_Clip.avi")
+        self.assertEqual(tracks[1].meta.title, "Real Title")
 
 
 if __name__ == "__main__":

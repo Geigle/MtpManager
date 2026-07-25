@@ -112,6 +112,17 @@ _NON_MUSIC_PARENT_IDS = frozenset(
     }
 )
 
+# Device → Send Video destinations (Video / TV folders).
+VIDEO_PARENT_IDS = frozenset(
+    {
+        120,  # Video
+        124,  # TV
+    }
+)
+
+# Extra container extensions often used for video under Video/TV (not in VIDEO_EXTS).
+_VIDEO_FOLDER_EXTS = VIDEO_EXTS + (".mp4", ".m4v")
+
 
 def looks_like_track(entry: object) -> bool:
     """True when a listed object is likely music/video (not a hard libmtp gate)."""
@@ -182,6 +193,48 @@ def music_refs_from_files(
             continue
         result.append(_ref_from_file_entry(entry))
     return _sort_track_refs(result)
+
+
+def looks_like_video(entry: object) -> bool:
+    """True when a listed object is likely video for the Device → Video tab.
+
+    Matches video filetypes/extensions, plus media containers under the ZEN
+    Video (120) / TV (124) folders (e.g. ``.mp4`` sent via Send Video).
+    """
+    ft = int(getattr(entry, "filetype", 0) or 0)
+    if ft in VIDEO_FILETYPES:
+        return True
+    name = (getattr(entry, "name", None) or "").strip().lower()
+    if any(name.endswith(ext) for ext in VIDEO_EXTS):
+        return True
+    parent = int(getattr(entry, "parent_id", 0) or 0)
+    if parent in VIDEO_PARENT_IDS and any(
+        name.endswith(ext) for ext in _VIDEO_FOLDER_EXTS
+    ):
+        return True
+    return False
+
+
+def video_refs_from_files(
+    files: Sequence[FileEntry] | Iterable[FileEntry],
+) -> list[DeviceTrackRef]:
+    """Video-only track refs for the Device tab Video tree (ids/names only)."""
+    result: list[DeviceTrackRef] = []
+    for entry in files:
+        if not looks_like_video(entry):
+            continue
+        result.append(_ref_from_file_entry(entry))
+    return _sort_track_refs(result)
+
+
+def video_folder_label(parent_id: int) -> str:
+    """Human label for a video object parent (Video / TV / Other)."""
+    pid = int(parent_id or 0)
+    if pid == 120:
+        return "Video"
+    if pid == 124:
+        return "TV"
+    return "Other"
 
 
 def merge_track_refs(
@@ -328,7 +381,8 @@ def resolve_device_tracks_for_display(
         title = (ref.title or "").strip()
         artist = (ref.artist or "").strip()
         album = (ref.album or "").strip()
-        if not title:
+        # Empty or placeholder titles (common on device video) → filename.
+        if not title or title.casefold() == "unknown title":
             title = name
         if not artist:
             artist = "Unknown Artist"

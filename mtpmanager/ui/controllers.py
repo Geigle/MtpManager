@@ -31,6 +31,7 @@ from mtpmanager.domain.device_media import (
     looks_like_track,
     refs_needing_device_tags,
     resolve_device_tracks_for_display,
+    video_folder_label,
 )
 from mtpmanager.domain.models import DeviceInfo, DeviceTrackRef, Track, TrackMetadata
 from mtpmanager.domain.track_id import guid_from_remote_name, is_track_guid
@@ -47,6 +48,7 @@ from mtpmanager.infra.device_index import (
     device_serial_key,
     guid_stems_on_device,
     list_cached_music_refs,
+    list_cached_video_refs,
     record_send,
     remove_by_item_id,
     replace_device_listing,
@@ -145,8 +147,11 @@ class AppController:
         self._device_index_seed_inflight = False
         self._device_tag_enrich_inflight = False
         self._device_music_refs: list[DeviceTrackRef] = []
+        self._device_video_refs: list[DeviceTrackRef] = []
         self._device_track_by_iid: dict[str, Track] = {}
+        self._device_video_track_by_iid: dict[str, Track] = {}
         self._device_tree_refresh_after_id: str | None = None
+        self._device_video_populate_after_id: str | None = None
         self._active_profile: DeviceProfile | None = None
         self._sort_primary = SortPrimary.ARTIST
         self._sort_reverse = False
@@ -740,12 +745,23 @@ class AppController:
                 pass
             self._device_populate_after_id = None
 
+    def _cancel_device_video_populate(self) -> None:
+        if self._device_video_populate_after_id is not None:
+            try:
+                self.win.root.after_cancel(self._device_video_populate_after_id)
+            except Exception:
+                pass
+            self._device_video_populate_after_id = None
+
     def _track_iid(self, track: Track) -> str:
         # Paths are unique; avoid characters Treeview rejects in iids.
         return "t:" + track.path.replace("\\", "/")
 
     def _device_track_iid(self, track: Track) -> str:
         return "d:" + track.path.replace("\\", "/")
+
+    def _device_video_track_iid(self, track: Track) -> str:
+        return "dv:" + track.path.replace("\\", "/")
 
     @staticmethod
     def _host_path_for_device_track(track: Track) -> str:
@@ -801,6 +817,22 @@ class AppController:
             open=False,
         )
         self._device_track_by_iid[iid] = track
+
+    def _insert_device_video_row(self, parent: str, track: Track) -> None:
+        num, title, artist, album, year = iter_track_cells(track)
+        iid = self._device_video_track_iid(track)
+        if self.win.device_video_tree.exists(iid):
+            iid = f"{iid}#{id(track)}"
+        self.win.device_video_tree.insert(
+            parent,
+            "end",
+            iid=iid,
+            text=num,
+            values=(title, artist, album, year),
+            tags=("track", "video"),
+            open=False,
+        )
+        self._device_video_track_by_iid[iid] = track
 
     def _rebuild_track_tree(self) -> None:
         """Rebuild Treeview from library using current sort primary."""
@@ -954,9 +986,10 @@ class AppController:
 
         run_chunk(0)
 
-    def _clear_device_music_tree(self) -> None:
-        """Drop Device → Music tree contents and in-memory maps."""
+    def _clear_device_media_trees(self) -> None:
+        """Drop Device → Music/Video trees and in-memory maps."""
         self._cancel_device_populate()
+        self._cancel_device_video_populate()
         if self._device_tree_refresh_after_id is not None:
             try:
                 self.win.root.after_cancel(self._device_tree_refresh_after_id)
@@ -965,9 +998,16 @@ class AppController:
             self._device_tree_refresh_after_id = None
         self._device_album_art_job_gen += 1
         self.win.clear_device_track_tree()
+        self.win.clear_device_video_tree()
         self._device_track_by_iid.clear()
+        self._device_video_track_by_iid.clear()
         self._device_music_refs = []
+        self._device_video_refs = []
         self._device_pending_album_art = []
+
+    # Back-compat alias used by older call sites / mental model.
+    def _clear_device_music_tree(self) -> None:
+        self._clear_device_media_trees()
 
     def _host_tracks_by_guid_for_refs(
         self, refs: list[DeviceTrackRef]
@@ -988,7 +1028,7 @@ class AppController:
     def _schedule_device_music_tree_refresh(
         self, *, enrich_missing_tags: bool = False, delay_ms: int = 250
     ) -> None:
-        """Debounce Device → Music rebuild (e.g. after many record_send calls)."""
+        """Debounce Device media tree rebuild (music + video)."""
         if self._device_tree_refresh_after_id is not None:
             try:
                 self.win.root.after_cancel(self._device_tree_refresh_after_id)
@@ -998,48 +1038,86 @@ class AppController:
 
         def _fire() -> None:
             self._device_tree_refresh_after_id = None
-            self._refresh_device_music_tree(enrich_missing_tags=enrich_missing_tags)
+            self._refresh_device_media_trees(enrich_missing_tags=enrich_missing_tags)
 
         self._device_tree_refresh_after_id = self.win.root.after(delay_ms, _fire)
 
     def _refresh_device_music_tree(self, *, enrich_missing_tags: bool = True) -> None:
-        """Rebuild Device → Music from durable index + host GUID join.
+        """Compatibility wrapper — refresh music and video device trees."""
+        self._refresh_device_media_trees(enrich_missing_tags=enrich_missing_tags)
 
-        When *enrich_missing_tags* is True and a session is live, objects that
-        did not resolve via host GUID and lack titles are filled via
-        ``get_track_metadata`` (same path as Device → Get Track Info) on a
-        background worker.
+    def _refresh_device_media_trees(self, *, enrich_missing_tags: bool = True) -> None:
+        """Rebuild Device → Music and Device → Video from durable index.
+
+        Music: GUID basename → host library tags, then device tags, then filename.
+        Video: device tags (Get Track Info), then filename (no library GUID on
+        Send Video). When *enrich_missing_tags* is True, objects still missing
+        titles are filled via ``get_track_metadata`` after the USB quiet window.
         """
         serial = self._device_serial
         if not serial:
-            self._clear_device_music_tree()
+            self._clear_device_media_trees()
             return
+
+        # --- Music ---
         try:
-            refs = list_cached_music_refs(serial)
+            music_refs = list_cached_music_refs(serial)
         except Exception:
             logger.warning("list_cached_music_refs failed", exc_info=True)
-            self._clear_device_music_tree()
-            return
+            music_refs = []
+        music_by_guid = self._host_tracks_by_guid_for_refs(music_refs)
+        music_refs = enrich_refs_from_host(music_refs, music_by_guid)
+        self._device_music_refs = list(music_refs)
+        self._rebuild_device_music_tree(music_refs, music_by_guid)
 
-        by_guid = self._host_tracks_by_guid_for_refs(refs)
-        # Soft-fill empty tags from host before building rows (List Tracks style).
-        refs = enrich_refs_from_host(refs, by_guid)
-        self._device_music_refs = list(refs)
-        self._rebuild_device_music_tree(refs, by_guid)
+        # --- Video ---
+        try:
+            video_refs = list_cached_video_refs(serial)
+        except Exception:
+            logger.warning("list_cached_video_refs failed", exc_info=True)
+            video_refs = []
+        # Videos use host basename ObjectFileNames (not library GUIDs); still
+        # try a GUID join in case a GUID-named object lands under Video/TV.
+        video_by_guid = self._host_tracks_by_guid_for_refs(video_refs)
+        video_refs = enrich_refs_from_host(video_refs, video_by_guid)
+        self._device_video_refs = list(video_refs)
+        self._rebuild_device_video_tree(video_refs, video_by_guid)
 
         if enrich_missing_tags:
-            need = refs_needing_device_tags(refs, by_guid)
+            need_music = refs_needing_device_tags(music_refs, music_by_guid)
+            need_video = refs_needing_device_tags(video_refs, video_by_guid)
+            # Deduplicate by item_id (same object should not appear in both).
+            seen: set[int] = set()
+            need: list[DeviceTrackRef] = []
+            for ref in list(need_music) + list(need_video):
+                oid = int(ref.item_id or 0)
+                if oid <= 0 or oid in seen:
+                    continue
+                seen.add(oid)
+                need.append(ref)
             if need and self.device.is_connected() and not self._device_tag_enrich_inflight:
-                # After a list_files seed, give the bus a quiet window before
-                # per-id Get_Trackmetadata (same call as Device → Get Track Info).
-                remaining_ms = int(max(0.0, self._usb_quiet_until - time.monotonic()) * 1000)
+                remaining_ms = int(
+                    max(0.0, self._usb_quiet_until - time.monotonic()) * 1000
+                )
                 delay_ms = max(remaining_ms, 500)
 
                 def _later() -> None:
-                    still = refs_needing_device_tags(
+                    still_music = refs_needing_device_tags(
                         self._device_music_refs,
                         self._host_tracks_by_guid_for_refs(self._device_music_refs),
                     )
+                    still_video = refs_needing_device_tags(
+                        self._device_video_refs,
+                        self._host_tracks_by_guid_for_refs(self._device_video_refs),
+                    )
+                    still_seen: set[int] = set()
+                    still: list[DeviceTrackRef] = []
+                    for ref in list(still_music) + list(still_video):
+                        oid = int(ref.item_id or 0)
+                        if oid <= 0 or oid in still_seen:
+                            continue
+                        still_seen.add(oid)
+                        still.append(ref)
                     if still:
                         self._start_device_tag_enrich(still)
 
@@ -1144,6 +1222,91 @@ class AppController:
 
         run_chunk(0)
 
+    def _rebuild_device_video_tree(
+        self,
+        refs: list[DeviceTrackRef],
+        by_guid: dict[str, Track] | None = None,
+    ) -> None:
+        """Chunked Treeview insert for Device → Video (folder → items)."""
+        self._cancel_device_video_populate()
+        self.win.clear_device_video_tree()
+        self._device_video_track_by_iid.clear()
+
+        if by_guid is None:
+            by_guid = self._host_tracks_by_guid_for_refs(refs)
+        if not refs:
+            return
+
+        # Group by ZEN parent folder (Video 120 / TV 124 / Other).
+        by_folder: dict[int, list[DeviceTrackRef]] = {}
+        for ref in refs:
+            pid = int(ref.parent_id or 0)
+            by_folder.setdefault(pid, []).append(ref)
+
+        # Prefer known folders first, then others by id.
+        def folder_sort_key(pid: int) -> tuple:
+            if pid == 120:
+                return (0, pid)
+            if pid == 124:
+                return (1, pid)
+            return (2, pid)
+
+        ops: list = []
+        for pid in sorted(by_folder.keys(), key=folder_sort_key):
+            folder_refs = by_folder[pid]
+            folder_iid = f"dv:folder:{pid}"
+            label = video_folder_label(pid)
+            ops.append(
+                (
+                    "group",
+                    "",
+                    folder_iid,
+                    label,
+                    ("group", "group_folder"),
+                )
+            )
+            # Resolve tags per folder; sort by display title.
+            display = resolve_device_tracks_for_display(folder_refs, by_guid)
+            # Pair with original refs for stable order: title then name then id.
+            paired = list(zip(folder_refs, display))
+            paired.sort(
+                key=lambda pair: (
+                    (pair[1].meta.title or "").casefold(),
+                    (pair[0].name or "").casefold(),
+                    int(pair[0].item_id or 0),
+                )
+            )
+            for _ref, track in paired:
+                ops.append(("track", folder_iid, track))
+
+        def run_chunk(start: int) -> None:
+            self._device_video_populate_after_id = None
+            end = min(start + _TREE_CHUNK, len(ops))
+            tree = self.win.device_video_tree
+            for i in range(start, end):
+                op = ops[i]
+                if op[0] == "group":
+                    _, parent, iid, label, tags = op
+                    if not tree.exists(iid):
+                        tree.insert(
+                            parent,
+                            "end",
+                            iid=iid,
+                            text="",
+                            values=(label, "", "", ""),
+                            tags=tags,
+                            open=True,
+                        )
+                else:
+                    _, parent, track = op
+                    self._insert_device_video_row(parent, track)
+            if end < len(ops):
+                self._device_video_populate_after_id = self.win.root.after(
+                    1, lambda: run_chunk(end)
+                )
+
+        run_chunk(0)
+
     def _start_device_background_album_art(self) -> None:
         pending = list(self._device_pending_album_art)
         if not pending:
@@ -1189,7 +1352,7 @@ class AppController:
         threading.Thread(target=runner, name="device-album-art", daemon=True).start()
 
     def _start_device_tag_enrich(self, need: list[DeviceTrackRef]) -> None:
-        """Background Get_Trackmetadata for Device music rows without host tags."""
+        """Background Get_Trackmetadata for Device music/video rows without tags."""
         if not need or self._device_tag_enrich_inflight:
             return
         if not self.device.is_connected():
@@ -1219,16 +1382,23 @@ class AppController:
             }
             if not updated_by_id:
                 return
-            merged: list[DeviceTrackRef] = []
-            for ref in self._device_music_refs:
-                oid = int(ref.item_id or 0)
-                merged.append(updated_by_id.get(oid, ref))
-            self._device_music_refs = merged
-            by_guid = self._host_tracks_by_guid_for_refs(merged)
+
+            def _merge(refs: list[DeviceTrackRef]) -> list[DeviceTrackRef]:
+                return [
+                    updated_by_id.get(int(ref.item_id or 0), ref) for ref in refs
+                ]
+
+            music_merged = _merge(self._device_music_refs)
+            video_merged = _merge(self._device_video_refs)
+            self._device_music_refs = music_merged
+            self._device_video_refs = video_merged
+            music_by_guid = self._host_tracks_by_guid_for_refs(music_merged)
+            video_by_guid = self._host_tracks_by_guid_for_refs(video_merged)
             # Do not re-trigger enrich after this pass.
-            self._rebuild_device_music_tree(merged, by_guid)
+            self._rebuild_device_music_tree(music_merged, music_by_guid)
+            self._rebuild_device_video_tree(video_merged, video_by_guid)
             logger.info(
-                "Device music tags enriched updated=%s failed=%s aborted=%s",
+                "Device media tags enriched updated=%s failed=%s aborted=%s",
                 result.updated,
                 result.failed,
                 result.aborted,
@@ -1239,12 +1409,12 @@ class AppController:
             self._mark_usb_quiet(_DEVICE_USB_COOLDOWN_S)
             logger.warning("Device tag enrich failed: %s", exc)
 
-        logger.info("Device music tag enrich start count=%s", len(batch))
+        logger.info("Device media tag enrich start count=%s", len(batch))
         self._bg.submit(
             work,
             on_done=on_done,
             on_error=on_error,
-            name="device-music-tag-enrich",
+            name="device-media-tag-enrich",
         )
 
     def _album_seed_paths(self) -> list[str]:
@@ -3074,6 +3244,7 @@ class AppController:
                     parent_id=result.parent_id,
                     storage_id=DEFAULT_STORAGE_ID,
                 )
+                self._schedule_device_music_tree_refresh(enrich_missing_tags=False)
             except Exception:
                 logger.debug(
                     "device_index record_send after video failed",

@@ -361,7 +361,8 @@ class MainWindow:
         p_tree_frame = Frame(self.podcastsLibrary_tab)
         p_tree_frame.pack(fill=BOTH, expand=True)
 
-        # Device tab: nested notebook by media category. Music tree only for now.
+        # Device tab: nested notebook by media category.
+        # Music + Video trees for now; Audiobooks / Podcasts deferred.
         self.device_notebook = ttk.Notebook(self.device_tab)
         self.device_notebook.pack(side=TOP, fill=BOTH, expand=True)
 
@@ -376,6 +377,9 @@ class MainWindow:
 
         d_tree_frame = Frame(self.device_music_tab)
         d_tree_frame.pack(fill=BOTH, expand=True)
+
+        dv_tree_frame = Frame(self.device_video_tab)
+        dv_tree_frame.pack(fill=BOTH, expand=True)
 
         yscroll = Scrollbar(tree_frame)
         yscroll.pack(side=RIGHT, fill=Y)
@@ -461,6 +465,40 @@ class MainWindow:
         self.device_tree.column("album", width=140, minwidth=60)
         self.device_tree.column("year", width=56, minwidth=40, stretch=False)
 
+        # Device video tree (same columns; grouped by Video / TV folder).
+        dv_yscroll = Scrollbar(dv_tree_frame)
+        dv_yscroll.pack(side=RIGHT, fill=Y)
+        dv_xscroll = Scrollbar(dv_tree_frame, orient="horizontal")
+        dv_xscroll.pack(side=BOTTOM, fill=X)
+
+        self.device_video_tree = ttk.Treeview(
+            dv_tree_frame,
+            columns=TREE_COLS,
+            show="tree headings",
+            selectmode="extended",
+            yscrollcommand=dv_yscroll.set,
+            xscrollcommand=dv_xscroll.set,
+        )
+        self.device_video_tree.pack(side=LEFT, fill=BOTH, expand=True)
+        dv_yscroll.config(command=self.device_video_tree.yview)
+        dv_xscroll.config(command=self.device_video_tree.xview)
+
+        self.device_video_tree.heading("#0", text="#", anchor="w")
+        self.device_video_tree.heading("title", text="Title", anchor="w")
+        self.device_video_tree.heading("artist", text="Artist", anchor="w")
+        self.device_video_tree.heading("album", text="Album", anchor="w")
+        self.device_video_tree.heading("year", text="Year", anchor="w")
+        self.device_video_tree.column(
+            "#0",
+            width=self._thumb_size + 28,
+            minwidth=self._thumb_size + 20,
+            stretch=False,
+        )
+        self.device_video_tree.column("title", width=280, minwidth=120, stretch=True)
+        self.device_video_tree.column("artist", width=140, minwidth=60)
+        self.device_video_tree.column("album", width=140, minwidth=60)
+        self.device_video_tree.column("year", width=56, minwidth=40, stretch=False)
+
         # Group headers bold (label lives in Title values[0]); transfer tags tint rows.
         self.tree.tag_configure("group", font=("", 11, "bold"))
         self.tree.tag_configure("group_artist", font=("", 12, "bold"))
@@ -473,6 +511,9 @@ class MainWindow:
         self.device_tree.tag_configure("group", font=("", 11, "bold"))
         self.device_tree.tag_configure("group_artist", font=("", 12, "bold"))
         self.device_tree.tag_configure("dead", foreground=_DEAD_TRACK_FG)
+        self.device_video_tree.tag_configure("group", font=("", 11, "bold"))
+        self.device_video_tree.tag_configure("group_folder", font=("", 12, "bold"))
+        self.device_video_tree.tag_configure("dead", foreground=_DEAD_TRACK_FG)
 
         # Callbacks set by controller for column-header sort / context menus.
         self._on_sort_heading = None
@@ -753,6 +794,13 @@ class MainWindow:
         """Clear Device → Music tree (album-art cache shared with library)."""
         try:
             self.device_tree.delete(*self.device_tree.get_children())
+        except Exception:
+            pass
+
+    def clear_device_video_tree(self) -> None:
+        """Clear Device → Video tree."""
+        try:
+            self.device_video_tree.delete(*self.device_video_tree.get_children())
         except Exception:
             pass
 
