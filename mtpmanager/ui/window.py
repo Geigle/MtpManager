@@ -361,7 +361,20 @@ class MainWindow:
         p_tree_frame = Frame(self.podcastsLibrary_tab)
         p_tree_frame.pack(fill=BOTH, expand=True)
 
-        d_tree_frame = Frame(self.device_tab)
+        # Device tab: nested notebook by media category. Music tree only for now.
+        self.device_notebook = ttk.Notebook(self.device_tab)
+        self.device_notebook.pack(side=TOP, fill=BOTH, expand=True)
+
+        self.device_music_tab = Frame(self.device_notebook)
+        self.device_video_tab = Frame(self.device_notebook)
+        self.device_audiobooks_tab = Frame(self.device_notebook)
+        self.device_podcasts_tab = Frame(self.device_notebook)
+        self.device_notebook.add(self.device_music_tab, text="Music")
+        self.device_notebook.add(self.device_video_tab, text="Video")
+        self.device_notebook.add(self.device_audiobooks_tab, text="Audiobooks")
+        self.device_notebook.add(self.device_podcasts_tab, text="Podcasts")
+
+        d_tree_frame = Frame(self.device_music_tab)
         d_tree_frame.pack(fill=BOTH, expand=True)
 
         yscroll = Scrollbar(tree_frame)
@@ -414,6 +427,40 @@ class MainWindow:
         self.tree.column("album", width=140, minwidth=60)
         self.tree.column("year", width=56, minwidth=40, stretch=False)
 
+        # Device music tree (same columns/grouping as the library tree).
+        d_yscroll = Scrollbar(d_tree_frame)
+        d_yscroll.pack(side=RIGHT, fill=Y)
+        d_xscroll = Scrollbar(d_tree_frame, orient="horizontal")
+        d_xscroll.pack(side=BOTTOM, fill=X)
+
+        self.device_tree = ttk.Treeview(
+            d_tree_frame,
+            columns=TREE_COLS,
+            show="tree headings",
+            selectmode="extended",
+            yscrollcommand=d_yscroll.set,
+            xscrollcommand=d_xscroll.set,
+        )
+        self.device_tree.pack(side=LEFT, fill=BOTH, expand=True)
+        d_yscroll.config(command=self.device_tree.yview)
+        d_xscroll.config(command=self.device_tree.xview)
+
+        self.device_tree.heading("#0", text="#", anchor="w")
+        self.device_tree.heading("title", text="Title", anchor="w")
+        self.device_tree.heading("artist", text="Artist", anchor="w")
+        self.device_tree.heading("album", text="Album", anchor="w")
+        self.device_tree.heading("year", text="Year", anchor="w")
+        self.device_tree.column(
+            "#0",
+            width=self._thumb_size + 28,
+            minwidth=self._thumb_size + 20,
+            stretch=False,
+        )
+        self.device_tree.column("title", width=280, minwidth=120, stretch=True)
+        self.device_tree.column("artist", width=140, minwidth=60)
+        self.device_tree.column("album", width=140, minwidth=60)
+        self.device_tree.column("year", width=56, minwidth=40, stretch=False)
+
         # Group headers bold (label lives in Title values[0]); transfer tags tint rows.
         self.tree.tag_configure("group", font=("", 11, "bold"))
         self.tree.tag_configure("group_artist", font=("", 12, "bold"))
@@ -423,6 +470,9 @@ class MainWindow:
         self.tree.tag_configure(
             "xfer_transferring", background=BG_TRANSFER_TRANSFERRING
         )
+        self.device_tree.tag_configure("group", font=("", 11, "bold"))
+        self.device_tree.tag_configure("group_artist", font=("", 12, "bold"))
+        self.device_tree.tag_configure("dead", foreground=_DEAD_TRACK_FG)
 
         # Callbacks set by controller for column-header sort / context menus.
         self._on_sort_heading = None
@@ -698,6 +748,13 @@ class MainWindow:
         self.tree.delete(*self.tree.get_children())
         # Drop in-memory PhotoImage refs; on-disk thumbs remain.
         self._album_art_cache.clear()
+
+    def clear_device_track_tree(self) -> None:
+        """Clear Device → Music tree (album-art cache shared with library)."""
+        try:
+            self.device_tree.delete(*self.device_tree.get_children())
+        except Exception:
+            pass
 
     def album_art_photo_from_disk(
         self,

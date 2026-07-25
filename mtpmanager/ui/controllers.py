@@ -29,8 +29,10 @@ from mtpmanager.domain.library_sort import (
 from mtpmanager.domain.device_media import (
     enrich_refs_from_host,
     looks_like_track,
+    refs_needing_device_tags,
+    resolve_device_tracks_for_display,
 )
-from mtpmanager.domain.models import DeviceInfo, Track, TrackMetadata
+from mtpmanager.domain.models import DeviceInfo, DeviceTrackRef, Track, TrackMetadata
 from mtpmanager.domain.track_id import guid_from_remote_name, is_track_guid
 from mtpmanager.infra.album_art import (
     DEFAULT_THUMB_SIZE,
@@ -44,6 +46,7 @@ from mtpmanager.infra.device_index import (
     device_list_is_complete,
     device_serial_key,
     guid_stems_on_device,
+    list_cached_music_refs,
     record_send,
     remove_by_item_id,
     replace_device_listing,
@@ -126,6 +129,7 @@ class AppController:
         # Path → Track for the active batch (progress status label).
         self._batch_track_by_path: dict[str, Track] = {}
         self._populate_after_id: str | None = None
+        self._device_populate_after_id: str | None = None
         self._device_poll_after_id: str | None = None
         self._device_poll_gen = 0
         self._device_connect_inflight = False
@@ -139,6 +143,10 @@ class AppController:
         self._device_serial: str | None = None
         self._device_index_seeded = False
         self._device_index_seed_inflight = False
+        self._device_tag_enrich_inflight = False
+        self._device_music_refs: list[DeviceTrackRef] = []
+        self._device_track_by_iid: dict[str, Track] = {}
+        self._device_tree_refresh_after_id: str | None = None
         self._active_profile: DeviceProfile | None = None
         self._sort_primary = SortPrimary.ARTIST
         self._sort_reverse = False
@@ -149,6 +157,8 @@ class AppController:
         self._context_group_seed: Track | None = None
         self._pending_album_art: list[tuple[str, str]] = []  # (iid, track_path)
         self._album_art_job_gen = 0
+        self._device_pending_album_art: list[tuple[str, str]] = []
+        self._device_album_art_job_gen = 0
         self._wire()
         # Defer restore so mainloop can start before any index I/O.
         self.win.root.after(0, self._start_index_restore)
@@ -722,9 +732,41 @@ class AppController:
                 pass
             self._populate_after_id = None
 
+    def _cancel_device_populate(self) -> None:
+        if self._device_populate_after_id is not None:
+            try:
+                self.win.root.after_cancel(self._device_populate_after_id)
+            except Exception:
+                pass
+            self._device_populate_after_id = None
+
     def _track_iid(self, track: Track) -> str:
         # Paths are unique; avoid characters Treeview rejects in iids.
         return "t:" + track.path.replace("\\", "/")
+
+    def _device_track_iid(self, track: Track) -> str:
+        return "d:" + track.path.replace("\\", "/")
+
+    @staticmethod
+    def _host_path_for_device_track(track: Track) -> str:
+        """Extract a real host filesystem path from a synthetic device tree path.
+
+        GUID-resolved rows use ``device:<item_id>:<host_path>``. Basename-only
+        rows (filename fallback) return empty so album-art is skipped.
+        """
+        path = track.path or ""
+        if not path.startswith("device:"):
+            return path if path and not path.startswith("device:") else ""
+        parts = path.split(":", 2)
+        if len(parts) < 3:
+            return ""
+        candidate = parts[2]
+        # Unix absolute or Windows drive path.
+        if candidate.startswith("/"):
+            return candidate
+        if len(candidate) >= 3 and candidate[1] == ":" and candidate[0].isalpha():
+            return candidate
+        return ""
 
     def _insert_track_row(self, parent: str, track: Track) -> None:
         num, title, artist, album, year = iter_track_cells(track)
@@ -743,6 +785,22 @@ class AppController:
         )
         self._track_by_iid[iid] = track
         self._iid_by_path[track.path] = iid
+
+    def _insert_device_track_row(self, parent: str, track: Track) -> None:
+        num, title, artist, album, year = iter_track_cells(track)
+        iid = self._device_track_iid(track)
+        if self.win.device_tree.exists(iid):
+            iid = f"{iid}#{id(track)}"
+        self.win.device_tree.insert(
+            parent,
+            "end",
+            iid=iid,
+            text=num,
+            values=(title, artist, album, year),
+            tags=("track",),
+            open=False,
+        )
+        self._device_track_by_iid[iid] = track
 
     def _rebuild_track_tree(self) -> None:
         """Rebuild Treeview from library using current sort primary."""
@@ -895,6 +953,299 @@ class AppController:
                 self._start_background_album_art()
 
         run_chunk(0)
+
+    def _clear_device_music_tree(self) -> None:
+        """Drop Device → Music tree contents and in-memory maps."""
+        self._cancel_device_populate()
+        if self._device_tree_refresh_after_id is not None:
+            try:
+                self.win.root.after_cancel(self._device_tree_refresh_after_id)
+            except Exception:
+                pass
+            self._device_tree_refresh_after_id = None
+        self._device_album_art_job_gen += 1
+        self.win.clear_device_track_tree()
+        self._device_track_by_iid.clear()
+        self._device_music_refs = []
+        self._device_pending_album_art = []
+
+    def _host_tracks_by_guid_for_refs(
+        self, refs: list[DeviceTrackRef]
+    ) -> dict[str, Track]:
+        guids: list[str] = []
+        for r in refs:
+            g = guid_from_remote_name(getattr(r, "name", None))
+            if g:
+                guids.append(g)
+        if not guids:
+            return {}
+        try:
+            return get_tracks_by_guids(guids)
+        except Exception:
+            logger.debug("get_tracks_by_guids for device tree failed", exc_info=True)
+            return {}
+
+    def _schedule_device_music_tree_refresh(
+        self, *, enrich_missing_tags: bool = False, delay_ms: int = 250
+    ) -> None:
+        """Debounce Device → Music rebuild (e.g. after many record_send calls)."""
+        if self._device_tree_refresh_after_id is not None:
+            try:
+                self.win.root.after_cancel(self._device_tree_refresh_after_id)
+            except Exception:
+                pass
+            self._device_tree_refresh_after_id = None
+
+        def _fire() -> None:
+            self._device_tree_refresh_after_id = None
+            self._refresh_device_music_tree(enrich_missing_tags=enrich_missing_tags)
+
+        self._device_tree_refresh_after_id = self.win.root.after(delay_ms, _fire)
+
+    def _refresh_device_music_tree(self, *, enrich_missing_tags: bool = True) -> None:
+        """Rebuild Device → Music from durable index + host GUID join.
+
+        When *enrich_missing_tags* is True and a session is live, objects that
+        did not resolve via host GUID and lack titles are filled via
+        ``get_track_metadata`` (same path as Device → Get Track Info) on a
+        background worker.
+        """
+        serial = self._device_serial
+        if not serial:
+            self._clear_device_music_tree()
+            return
+        try:
+            refs = list_cached_music_refs(serial)
+        except Exception:
+            logger.warning("list_cached_music_refs failed", exc_info=True)
+            self._clear_device_music_tree()
+            return
+
+        by_guid = self._host_tracks_by_guid_for_refs(refs)
+        # Soft-fill empty tags from host before building rows (List Tracks style).
+        refs = enrich_refs_from_host(refs, by_guid)
+        self._device_music_refs = list(refs)
+        self._rebuild_device_music_tree(refs, by_guid)
+
+        if enrich_missing_tags:
+            need = refs_needing_device_tags(refs, by_guid)
+            if need and self.device.is_connected() and not self._device_tag_enrich_inflight:
+                # After a list_files seed, give the bus a quiet window before
+                # per-id Get_Trackmetadata (same call as Device → Get Track Info).
+                remaining_ms = int(max(0.0, self._usb_quiet_until - time.monotonic()) * 1000)
+                delay_ms = max(remaining_ms, 500)
+
+                def _later() -> None:
+                    still = refs_needing_device_tags(
+                        self._device_music_refs,
+                        self._host_tracks_by_guid_for_refs(self._device_music_refs),
+                    )
+                    if still:
+                        self._start_device_tag_enrich(still)
+
+                self.win.root.after(delay_ms, _later)
+
+    def _rebuild_device_music_tree(
+        self,
+        refs: list[DeviceTrackRef],
+        by_guid: dict[str, Track] | None = None,
+    ) -> None:
+        """Chunked Treeview insert for Device → Music (artist → album → track)."""
+        self._cancel_device_populate()
+        self.win.clear_device_track_tree()
+        self._device_track_by_iid.clear()
+        self._device_pending_album_art = []
+
+        if by_guid is None:
+            by_guid = self._host_tracks_by_guid_for_refs(refs)
+        tracks = resolve_device_tracks_for_display(refs, by_guid)
+        if not tracks:
+            return
+
+        # Same default grouping as the library tree (artist → album).
+        ops: list = []
+        groups = group_by_artist_album(tracks)
+        for ag in groups:
+            artist_iid = f"d:{ag.key}"
+            artist_seed = None
+            for album in ag.children:
+                if album.tracks:
+                    artist_seed = album.tracks[0]
+                    break
+            ops.append(
+                (
+                    "group",
+                    "",
+                    artist_iid,
+                    ag.label,
+                    ("group", "group_artist"),
+                    artist_seed,
+                )
+            )
+            for album in ag.children:
+                album_iid = f"d:{album.key}"
+                album_seed = album.tracks[0] if album.tracks else None
+                ops.append(
+                    (
+                        "group",
+                        artist_iid,
+                        album_iid,
+                        album.label,
+                        ("group", "group_album"),
+                        album_seed,
+                    )
+                )
+                for t in album.tracks:
+                    ops.append(("track", album_iid, t))
+
+        def run_chunk(start: int) -> None:
+            self._device_populate_after_id = None
+            end = min(start + _TREE_CHUNK, len(ops))
+            tree = self.win.device_tree
+            for i in range(start, end):
+                op = ops[i]
+                if op[0] == "group":
+                    _, parent, iid, label, tags, seed = op
+                    if not tree.exists(iid):
+                        image = ""
+                        if seed is not None and "group_album" in tags:
+                            art_path = self._host_path_for_device_track(seed)
+                            if art_path:
+                                photo = self.win.album_art_photo_from_disk(
+                                    art_path,
+                                    cache_key=iid,
+                                    size=DEFAULT_THUMB_SIZE,
+                                )
+                                if photo is not None:
+                                    image = photo
+                                else:
+                                    self._device_pending_album_art.append(
+                                        (iid, art_path)
+                                    )
+                        tree.insert(
+                            parent,
+                            "end",
+                            iid=iid,
+                            text="",
+                            image=image,
+                            values=(label, "", "", ""),
+                            tags=tags,
+                            open=True,
+                        )
+                else:
+                    _, parent, track = op
+                    self._insert_device_track_row(parent, track)
+            if end < len(ops):
+                self._device_populate_after_id = self.win.root.after(
+                    1, lambda: run_chunk(end)
+                )
+            else:
+                self._start_device_background_album_art()
+
+        run_chunk(0)
+
+    def _start_device_background_album_art(self) -> None:
+        pending = list(self._device_pending_album_art)
+        if not pending:
+            return
+        self._device_album_art_job_gen += 1
+        gen = self._device_album_art_job_gen
+        size = DEFAULT_THUMB_SIZE
+
+        def work() -> list[tuple[str, str]]:
+            ready: list[tuple[str, str]] = []
+            for iid, path in pending:
+                if ensure_cached_thumb(path, size=size) is not None:
+                    ready.append((iid, path))
+            return ready
+
+        def on_done(ready: list[tuple[str, str]]) -> None:
+            if gen != self._device_album_art_job_gen:
+                return
+            for iid, path in ready:
+                if not self.win.device_tree.exists(iid):
+                    continue
+                photo = self.win.album_art_photo_from_disk(
+                    path, cache_key=iid, size=size
+                )
+                if photo is None:
+                    continue
+                try:
+                    self.win.device_tree.item(iid, image=photo)
+                except Exception:
+                    pass
+
+        def on_error(exc: BaseException) -> None:
+            logger.debug("Device album art job failed: %s", exc)
+
+        def runner() -> None:
+            try:
+                result = work()
+            except BaseException as exc:
+                self.win.root.after(0, lambda: on_error(exc))
+                return
+            self.win.root.after(0, lambda: on_done(result))
+
+        threading.Thread(target=runner, name="device-album-art", daemon=True).start()
+
+    def _start_device_tag_enrich(self, need: list[DeviceTrackRef]) -> None:
+        """Background Get_Trackmetadata for Device music rows without host tags."""
+        if not need or self._device_tag_enrich_inflight:
+            return
+        if not self.device.is_connected():
+            return
+        # Avoid racing another transfer/listing job hard; enrich is best-effort.
+        if self._transfer_busy or self._library_busy:
+            logger.info(
+                "Device tag enrich deferred (busy) count=%s", len(need)
+            )
+            return
+
+        self._device_tag_enrich_inflight = True
+        batch = list(need)
+        device = self.device
+        serial = self._device_serial
+
+        def work():
+            return device_ops.enrich_track_refs(device, batch, stop_on_fatal=True)
+
+        def on_done(result) -> None:
+            self._device_tag_enrich_inflight = False
+            self._mark_usb_quiet(_DEVICE_USB_COOLDOWN_S)
+            if serial != self._device_serial:
+                return
+            updated_by_id = {
+                int(r.item_id or 0): r for r in (result.refs or []) if r is not None
+            }
+            if not updated_by_id:
+                return
+            merged: list[DeviceTrackRef] = []
+            for ref in self._device_music_refs:
+                oid = int(ref.item_id or 0)
+                merged.append(updated_by_id.get(oid, ref))
+            self._device_music_refs = merged
+            by_guid = self._host_tracks_by_guid_for_refs(merged)
+            # Do not re-trigger enrich after this pass.
+            self._rebuild_device_music_tree(merged, by_guid)
+            logger.info(
+                "Device music tags enriched updated=%s failed=%s aborted=%s",
+                result.updated,
+                result.failed,
+                result.aborted,
+            )
+
+        def on_error(exc: BaseException) -> None:
+            self._device_tag_enrich_inflight = False
+            self._mark_usb_quiet(_DEVICE_USB_COOLDOWN_S)
+            logger.warning("Device tag enrich failed: %s", exc)
+
+        logger.info("Device music tag enrich start count=%s", len(batch))
+        self._bg.submit(
+            work,
+            on_done=on_done,
+            on_error=on_error,
+            name="device-music-tag-enrich",
+        )
 
     def _album_seed_paths(self) -> list[str]:
         """One seed track path per album (for warm cache)."""
@@ -1291,6 +1642,8 @@ class AppController:
         self._device_serial = None
         self._device_index_seeded = False
         self._device_index_seed_inflight = False
+        self._device_tag_enrich_inflight = False
+        self._clear_device_music_tree()
 
     def _note_device_session(self, info: DeviceInfo | None) -> None:
         """Remember device key and seed file index once per physical device."""
@@ -1358,6 +1711,8 @@ class AppController:
             logger.info(
                 "Device index seeded serial=%s files=%s", serial, n
             )
+            # Populate Device → Music (GUID join; optional tag enrich after quiet).
+            self._refresh_device_music_tree(enrich_missing_tags=True)
 
         def on_error(exc: BaseException) -> None:
             self._device_index_seed_inflight = False
@@ -1566,6 +1921,9 @@ class AppController:
         self.library = library
         self._populate_listbox(self.library)
         self._sync_library_chrome()
+        # Host GUID index may now resolve Device → Music labels.
+        if self._device_serial and self._device_index_seeded:
+            self._schedule_device_music_tree_refresh(enrich_missing_tags=False)
         logger.info(
             "%s %d tracks (root=%s, reachable=%s)",
             kind,
@@ -2098,6 +2456,8 @@ class AppController:
                 parent_id=DEFAULT_MUSIC_FOLDER_ID,
                 storage_id=DEFAULT_STORAGE_ID,
             )
+            # Debounced rebuild from cache (many sends in a batch).
+            self._schedule_device_music_tree_refresh(enrich_missing_tags=False)
         except Exception:
             logger.debug("device_index record_send failed", exc_info=True)
 
@@ -3382,6 +3742,7 @@ class AppController:
                 logger.debug(
                     "device_index remove after delete failed", exc_info=True
                 )
+            self._schedule_device_music_tree_refresh(enrich_missing_tags=False)
             name = (entry.name or "").strip() or "(unnamed)"
             messagebox.showinfo(
                 "Delete Track",
@@ -3470,6 +3831,7 @@ class AppController:
                             oid,
                             exc_info=True,
                         )
+                self._schedule_device_music_tree_refresh(enrich_missing_tags=False)
                 if result.cancelled:
                     messagebox.showinfo(
                         "Delete All Tracks cancelled",

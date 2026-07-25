@@ -36,6 +36,34 @@ TRACK_FILETYPES = frozenset(
     }
 )
 
+# Audio-only subset (Device tab → Music). Video stays for List Tracks / Get Tracks.
+MUSIC_FILETYPES = frozenset(
+    {
+        1,  # WAV
+        2,  # MP3
+        3,  # WMA
+        4,  # OGG
+        5,  # AUDIBLE
+        6,  # MP4 (often audio on ZEN)
+        7,  # UNDEF_AUDIO
+        30,  # AAC
+        32,  # FLAC
+        33,  # MP2
+        34,  # M4A
+    }
+)
+
+VIDEO_FILETYPES = frozenset(
+    {
+        8,  # WMV
+        9,  # AVI
+        10,  # MPEG
+        11,  # ASF
+        12,  # QT
+        13,  # UNDEF_VIDEO
+    }
+)
+
 TRACK_EXTS = (
     ".mp3",
     ".wma",
@@ -53,6 +81,37 @@ TRACK_EXTS = (
     ".mpeg",
 )
 
+MUSIC_EXTS = (
+    ".mp3",
+    ".wma",
+    ".wav",
+    ".ogg",
+    ".flac",
+    ".aac",
+    ".m4a",
+    ".m4b",
+    ".mp2",
+)
+
+VIDEO_EXTS = (
+    ".wmv",
+    ".avi",
+    ".mpg",
+    ".mpeg",
+    ".mov",
+    ".asf",
+)
+
+# ZEN Vision:M parents that are not the Music category (see remote_naming).
+_NON_MUSIC_PARENT_IDS = frozenset(
+    {
+        120,  # Video
+        124,  # TV
+        128,  # ZENcast / Podcasts
+        116,  # Pictures
+    }
+)
+
 
 def looks_like_track(entry: object) -> bool:
     """True when a listed object is likely music/video (not a hard libmtp gate)."""
@@ -63,24 +122,65 @@ def looks_like_track(entry: object) -> bool:
     return any(name.endswith(ext) for ext in TRACK_EXTS)
 
 
+def looks_like_music(entry: object) -> bool:
+    """True when a listed object is likely audio for the Device → Music tab.
+
+    Excludes video filetypes/extensions and known non-music ZEN parents
+    (Video / TV / ZENcast / Pictures). App-sent tracks live under Music 100.
+    """
+    ft = int(getattr(entry, "filetype", 0) or 0)
+    if ft in VIDEO_FILETYPES:
+        return False
+    name = (getattr(entry, "name", None) or "").strip().lower()
+    if any(name.endswith(ext) for ext in VIDEO_EXTS):
+        return False
+    parent = int(getattr(entry, "parent_id", 0) or 0)
+    if parent in _NON_MUSIC_PARENT_IDS:
+        return False
+    if ft in MUSIC_FILETYPES:
+        return True
+    if any(name.endswith(ext) for ext in MUSIC_EXTS):
+        return True
+    # MP4 under Music (or unknown parent) can be audio; keep if looks_like_track
+    # already would, but not video-parent (handled above).
+    if name.endswith(".mp4") and parent not in _NON_MUSIC_PARENT_IDS:
+        return True
+    return False
+
+
+def _ref_from_file_entry(entry: FileEntry) -> DeviceTrackRef:
+    name = (entry.name or "").strip()
+    return DeviceTrackRef(
+        item_id=int(entry.item_id or 0),
+        name=name,
+        title="",
+        artist="",
+        album="",
+        parent_id=int(entry.parent_id or 0),
+        storage_id=int(entry.storage_id or 0),
+        filetype=int(entry.filetype or 0),
+    )
+
+
 def track_refs_from_files(files: Sequence[FileEntry] | Iterable[FileEntry]) -> list[DeviceTrackRef]:
     """Build track refs from a full file listing (ids/names only; no tags)."""
     result: list[DeviceTrackRef] = []
     for entry in files:
         if not looks_like_track(entry):
             continue
-        name = (entry.name or "").strip()
-        result.append(
-            DeviceTrackRef(
-                item_id=int(entry.item_id or 0),
-                name=name,
-                title="",
-                artist="",
-                parent_id=int(entry.parent_id or 0),
-                storage_id=int(entry.storage_id or 0),
-                filetype=int(entry.filetype or 0),
-            )
-        )
+        result.append(_ref_from_file_entry(entry))
+    return _sort_track_refs(result)
+
+
+def music_refs_from_files(
+    files: Sequence[FileEntry] | Iterable[FileEntry],
+) -> list[DeviceTrackRef]:
+    """Audio-only track refs for the Device tab Music tree (ids/names only)."""
+    result: list[DeviceTrackRef] = []
+    for entry in files:
+        if not looks_like_music(entry):
+            continue
+        result.append(_ref_from_file_entry(entry))
     return _sort_track_refs(result)
 
 
@@ -110,11 +210,16 @@ def merge_track_refs(
 def apply_track_info(ref: DeviceTrackRef, info: DeviceTrackInfo) -> DeviceTrackRef:
     """Overlay Get_Trackmetadata fields onto a listing ref (new frozen instance)."""
     name = (info.name or ref.name or "").strip()
+    tn = int(info.tracknumber or 0)
+    tracknumber = str(tn) if tn > 0 else (ref.tracknumber or "")
     return DeviceTrackRef(
         item_id=int(ref.item_id or info.item_id or 0),
         name=name,
         title=(info.title or "").strip(),
         artist=(info.artist or "").strip(),
+        album=(info.album or "").strip(),
+        date=(info.date or "").strip() or ref.date,
+        tracknumber=tracknumber,
         parent_id=int(info.parent_id or ref.parent_id or 0),
         storage_id=int(info.storage_id or ref.storage_id or 0),
         filetype=int(info.filetype or ref.filetype or 0),
@@ -128,6 +233,9 @@ def apply_host_meta(ref: DeviceTrackRef, meta: TrackMetadata) -> DeviceTrackRef:
         name=ref.name,
         title=(meta.title or "").strip() or ref.title,
         artist=(meta.artist or "").strip() or ref.artist,
+        album=(meta.album or "").strip() or ref.album,
+        date=(meta.date or "").strip() or ref.date,
+        tracknumber=(str(meta.tracknumber or "").strip() or ref.tracknumber),
         parent_id=int(ref.parent_id or 0),
         storage_id=int(ref.storage_id or 0),
         filetype=int(ref.filetype or 0),
@@ -162,7 +270,7 @@ def enrich_refs_from_host(
     refs: Sequence[DeviceTrackRef] | Iterable[DeviceTrackRef],
     by_guid: Mapping[str, Track] | Mapping[str, TrackMetadata],
 ) -> list[DeviceTrackRef]:
-    """Fill artist/title from host library for GUID-named device objects.
+    """Fill artist/title/album from host library for GUID-named device objects.
 
     *by_guid* maps 32-hex guid → ``Track`` or ``TrackMetadata``.
     Non-GUID or unknown names are left unchanged.
@@ -179,10 +287,89 @@ def enrich_refs_from_host(
     return _sort_track_refs(out)
 
 
+def resolve_device_tracks_for_display(
+    refs: Sequence[DeviceTrackRef] | Iterable[DeviceTrackRef],
+    by_guid: Mapping[str, Track] | Mapping[str, TrackMetadata],
+) -> list[Track]:
+    """Build host-shaped ``Track`` rows for the Device music treeview.
+
+    Resolution order per object:
+    1. GUID basename → host library tags (full ``Track.meta`` when available)
+    2. On-device tags already on the ref (Get Track Info / enrich)
+    3. Filename (or ``id=<item_id>``) as the title
+
+    Synthetic paths are ``device:<item_id>:<name>`` so tree iids stay unique
+    and do not collide with the host library tree.
+    """
+    out: list[Track] = []
+    for ref in refs:
+        oid = int(ref.item_id or 0)
+        name = (ref.name or "").strip() or f"id={oid}"
+        g = guid_from_remote_name(ref.name)
+        path = f"device:{oid}:{name}"
+
+        if g and g in by_guid:
+            hit = by_guid[g]
+            if isinstance(hit, Track):
+                # Prefer host path for album-art cache keys; keep device prefix
+                # so library tree iids never collide.
+                host_path = hit.path or path
+                out.append(
+                    Track(
+                        path=f"device:{oid}:{host_path}",
+                        meta=hit.meta,
+                        guid=g,
+                    )
+                )
+            else:
+                out.append(Track(path=path, meta=hit, guid=g))
+            continue
+
+        title = (ref.title or "").strip()
+        artist = (ref.artist or "").strip()
+        album = (ref.album or "").strip()
+        if not title:
+            title = name
+        if not artist:
+            artist = "Unknown Artist"
+        if not album:
+            album = "Unknown Album"
+        tn = (ref.tracknumber or "").strip()
+        meta = TrackMetadata(
+            title=title,
+            artist=artist,
+            albumartist=artist,
+            album=album,
+            date=(ref.date or "").strip(),
+            tracknumber=tn or "01",
+        )
+        out.append(Track(path=path, meta=meta, guid=g or ""))
+    return out
+
+
+def refs_needing_device_tags(
+    refs: Sequence[DeviceTrackRef] | Iterable[DeviceTrackRef],
+    by_guid: Mapping[str, Track] | Mapping[str, TrackMetadata],
+) -> list[DeviceTrackRef]:
+    """Refs that still need Get_Trackmetadata (no host GUID hit, empty title)."""
+    need: list[DeviceTrackRef] = []
+    for ref in refs:
+        g = guid_from_remote_name(ref.name)
+        if g and g in by_guid:
+            continue
+        if (ref.title or "").strip():
+            continue
+        if int(ref.item_id or 0) <= 0:
+            continue
+        need.append(ref)
+    return need
+
+
 def _sort_track_refs(refs: list[DeviceTrackRef]) -> list[DeviceTrackRef]:
     refs.sort(
         key=lambda e: (
             (e.artist or "").casefold(),
+            (e.album or "").casefold(),
             (e.title or "").casefold(),
             (e.name or "").casefold(),
             e.item_id,

@@ -8,8 +8,12 @@ from mtpmanager.domain.device_media import (
     apply_track_info,
     enrich_refs_from_host,
     guid_stems_from_files,
+    looks_like_music,
     looks_like_track,
     merge_track_refs,
+    music_refs_from_files,
+    refs_needing_device_tags,
+    resolve_device_tracks_for_display,
     track_refs_from_files,
 )
 from mtpmanager.domain.models import (
@@ -115,6 +119,32 @@ class MergeTrackRefsTests(unittest.TestCase):
         self.assertEqual(by_id[20].name, "b.mp3")
 
 
+class LooksLikeMusicTests(unittest.TestCase):
+    def test_accepts_audio(self) -> None:
+        self.assertTrue(looks_like_music(_file(1, "a.mp3", filetype=2)))
+        self.assertTrue(looks_like_music(_file(2, "b.flac", filetype=0)))
+
+    def test_rejects_video_and_zen_cast(self) -> None:
+        self.assertFalse(looks_like_music(_file(1, "clip.avi", filetype=9)))
+        self.assertFalse(
+            looks_like_music(_file(2, "show.wmv", filetype=8, parent_id=120))
+        )
+        self.assertFalse(
+            looks_like_music(_file(3, "pod.mp3", filetype=2, parent_id=128))
+        )
+
+
+class MusicRefsFromFilesTests(unittest.TestCase):
+    def test_filters_video(self) -> None:
+        files = [
+            _file(10, "a.mp3", filetype=2),
+            _file(11, "clip.avi", filetype=9),
+            _file(12, "b.wma", filetype=3),
+        ]
+        refs = music_refs_from_files(files)
+        self.assertEqual([r.item_id for r in refs], [10, 12])
+
+
 class ApplyTrackInfoTests(unittest.TestCase):
     def test_overlays_tags_keeps_id(self) -> None:
         ref = DeviceTrackRef(
@@ -131,6 +161,9 @@ class ApplyTrackInfoTests(unittest.TestCase):
             name="short.mp3",
             title="Full Title",
             artist="The Artist",
+            album="The Album",
+            date="2005",
+            tracknumber=3,
             parent_id=100,
             storage_id=0x00010001,
             filetype=2,
@@ -139,6 +172,9 @@ class ApplyTrackInfoTests(unittest.TestCase):
         self.assertEqual(out.item_id, 42)
         self.assertEqual(out.title, "Full Title")
         self.assertEqual(out.artist, "The Artist")
+        self.assertEqual(out.album, "The Album")
+        self.assertEqual(out.date, "2005")
+        self.assertEqual(out.tracknumber, "3")
         self.assertEqual(out.name, "short.mp3")
         self.assertEqual(out.parent_id, 100)
 
@@ -187,7 +223,11 @@ class GuidJoinTests(unittest.TestCase):
         by_guid = {
             g: Track(
                 path="/x.mp3",
-                meta=TrackMetadata(title="Host Title", artist="Host Artist"),
+                meta=TrackMetadata(
+                    title="Host Title",
+                    artist="Host Artist",
+                    album="Host Album",
+                ),
                 guid=g,
             )
         }
@@ -195,8 +235,68 @@ class GuidJoinTests(unittest.TestCase):
         by_id = {r.item_id: r for r in out}
         self.assertEqual(by_id[1].title, "Host Title")
         self.assertEqual(by_id[1].artist, "Host Artist")
+        self.assertEqual(by_id[1].album, "Host Album")
         self.assertEqual(by_id[2].title, "")
         self.assertEqual(by_id[2].name, "foreign.mp3")
+
+    def test_resolve_device_tracks_for_display_priority(self) -> None:
+        g = new_track_guid()
+        refs = [
+            DeviceTrackRef(
+                item_id=1,
+                name=f"{g}.mp3",
+                title="Device Title",
+                artist="Device Artist",
+                album="Device Album",
+                filetype=2,
+            ),
+            DeviceTrackRef(
+                item_id=2,
+                name="tagged.mp3",
+                title="On Device",
+                artist="Band",
+                album="LP",
+                filetype=2,
+            ),
+            DeviceTrackRef(
+                item_id=3,
+                name="orphan.mp3",
+                title="",
+                artist="",
+                album="",
+                filetype=2,
+            ),
+        ]
+        by_guid = {
+            g: Track(
+                path="/host/song.mp3",
+                meta=TrackMetadata(
+                    title="Host Title",
+                    artist="Host Artist",
+                    album="Host Album",
+                    date="2010",
+                    tracknumber="4",
+                ),
+                guid=g,
+            )
+        }
+        tracks = resolve_device_tracks_for_display(refs, by_guid)
+        self.assertEqual(len(tracks), 3)
+        # GUID → host wins over device tags.
+        self.assertEqual(tracks[0].meta.title, "Host Title")
+        self.assertEqual(tracks[0].meta.album, "Host Album")
+        self.assertTrue(tracks[0].path.startswith("device:1:"))
+        self.assertIn("/host/song.mp3", tracks[0].path)
+        # Device tags when no GUID hit.
+        self.assertEqual(tracks[1].meta.title, "On Device")
+        self.assertEqual(tracks[1].meta.artist, "Band")
+        self.assertEqual(tracks[1].meta.album, "LP")
+        # Filename fallback.
+        self.assertEqual(tracks[2].meta.title, "orphan.mp3")
+        self.assertEqual(tracks[2].meta.artist, "Unknown Artist")
+
+        need = refs_needing_device_tags(refs, by_guid)
+        self.assertEqual([r.item_id for r in need], [3])
 
 
 if __name__ == "__main__":

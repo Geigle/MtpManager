@@ -21,7 +21,7 @@ from collections.abc import Iterable, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 
-from mtpmanager.domain.device_media import track_refs_from_files
+from mtpmanager.domain.device_media import music_refs_from_files, track_refs_from_files
 from mtpmanager.domain.models import DeviceInfo, DeviceTrackRef, FileEntry
 from mtpmanager.domain.track_id import guid_from_remote_name, is_track_guid
 from mtpmanager.infra.library_index import index_path
@@ -659,6 +659,15 @@ def list_cached_track_refs(
 ) -> list[DeviceTrackRef]:
     """Media-filtered track refs from cached files."""
     return track_refs_from_files(list_cached_files(serial, path=path))
+
+
+def list_cached_music_refs(
+    serial: str,
+    *,
+    path: Path | None = None,
+) -> list[DeviceTrackRef]:
+    """Audio-only track refs from cache (Device tab → Music)."""
+    return music_refs_from_files(list_cached_files(serial, path=path))
 
 
 def device_list_is_complete(
