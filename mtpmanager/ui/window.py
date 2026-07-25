@@ -148,7 +148,7 @@ class MainWindow:
         self.root = root or Tk()
         self.root.title("MTP Manager")
         self.root.geometry("1000x600")
-        self.root["borderwidth"] = 3
+        self.root["borderwidth"] = 1
         self.root["relief"] = "sunken"
 
         # Menubar: Library | Transfer | Device | Config
@@ -219,7 +219,7 @@ class MainWindow:
         self.menu_album_ctx.add_command(label=CTX_SYNC_ALBUM_GROUP)
 
         # Status toolbar: path + track count only (no duplicate title header).
-        library_toolbar = Frame(self.root, borderwidth=3, relief="sunken")
+        library_toolbar = Frame(self.root, borderwidth=1, relief="sunken")
         library_toolbar.pack(side=TOP, fill=X, padx=2, pady=2)
 
         Label(library_toolbar, text="Library:").pack(side=LEFT, padx=(6, 2), pady=4)
@@ -237,7 +237,7 @@ class MainWindow:
         # Pack bottom bar *before* the expanding body so it always keeps a
         # visible strip (Tk expand can otherwise starve a late BOTTOM pack).
         bottomframe = Frame(self.root)
-        bottomframe["borderwidth"] = 3
+        bottomframe["borderwidth"] = 1
         bottomframe["relief"] = "sunken"
         bottomframe.pack(side=BOTTOM, fill=X)
 
@@ -269,14 +269,14 @@ class MainWindow:
 
         # Fixed-width left column: context (selection) + device subframes.
         leftframe = Frame(body, width=_LEFT_PANEL_WIDTH)
-        leftframe["borderwidth"] = 3
+        leftframe["borderwidth"] = 1
         leftframe["relief"] = "sunken"
         leftframe.pack(side=LEFT, fill=Y)
         leftframe.pack_propagate(False)
         self.leftframe = leftframe
 
         rightframe = Frame(body)
-        rightframe["borderwidth"] = 3
+        rightframe["borderwidth"] = 1
         rightframe["relief"] = "sunken"
         rightframe.pack(side=RIGHT, fill=BOTH, expand=True)
 
@@ -336,9 +336,33 @@ class MainWindow:
         )
         self.lbl_context_detail.pack(padx=6, pady=(4, 6), anchor="nw")
 
-        Label(rightframe, text="Tracks").pack()
-        tree_frame = Frame(rightframe)
+        self.media_notebook = ttk.Notebook(rightframe)
+        self.media_notebook.pack(side=TOP, fill=BOTH, expand=True, padx=2, pady=2)
+        self.musicLibrary_tab = Frame(self.media_notebook)
+        self.videoLibrary_tab = Frame(self.media_notebook)
+        self.audiobooksLibrary_tab = Frame(self.media_notebook)
+        self.podcastsLibrary_tab = Frame(self.media_notebook)
+        self.device_tab = Frame(self.media_notebook)
+        self.media_notebook.add(self.musicLibrary_tab, text="Music")
+        self.media_notebook.add(self.videoLibrary_tab, text="Video")
+        self.media_notebook.add(self.audiobooksLibrary_tab, text="Audiobooks")
+        self.media_notebook.add(self.podcastsLibrary_tab, text="Podcasts")
+        self.media_notebook.add(self.device_tab, text="Device")
+
+        tree_frame = Frame(self.musicLibrary_tab)
         tree_frame.pack(fill=BOTH, expand=True)
+
+        vl_tree_frame = Frame(self.videoLibrary_tab)
+        vl_tree_frame.pack(fill=BOTH, expand=True)
+
+        ab_tree_frame = Frame(self.audiobooksLibrary_tab)
+        ab_tree_frame.pack(fill=BOTH, expand=True)
+
+        p_tree_frame = Frame(self.podcastsLibrary_tab)
+        p_tree_frame.pack(fill=BOTH, expand=True)
+
+        d_tree_frame = Frame(self.device_tab)
+        d_tree_frame.pack(fill=BOTH, expand=True)
 
         yscroll = Scrollbar(tree_frame)
         yscroll.pack(side=RIGHT, fill=Y)
