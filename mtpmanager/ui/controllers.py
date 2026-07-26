@@ -1022,7 +1022,7 @@ class AppController:
                             image=image,
                             values=(label, "", "", ""),
                             tags=tags,
-                            open=True,
+                            open=False,
                         )
                         if seed is not None:
                             self._group_seed_by_iid[iid] = seed
@@ -1266,7 +1266,7 @@ class AppController:
                             image=image,
                             values=(label, "", "", ""),
                             tags=tags,
-                            open=True,
+                            open=False,
                         )
                 else:
                     _, parent, track = op
@@ -1358,7 +1358,7 @@ class AppController:
                             text="",
                             values=(label, "", "", ""),
                             tags=tags,
-                            open=True,
+                            open=False,
                         )
                 else:
                     _, parent, track = op
