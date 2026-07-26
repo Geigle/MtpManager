@@ -367,6 +367,52 @@ class LibraryIndexTests(unittest.TestCase):
             self.assertEqual(lib.tracks[0].meta.title, "T")
 
 
+class LibraryIndexStreamTests(unittest.TestCase):
+    def test_on_progress_streams_meta_and_batches(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "Music"
+            root.mkdir()
+            files = []
+            for i in range(10):
+                p = root / f"t{i:02d}.mp3"
+                p.write_bytes(b"x")
+                files.append(p)
+            lib = Library(
+                tracks=[_track(str(p), title=f"T{i}") for i, p in enumerate(files)],
+                root_paths=[str(root)],
+            )
+            dest = Path(tmp) / "library_index.db"
+            save_library_index(lib, path=dest)
+
+            events: list[tuple] = []
+
+            def on_progress(kind, *args) -> None:
+                events.append((kind, args))
+
+            loaded = load_library_index(
+                path=dest,
+                migrate_json=False,
+                on_progress=on_progress,
+                progress_batch_first=1,
+                progress_batch_second=1,
+                progress_batch_cap=4,
+                progress_yield_s=0.0,
+            )
+            self.assertIsNotNone(loaded)
+            assert loaded is not None
+            self.assertEqual(len(loaded.tracks), 10)
+            kinds = [e[0] for e in events]
+            self.assertEqual(kinds[0], "meta")
+            self.assertEqual(events[0][1][0], [str(root)])
+            self.assertEqual(events[0][1][1], 10)
+            batch_events = [e for e in events if e[0] == "batch"]
+            self.assertGreaterEqual(len(batch_events), 2)
+            kept_sizes = [len(e[1][0]) for e in batch_events]
+            # Fibonacci 1,1,2,3,4(cap remainder path) — first sizes climb.
+            self.assertEqual(kept_sizes[0], 1)
+            self.assertEqual(sum(kept_sizes), 10)
+
+
 class NormalizeRootsAndScanTests(unittest.TestCase):
     def test_normalize_library_roots_dedupes_and_drops_empty(self) -> None:
         roots = normalize_library_roots(["", "/a/b", "/a/b/", "/a/c"])

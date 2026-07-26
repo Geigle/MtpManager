@@ -14,6 +14,8 @@ import json
 import logging
 import os
 import sqlite3
+import time
+from collections.abc import Callable
 from dataclasses import fields
 from datetime import datetime, timezone
 from pathlib import Path
@@ -334,12 +336,30 @@ def load_library_index(
     path: Path | None = None,
     drop_missing_files: bool = True,
     migrate_json: bool = True,
+    keep_missing_if_roots_unreachable: bool = False,
+    on_progress: Callable[..., None] | None = None,
+    progress_batch_first: int = 1,
+    progress_batch_second: int = 1,
+    progress_batch_cap: int = 512,
+    progress_yield_s: float = 0.015,
 ) -> Library | None:
     """Load a Library from the SQLite index.
 
     Returns None if the DB is missing/unreadable and no JSON migration applies.
     When *drop_missing_files* is True, tracks whose paths no longer exist
-    on disk are omitted (count logged).
+    on disk are omitted (count logged). When *keep_missing_if_roots_unreachable*
+    is also True, missing-file drops are skipped if **no** root directory is
+    present (stale offline index still displays).
+
+    *on_progress* (optional, may run on a worker thread) receives:
+
+    - ``("meta", root_paths, row_count)`` once roots are known
+    - ``("batch", tracks, kept_count, row_count)`` for each Fibonacci-sized
+      batch of kept tracks (so a UI can paint while load continues)
+
+    A short *progress_yield_s* sleep runs after each progress batch so a Tk
+    poll loop can paint between batches (otherwise a fast SSD load queues
+    every batch before the first UI refresh).
     """
     dest = path if path is not None else index_path()
 
@@ -373,6 +393,12 @@ def load_library_index(
                         path=dest,
                         drop_missing_files=drop_missing_files,
                         migrate_json=False,
+                        keep_missing_if_roots_unreachable=keep_missing_if_roots_unreachable,
+                        on_progress=on_progress,
+                        progress_batch_first=progress_batch_first,
+                        progress_batch_second=progress_batch_second,
+                        progress_batch_cap=progress_batch_cap,
+                        progress_yield_s=progress_yield_s,
                     )
             logger.warning("Library index %s: no library_meta row", dest)
             return None
@@ -388,19 +414,68 @@ def load_library_index(
             logger.warning("Library index %s: no library roots", dest)
             return None
 
-        rows = conn.execute(
+        any_root_live = any(os.path.isdir(r) for r in roots)
+        should_drop = bool(drop_missing_files)
+        if should_drop and keep_missing_if_roots_unreachable and not any_root_live:
+            should_drop = False
+            logger.warning(
+                "Library index root(s) not reachable: %r — keeping stale rows",
+                roots,
+            )
+
+        row_count_raw = conn.execute("SELECT COUNT(*) FROM tracks").fetchone()
+        row_count = int(row_count_raw[0] or 0) if row_count_raw is not None else 0
+        if on_progress is not None:
+            try:
+                on_progress("meta", list(roots), row_count)
+            except Exception:
+                logger.debug("library index on_progress(meta) failed", exc_info=True)
+
+        cursor = conn.execute(
             "SELECT * FROM tracks ORDER BY path COLLATE NOCASE"
-        ).fetchall()
+        )
         tracks: list[Track] = []
         dropped = 0
-        for row in rows:
+        batch: list[Track] = []
+        fib_a = max(1, int(progress_batch_first))
+        fib_b = max(1, int(progress_batch_second))
+        cap = max(1, int(progress_batch_cap))
+        next_batch = min(fib_a, cap)
+
+        def flush_batch() -> None:
+            nonlocal batch, fib_a, fib_b, next_batch
+            if not batch or on_progress is None:
+                batch = []
+                return
+            payload = list(batch)
+            batch = []
+            try:
+                on_progress("batch", payload, len(tracks), row_count)
+            except Exception:
+                logger.debug(
+                    "library index on_progress(batch) failed", exc_info=True
+                )
+            # Let the UI thread drain progress and paint rows.
+            if progress_yield_s > 0:
+                time.sleep(progress_yield_s)
+            fib_a, fib_b = fib_b, fib_a + fib_b
+            next_batch = min(fib_a, cap)
+
+        for row in cursor:
             track = _track_from_row(row)
             if not track.path:
                 continue
-            if drop_missing_files and not os.path.isfile(track.path):
+            if should_drop and not os.path.isfile(track.path):
                 dropped += 1
                 continue
             tracks.append(track)
+            if on_progress is not None:
+                batch.append(track)
+                if len(batch) >= next_batch:
+                    flush_batch()
+
+        if on_progress is not None and batch:
+            flush_batch()
 
         if dropped:
             logger.info(

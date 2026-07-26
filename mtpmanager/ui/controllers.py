@@ -6,6 +6,7 @@ import logging
 import os
 import threading
 import time
+from collections.abc import Callable
 from tkinter import DISABLED, NORMAL, filedialog, messagebox
 
 from mtpmanager.app import device_ops
@@ -107,8 +108,43 @@ from mtpmanager.ui.window import MainWindow
 
 logger = logging.getLogger(__name__)
 
-# Insert this many tree rows per idle slice to keep the UI responsive.
-_TREE_CHUNK = 80
+# Progressive Treeview inserts: Fibonacci chunk sizes (1, 1, 2, 3, 5, …)
+# so the first rows appear immediately, then fewer/larger idle slices as the
+# index deepens (less after() overhead on huge libraries). Cap avoids one
+# multi-second freeze when fib outgrows what Tk can insert smoothly.
+_TREE_CHUNK_FIB_FIRST = 1
+_TREE_CHUNK_FIB_SECOND = 1
+_TREE_CHUNK_CAP = 512
+
+
+def fibonacci_chunk_bounds(
+    total: int,
+    *,
+    first: int = _TREE_CHUNK_FIB_FIRST,
+    second: int = _TREE_CHUNK_FIB_SECOND,
+    cap: int = _TREE_CHUNK_CAP,
+) -> list[tuple[int, int]]:
+    """Return ``[(start, end), …]`` covering ``range(total)`` with Fib lengths.
+
+    Lengths follow Fibonacci from *first*/*second*, each clamped to *cap* and
+    to the remaining count. Empty *total* yields an empty list.
+    """
+    if total <= 0:
+        return []
+    if cap < 1:
+        cap = 1
+    a = max(1, int(first))
+    b = max(1, int(second))
+    bounds: list[tuple[int, int]] = []
+    start = 0
+    while start < total:
+        size = min(a, cap, total - start)
+        end = start + size
+        bounds.append((start, end))
+        start = end
+        a, b = b, a + b
+    return bounds
+
 
 # Experimental auto-connect poll interval (ms).
 _DEVICE_POLL_MS = 3000
@@ -129,6 +165,9 @@ class AppController:
         self._bg = TkBackgroundRunner(window.root)
         self._library_busy = False
         self._transfer_busy = False
+        # Progressive index restore: batches paint before load finishes.
+        self._index_stream_active = False
+        self._index_stream_total = 0
         # Modeless Library → Manage Library… window (if open).
         self._manage_library_dlg: ManageLibraryDialog | None = None
         # Cooperative cancel for transfer / device batch jobs (checked between items).
@@ -948,9 +987,14 @@ class AppController:
             for t in ordered:
                 ops.append(("track", "", t))
 
-        def run_chunk(start: int) -> None:
+        chunks = fibonacci_chunk_bounds(len(ops))
+        if not chunks:
+            self.win.set_tracks_usable(self._library_root_reachable())
+            return
+
+        def run_chunk(chunk_i: int) -> None:
             self._populate_after_id = None
-            end = min(start + _TREE_CHUNK, len(ops))
+            start, end = chunks[chunk_i]
             tree = self.win.tree
             for i in range(start, end):
                 op = ops[i]
@@ -985,9 +1029,10 @@ class AppController:
                 else:
                     _, parent, track = op
                     self._insert_track_row(parent, track)
-            if end < len(ops):
+            nxt = chunk_i + 1
+            if nxt < len(chunks):
                 self._populate_after_id = self.win.root.after(
-                    1, lambda: run_chunk(end)
+                    1, lambda i=nxt: run_chunk(i)
                 )
             else:
                 self.win.set_tracks_usable(self._library_root_reachable())
@@ -1185,9 +1230,13 @@ class AppController:
                 for t in album.tracks:
                     ops.append(("track", album_iid, t))
 
-        def run_chunk(start: int) -> None:
+        chunks = fibonacci_chunk_bounds(len(ops))
+        if not chunks:
+            return
+
+        def run_chunk(chunk_i: int) -> None:
             self._device_populate_after_id = None
-            end = min(start + _TREE_CHUNK, len(ops))
+            start, end = chunks[chunk_i]
             tree = self.win.device_tree
             for i in range(start, end):
                 op = ops[i]
@@ -1222,9 +1271,10 @@ class AppController:
                 else:
                     _, parent, track = op
                     self._insert_device_track_row(parent, track)
-            if end < len(ops):
+            nxt = chunk_i + 1
+            if nxt < len(chunks):
                 self._device_populate_after_id = self.win.root.after(
-                    1, lambda: run_chunk(end)
+                    1, lambda i=nxt: run_chunk(i)
                 )
             else:
                 self._start_device_background_album_art()
@@ -1288,9 +1338,13 @@ class AppController:
             for _ref, track in paired:
                 ops.append(("track", folder_iid, track))
 
-        def run_chunk(start: int) -> None:
+        chunks = fibonacci_chunk_bounds(len(ops))
+        if not chunks:
+            return
+
+        def run_chunk(chunk_i: int) -> None:
             self._device_video_populate_after_id = None
-            end = min(start + _TREE_CHUNK, len(ops))
+            start, end = chunks[chunk_i]
             tree = self.win.device_video_tree
             for i in range(start, end):
                 op = ops[i]
@@ -1309,9 +1363,10 @@ class AppController:
                 else:
                     _, parent, track = op
                     self._insert_device_video_row(parent, track)
-            if end < len(ops):
+            nxt = chunk_i + 1
+            if nxt < len(chunks):
                 self._device_video_populate_after_id = self.win.root.after(
-                    1, lambda: run_chunk(end)
+                    1, lambda i=nxt: run_chunk(i)
                 )
 
         run_chunk(0)
@@ -2043,34 +2098,37 @@ class AppController:
         n = warm_album_thumbs(seeds, size=DEFAULT_THUMB_SIZE)
         logger.info("Warmed %d album art cache entr(y/ies)", n)
 
+    def _start_deferred_art_warm(self, library: Library) -> None:
+        """Warm album thumbs off the UI path so index→tree is not blocked."""
+        if not library.tracks:
+            return
+
+        def work() -> None:
+            try:
+                AppController._warm_art_for_library(library)
+            except Exception:
+                logger.debug("Deferred album art warm failed", exc_info=True)
+
+        threading.Thread(
+            target=work, name="mtpmanager-art-warm", daemon=True
+        ).start()
+
     @staticmethod
-    def _load_index_worker() -> Library | None:
-        """Worker: load durable index and filter missing files if any root is live."""
-        loaded = load_library_index(drop_missing_files=False)
-        if loaded is None or not loaded.root_paths:
-            return None
-        any_reachable = any(os.path.isdir(r) for r in loaded.root_paths)
-        if any_reachable:
-            live = [t for t in loaded.tracks if os.path.isfile(t.path)]
-            dropped = len(loaded.tracks) - len(live)
-            if dropped:
-                logger.info(
-                    "Library index: dropped %d missing file(s); kept %d",
-                    dropped,
-                    len(live),
-                )
-            lib = Library(tracks=live, root_paths=list(loaded.root_paths))
-        else:
-            logger.warning(
-                "Library index root(s) not reachable: %r — showing stale index",
-                loaded.root_paths,
-            )
-            lib = loaded
-        try:
-            AppController._warm_art_for_library(lib)
-        except Exception:
-            logger.debug("Album art warm after index load failed", exc_info=True)
-        return lib
+    def _load_index_worker_with_report(
+        report: Callable[..., None] | None,
+    ) -> Library | None:
+        """Load durable index; *report* streams Fibonacci batches to the UI.
+
+        Does **not** warm album art (that blocked the tree for seconds).
+        """
+        return load_library_index(
+            drop_missing_files=True,
+            keep_missing_if_roots_unreachable=True,
+            on_progress=report,
+            progress_batch_first=_TREE_CHUNK_FIB_FIRST,
+            progress_batch_second=_TREE_CHUNK_FIB_SECOND,
+            progress_batch_cap=_TREE_CHUNK_CAP,
+        )
 
     @staticmethod
     def _scan_and_save_worker(roots: list[str]) -> tuple[Library, str | None]:
@@ -2078,6 +2136,7 @@ class AppController:
 
         Returns (library, save_error_message). Scan failures raise; save failures
         are returned so the UI can still show the scanned library.
+        Album art is warmed after the UI starts populating (not here).
         """
         library = scan_library_roots(roots)
         try:
@@ -2085,15 +2144,67 @@ class AppController:
         except OSError as e:
             logger.exception("Failed to save library index")
             return library, str(e)
-        # Warm album thumbs while still off the UI thread (same job as scan).
-        try:
-            AppController._warm_art_for_library(library)
-        except Exception:
-            logger.debug("Album art warm after scan failed", exc_info=True)
         return library, None
+
+    def _on_index_restore_progress(self, kind: str, *args) -> None:
+        """Main-thread: paint tree rows while the worker still reads SQLite."""
+        if kind == "meta":
+            roots = list(args[0] or [])
+            total = int(args[1] or 0) if len(args) > 1 else 0
+            self._index_stream_total = total
+            self._cancel_populate()
+            self.win.clear_track_tree()
+            self._track_by_iid.clear()
+            self._iid_by_path.clear()
+            self._group_seed_by_iid.clear()
+            self._context_group_seed = None
+            self._pending_album_art = []
+            self.library = Library(tracks=[], root_paths=roots)
+            self._index_stream_active = True
+            msg = (
+                f"Loading index… 0/{total}"
+                if total > 0
+                else "Loading index…"
+            )
+            self.win.set_library_status(
+                track_count=0,
+                root_paths=roots,
+                root_reachable=any(os.path.isdir(r) for r in roots) if roots else True,
+                busy_message=msg,
+            )
+            return
+
+        if kind != "batch" or not self._index_stream_active:
+            return
+
+        batch = list(args[0] or [])
+        kept = int(args[1] or 0) if len(args) > 1 else len(self.library.tracks) + len(batch)
+        total = int(args[2] or 0) if len(args) > 2 else self._index_stream_total
+        if not batch:
+            return
+
+        # Path-order flat rows while loading; final sort rebuild happens on done.
+        self.library.tracks.extend(batch)
+        for track in batch:
+            self._insert_track_row("", track)
+
+        msg = (
+            f"Loading index… {kept}/{total}"
+            if total > 0
+            else f"Loading index… {kept}"
+        )
+        self.win.set_library_status(
+            track_count=kept,
+            root_paths=list(self.library.root_paths),
+            root_reachable=self._library_root_reachable()
+            if self.library.root_paths
+            else True,
+            busy_message=msg,
+        )
 
     def _on_library_job_done(self, library: Library | None, *, kind: str) -> None:
         self._library_busy = False
+        self._index_stream_active = False
         if library is None:
             self.library = Library()
             self._cancel_populate()
@@ -2107,6 +2218,10 @@ class AppController:
             return
 
         self.library = library
+        # Do not block tree paint on album-art cache; warm in parallel.
+        self._start_deferred_art_warm(library)
+        # Rebuild with the active sort (Artist hierarchy, etc.). Progressive
+        # restore used a flat path-order preview; this applies Fibonacci chunks.
         self._populate_listbox(self.library)
         self._sync_library_chrome()
         # Host GUID index may now resolve Device → Music labels.
@@ -2131,19 +2246,29 @@ class AppController:
 
     def _on_library_job_error(self, exc: BaseException, *, title: str) -> None:
         self._library_busy = False
+        self._index_stream_active = False
         self._sync_library_chrome()
         logger.exception("%s", title)
         messagebox.showerror(title, str(exc))
 
     def _start_index_restore(self) -> None:
-        """Background load of durable index (startup; non-blocking)."""
+        """Background load of durable index; stream rows into the tree."""
         self._set_library_busy(True, message="Loading index…")
+        self._index_stream_active = False
+        self._index_stream_total = 0
+
+        def work() -> Library | None:
+            gen = self._bg.generation
+            report = self._bg.progress_callback(gen)
+            return AppController._load_index_worker_with_report(report)
+
         self._bg.submit(
-            self._load_index_worker,
+            work,
             on_done=lambda lib: self._on_library_job_done(lib, kind="Restored"),
             on_error=lambda e: self._on_library_job_error(
                 e, title="Library index failed"
             ),
+            on_progress=self._on_index_restore_progress,
             name="library-restore",
         )
 
