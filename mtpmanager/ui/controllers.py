@@ -28,8 +28,11 @@ from mtpmanager.domain.library_sort import (
     SortPrimary,
     group_by_album,
     group_by_artist_album,
+    group_by_artist_dash_album,
+    group_by_directory,
     group_by_year,
     iter_track_cells,
+    next_artist_column_sort,
     sort_tracks_flat,
 )
 from mtpmanager.domain.device_media import (
@@ -201,7 +204,8 @@ class AppController:
         self._device_tree_refresh_after_id: str | None = None
         self._device_video_populate_after_id: str | None = None
         self._active_profile: DeviceProfile | None = None
-        self._sort_primary = SortPrimary.ARTIST
+        # Default: "{artist} - {album}" (Artist-column option 3; VA via algorithm).
+        self._sort_primary = SortPrimary.ARTIST_ALBUM_COMBO
         self._sort_reverse = False
         self._track_by_iid: dict[str, Track] = {}
         self._iid_by_path: dict[str, str] = {}
@@ -654,6 +658,19 @@ class AppController:
                 artist_selection_detail(primary_artist(seed), len(tracks))
             )
             return
+        if "group_directory" in tags and seed is not None:
+            folder = os.path.basename(
+                (os.path.dirname(seed.path) or seed.path).rstrip(os.sep + "/")
+            ) or (os.path.dirname(seed.path) or seed.path)
+            self.win.set_context_detail(
+                album_selection_detail(
+                    folder,
+                    artist="",
+                    track_count=len(tracks),
+                    year="",
+                )
+            )
+            return
         if "group_album" in tags and seed is not None:
             year = year_from_date(seed.meta.date or "") or ""
             self.win.set_context_detail(
@@ -710,6 +727,13 @@ class AppController:
             self.win.menu_artist_ctx.entryconfig(
                 0, label=f"Sync all from {artist}"
             )
+        elif "group_directory" in tagset:
+            folder = os.path.basename(
+                (os.path.dirname(seed.path) or seed.path).rstrip(os.sep + "/")
+            ) or "folder"
+            self.win.menu_album_ctx.entryconfig(
+                0, label=f"Sync folder {folder}"
+            )
         elif "group_album" in tagset:
             album = seed.meta.album or "Unknown Album"
             self.win.menu_album_ctx.entryconfig(
@@ -717,7 +741,7 @@ class AppController:
             )
 
     def _sync_from_seed(self, seed: Track | None, *, kind: str) -> None:
-        """Run filter_by_artist / filter_by_album from a seed track."""
+        """Run filter_by_artist / filter_by_album / directory from a seed track."""
         if not self._require_sync_ready():
             return
         if seed is None:
@@ -731,6 +755,17 @@ class AppController:
                 primary_artist(seed),
                 len(matches),
             )
+            label = f"Artist: {primary_artist(seed)}"
+            job_kind = "artist"
+        elif kind == "directory":
+            matches = self.library.filter_by_directory(seed)
+            matches.sort(key=lambda t: t.path)
+            folder = os.path.basename(
+                (os.path.dirname(seed.path) or seed.path).rstrip(os.sep + "/")
+            ) or "folder"
+            logger.info("Directory %s: %d tracks", folder, len(matches))
+            label = f"Folder: {folder}"
+            job_kind = "album"
         else:
             matches = self.library.filter_by_album(seed)
             matches.sort(key=lambda t: t.path)
@@ -739,15 +774,11 @@ class AppController:
                 seed.meta.album,
                 len(matches),
             )
+            label = f"Album: {seed.meta.album or 'Unknown Album'}"
+            job_kind = "album"
         if not matches:
             messagebox.showinfo("Sync", "No matching tracks found.")
             return
-        if kind == "artist":
-            label = f"Artist: {primary_artist(seed)}"
-            job_kind = "artist"
-        else:
-            label = f"Album: {seed.meta.album or 'Unknown Album'}"
-            job_kind = "album"
         self._transfer_many(
             matches,
             self._target_format(),
@@ -756,20 +787,36 @@ class AppController:
         )
 
     def on_sort_heading(self, col: str) -> None:
-        """Column heading click: set primary sort (toggle reverse if same)."""
-        mapping = {
-            "#0": SortPrimary.TITLE,  # track # column → title-like flat order
-            "title": SortPrimary.TITLE,
-            "artist": SortPrimary.ARTIST,
-            "album": SortPrimary.ALBUM,
-            "year": SortPrimary.YEAR,
-        }
-        primary = mapping.get(col, SortPrimary.ARTIST)
-        if primary == self._sort_primary:
-            self._sort_reverse = not self._sort_reverse
+        """Column heading click: set primary sort (toggle reverse if same).
+
+        - **Default:** ``{artist} - {album}`` (Artist-column option 3)
+        - **Artist** cycles four modes (see :func:`next_artist_column_sort`):
+          1. Artist→Album→Track A–Z
+          2. Same, Z–A
+          3. ``{artist} - {album}``→Track (VA algorithm; **startup default**)
+          4. Same as 3, reverse
+        - Album: ``{album} - {artist}`` → Track
+        - Title / #0: flat title order
+        - Year: year groups
+        """
+        if col == "artist":
+            self._sort_primary, self._sort_reverse = next_artist_column_sort(
+                self._sort_primary,
+                self._sort_reverse,
+            )
         else:
-            self._sort_primary = primary
-            self._sort_reverse = False
+            mapping = {
+                "#0": SortPrimary.TITLE,  # track # column → title-like flat order
+                "title": SortPrimary.TITLE,
+                "album": SortPrimary.ALBUM,
+                "year": SortPrimary.YEAR,
+            }
+            primary = mapping.get(col, SortPrimary.ARTIST_ALBUM_COMBO)
+            if primary == self._sort_primary:
+                self._sort_reverse = not self._sort_reverse
+            else:
+                self._sort_primary = primary
+                self._sort_reverse = False
         logger.info(
             "Library sort primary=%s reverse=%s",
             self._sort_primary.value,
@@ -906,7 +953,30 @@ class AppController:
         # track op: ("track", parent, track)
         ops: list = []
 
-        if primary == SortPrimary.ARTIST:
+        if primary == SortPrimary.DIRECTORY:
+            groups = group_by_directory(tracks)
+            if reverse:
+                groups = list(reversed(groups))
+            for g in groups:
+                seed = g.tracks[0] if g.tracks else None
+                # group_album tag enables album-art thumbs; directory identity
+                # is separate for context/selection copy.
+                ops.append(
+                    (
+                        "group",
+                        "",
+                        g.key,
+                        g.label,
+                        ("group", "group_directory", "group_album"),
+                        seed,
+                    )
+                )
+                gtracks = list(g.tracks)
+                if reverse:
+                    gtracks = list(reversed(gtracks))
+                for t in gtracks:
+                    ops.append(("track", g.key, t))
+        elif primary == SortPrimary.ARTIST:
             groups = group_by_artist_album(tracks)
             if reverse:
                 groups = list(reversed(groups))
@@ -948,7 +1018,23 @@ class AppController:
                         album_tracks = list(reversed(album_tracks))
                     for t in album_tracks:
                         ops.append(("track", album.key, t))
+        elif primary == SortPrimary.ARTIST_ALBUM_COMBO:
+            # "{artist} - {album}" → tracks (multi-artist dirs → Various Artists)
+            groups = group_by_artist_dash_album(tracks)
+            if reverse:
+                groups = list(reversed(groups))
+            for g in groups:
+                seed = g.tracks[0] if g.tracks else None
+                ops.append(
+                    ("group", "", g.key, g.label, ("group", "group_album"), seed)
+                )
+                gtracks = list(g.tracks)
+                if reverse:
+                    gtracks = list(reversed(gtracks))
+                for t in gtracks:
+                    ops.append(("track", g.key, t))
         elif primary == SortPrimary.ALBUM:
+            # "{album} - {artist}" → tracks
             groups = group_by_album(tracks)
             if reverse:
                 groups = list(reversed(groups))
@@ -3162,12 +3248,20 @@ class AppController:
         self._sync_from_seed(seed, kind="artist")
 
     def action_sync_album_group(self) -> None:
-        """Context menu on an album header row."""
+        """Context menu on an album or directory header row."""
         seed = self._context_group_seed
+        iid = self.win.selected_tree_iid()
         if seed is None:
-            iid = self.win.selected_tree_iid()
             seed = self._group_seed_by_iid.get(iid or "")
-        self._sync_from_seed(seed, kind="album")
+        kind = "album"
+        if iid:
+            try:
+                tags = set(self.win.tree.item(iid, "tags"))
+            except Exception:
+                tags = set()
+            if "group_directory" in tags:
+                kind = "directory"
+        self._sync_from_seed(seed, kind=kind)
 
     def action_entire_library(self) -> None:
         if not self._require_sync_ready():

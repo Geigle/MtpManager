@@ -174,6 +174,11 @@ class Library:
     def get(self, index: int) -> Track:
         return self.tracks[index]
 
+    def filter_by_directory(self, seed: Track) -> list[Track]:
+        """Tracks that share the same parent directory as *seed*."""
+        seed_dir = os.path.dirname(seed.path) or seed.path
+        return [t for t in self.tracks if (os.path.dirname(t.path) or t.path) == seed_dir]
+
     def filter_by_artist(self, seed: Track) -> list[Track]:
         """Tracks by the same library artist as *seed*.
 

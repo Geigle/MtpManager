@@ -1139,7 +1139,7 @@ class MainWindow:
                 menu = self.menu_track_ctx
             elif "group_artist" in tags:
                 menu = self.menu_artist_ctx
-            elif "group_album" in tags:
+            elif "group_directory" in tags or "group_album" in tags:
                 menu = self.menu_album_ctx
             else:
                 return "break"
