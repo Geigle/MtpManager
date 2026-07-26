@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from mtpmanager.domain.library import Library
+from mtpmanager.app.scan_library import scan_library_roots
+from mtpmanager.domain.library import Library, normalize_library_roots
 from mtpmanager.domain.models import Track, TrackMetadata
 from mtpmanager.domain.track_id import is_track_guid, new_track_guid
 from mtpmanager.infra.library_index import (
@@ -50,7 +53,7 @@ class LibraryIndexTests(unittest.TestCase):
                     _track(str(f1), title="One", artist="A", guid=g1),
                     _track(str(f2), title="Two", artist="B", bitrate=320000),
                 ],
-                root_path=str(root),
+                root_paths=[str(root)],
             )
             dest = Path(tmp) / "library_index.db"
             save_library_index(lib, path=dest)
@@ -61,6 +64,7 @@ class LibraryIndexTests(unittest.TestCase):
             loaded = load_library_index(path=dest)
             self.assertIsNotNone(loaded)
             assert loaded is not None
+            self.assertEqual(loaded.root_paths, [str(root)])
             self.assertEqual(loaded.root_path, str(root))
             self.assertEqual(len(loaded.tracks), 2)
             self.assertEqual(loaded.tracks[0].path, str(f1))
@@ -71,6 +75,98 @@ class LibraryIndexTests(unittest.TestCase):
             self.assertEqual(loaded.tracks[1].meta.bitrate, 320000)
             self.assertEqual(loaded.tracks[1].meta.length_sec, 120.5)
 
+    def test_multi_root_round_trip(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            r1 = Path(tmp) / "Flac"
+            r2 = Path(tmp) / "Mp3"
+            r1.mkdir()
+            r2.mkdir()
+            f1 = r1 / "a.flac"
+            f2 = r2 / "b.mp3"
+            f1.write_bytes(b"x")
+            f2.write_bytes(b"y")
+            lib = Library(
+                tracks=[
+                    _track(str(f1), title="One"),
+                    _track(str(f2), title="Two"),
+                ],
+                root_paths=[str(r1), str(r2)],
+            )
+            dest = Path(tmp) / "library_index.db"
+            save_library_index(lib, path=dest)
+            loaded = load_library_index(path=dest)
+            self.assertIsNotNone(loaded)
+            assert loaded is not None
+            self.assertEqual(loaded.root_paths, [str(r1), str(r2)])
+            self.assertEqual(loaded.root_path, str(r1))
+            self.assertEqual(len(loaded.tracks), 2)
+            titles = {t.meta.title for t in loaded.tracks}
+            self.assertEqual(titles, {"One", "Two"})
+
+    def test_legacy_single_root_db_migrates_to_root_paths(self) -> None:
+        """DBs written before schema v3 still load with a one-element root list."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "Music"
+            root.mkdir()
+            f1 = root / "a.mp3"
+            f1.write_bytes(b"x")
+            dest = Path(tmp) / "library_index.db"
+            conn = sqlite3.connect(str(dest))
+            try:
+                conn.executescript(
+                    """
+                    CREATE TABLE library_meta (
+                      id INTEGER PRIMARY KEY CHECK (id = 1),
+                      root_path TEXT NOT NULL,
+                      scanned_at TEXT NOT NULL
+                    );
+                    CREATE TABLE tracks (
+                      guid TEXT PRIMARY KEY,
+                      path TEXT NOT NULL UNIQUE,
+                      artist TEXT NOT NULL DEFAULT '',
+                      albumartist TEXT NOT NULL DEFAULT '',
+                      composer TEXT NOT NULL DEFAULT '',
+                      album TEXT NOT NULL DEFAULT '',
+                      title TEXT NOT NULL DEFAULT '',
+                      genre TEXT NOT NULL DEFAULT '',
+                      tracknumber TEXT NOT NULL DEFAULT '01',
+                      date TEXT NOT NULL DEFAULT '',
+                      length_sec REAL NOT NULL DEFAULT 0,
+                      sample_rate INTEGER NOT NULL DEFAULT 0,
+                      channels INTEGER NOT NULL DEFAULT 0,
+                      bitrate INTEGER NOT NULL DEFAULT 0,
+                      bitrate_mode INTEGER NOT NULL DEFAULT 0,
+                      created_at TEXT NOT NULL,
+                      updated_at TEXT NOT NULL
+                    );
+                    """
+                )
+                guid = new_track_guid()
+                conn.execute(
+                    "INSERT INTO library_meta (id, root_path, scanned_at) "
+                    "VALUES (1, ?, '2026-01-01T00:00:00Z')",
+                    (str(root),),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO tracks (
+                      guid, path, artist, album, title, tracknumber,
+                      length_sec, sample_rate, channels, bitrate, bitrate_mode,
+                      created_at, updated_at
+                    ) VALUES (?, ?, 'A', 'B', 'Legacy', '01', 1, 0, 0, 0, 0, 't', 't')
+                    """,
+                    (guid, str(f1)),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            loaded = load_library_index(path=dest, migrate_json=False)
+            self.assertIsNotNone(loaded)
+            assert loaded is not None
+            self.assertEqual(loaded.root_paths, [str(root)])
+            self.assertEqual(loaded.tracks[0].meta.title, "Legacy")
+
     def test_resave_preserves_guid_by_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "Music"
@@ -80,14 +176,14 @@ class LibraryIndexTests(unittest.TestCase):
             dest = Path(tmp) / "library_index.db"
             lib1 = Library(
                 tracks=[_track(str(f1), title="One")],
-                root_path=str(root),
+                root_paths=[str(root)],
             )
             save_library_index(lib1, path=dest)
             guid = lib1.tracks[0].guid
             # Rescan-like save with empty guid still reuses path mapping.
             lib2 = Library(
                 tracks=[_track(str(f1), title="One Updated")],
-                root_path=str(root),
+                root_paths=[str(root)],
             )
             save_library_index(lib2, path=dest)
             self.assertEqual(lib2.tracks[0].guid, guid)
@@ -116,7 +212,7 @@ class LibraryIndexTests(unittest.TestCase):
             gone = root / "gone.mp3"
             lib = Library(
                 tracks=[_track(str(exists)), _track(str(gone))],
-                root_path=str(root),
+                root_paths=[str(root)],
             )
             dest = Path(tmp) / "library_index.db"
             save_library_index(lib, path=dest)
@@ -131,13 +227,14 @@ class LibraryIndexTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "EmptyMusic"
             root.mkdir()
-            lib = Library(tracks=[], root_path=str(root))
+            lib = Library(tracks=[], root_paths=[str(root)])
             dest = Path(tmp) / "library_index.db"
             save_library_index(lib, path=dest)
             loaded = load_library_index(path=dest)
             self.assertIsNotNone(loaded)
             assert loaded is not None
             self.assertEqual(loaded.root_path, str(root))
+            self.assertEqual(loaded.root_paths, [str(root)])
             self.assertEqual(loaded.tracks, [])
 
     def test_get_tracks_by_guids(self) -> None:
@@ -149,7 +246,7 @@ class LibraryIndexTests(unittest.TestCase):
             dest = Path(tmp) / "library_index.db"
             lib = Library(
                 tracks=[_track(str(f1), title="Hit")],
-                root_path=str(root),
+                root_paths=[str(root)],
             )
             save_library_index(lib, path=dest)
             g = lib.tracks[0].guid
@@ -200,6 +297,7 @@ class LibraryIndexTests(unittest.TestCase):
             self.assertEqual(len(loaded.tracks), 1)
             self.assertEqual(loaded.tracks[0].meta.title, "Legacy")
             self.assertTrue(is_track_guid(loaded.tracks[0].guid))
+            self.assertEqual(loaded.root_paths, [str(root)])
 
             # Second migrate is a no-op.
             self.assertFalse(migrate_json_if_needed(data_dir=base, db_path=db))
@@ -265,7 +363,61 @@ class LibraryIndexTests(unittest.TestCase):
             self.assertIsNotNone(lib)
             assert lib is not None
             self.assertEqual(lib.root_path, "/music")
+            self.assertEqual(lib.root_paths, ["/music"])
             self.assertEqual(lib.tracks[0].meta.title, "T")
+
+
+class NormalizeRootsAndScanTests(unittest.TestCase):
+    def test_normalize_library_roots_dedupes_and_drops_empty(self) -> None:
+        roots = normalize_library_roots(["", "/a/b", "/a/b/", "/a/c"])
+        self.assertEqual(roots, [os.path.normpath("/a/b"), os.path.normpath("/a/c")])
+
+    def test_scan_library_roots_merges_and_dedupes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            r1 = Path(tmp) / "one"
+            r2 = Path(tmp) / "two"
+            r1.mkdir()
+            r2.mkdir()
+            (r1 / "a.mp3").write_bytes(b"x")
+            (r2 / "b.flac").write_bytes(b"y")
+            # Nested under r1 also present as its own root would double-count
+            # without path dedupe — nested file should appear once.
+            nested = r1 / "sub"
+            nested.mkdir()
+            (nested / "c.mp3").write_bytes(b"z")
+
+            with mock.patch(
+                "mtpmanager.app.scan_library.read_metadata",
+                return_value=TrackMetadata(title="t"),
+            ):
+                lib = scan_library_roots([str(r1), str(r2), str(nested)])
+
+            self.assertEqual(
+                lib.root_paths,
+                normalize_library_roots([str(r1), str(r2), str(nested)]),
+            )
+            paths = {t.path for t in lib.tracks}
+            self.assertEqual(len(paths), 3)
+            self.assertTrue(any(p.endswith("a.mp3") for p in paths))
+            self.assertTrue(any(p.endswith("b.flac") for p in paths))
+            self.assertTrue(any(p.endswith("c.mp3") for p in paths))
+
+    def test_scan_library_roots_keeps_unreachable_in_list(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            live = Path(tmp) / "live"
+            live.mkdir()
+            (live / "a.mp3").write_bytes(b"x")
+            missing = str(Path(tmp) / "gone")
+            with mock.patch(
+                "mtpmanager.app.scan_library.read_metadata",
+                return_value=TrackMetadata(title="t"),
+            ):
+                lib = scan_library_roots([str(live), missing])
+            self.assertEqual(len(lib.tracks), 1)
+            self.assertEqual(
+                lib.root_paths,
+                normalize_library_roots([str(live), missing]),
+            )
 
 
 if __name__ == "__main__":

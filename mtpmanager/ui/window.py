@@ -26,6 +26,7 @@ from tkinter import (
     PhotoImage,
     Scrollbar,
     Tk,
+    Toplevel,
     ttk,
 )
 
@@ -71,8 +72,10 @@ BG_TRANSFER_TRANSFERRING = "#bf8f8f"  # desaturated red — sending to device
 TREE_COLS = ("title", "artist", "album", "year")
 
 # Library menu labels (used for entryconfig by label).
-MENU_SELECT_ROOT = "Select Library Root…"
-MENU_UPDATE_LIBRARY = "Update Library"
+MENU_MANAGE_LIBRARY = "Manage Library…"
+# Back-compat aliases (older docs / call sites).
+MENU_SELECT_ROOT = MENU_MANAGE_LIBRARY
+MENU_UPDATE_LIBRARY = MENU_MANAGE_LIBRARY
 
 # Transfer menu
 MENU_SYNC_ENTIRE = "Sync Entire Library"
@@ -143,6 +146,165 @@ def _elide_path(path: str, max_len: int = _PATH_DISPLAY_MAX) -> str:
     return path[:head] + "…" + path[-tail:]
 
 
+class _HoverTip:
+    """Delayed hover tip for a widget (full path / multi-root list).
+
+    macOS Tk Labels default to ``systemTextColor``. In dark mode that is a
+    *light* color; pairing it with a cream tooltip background makes the text
+    look blank. Always set an explicit dark foreground on a light panel.
+    """
+
+    # Cool frosted panel — solid stand-in for Liquid Glass (Tk has no blur).
+    # Explicit colors only; never systemTextColor (invisible on light panels
+    # in dark mode).
+    _BG = "#e6eaef"  # cloud gray, slight cool bias
+    _FG = "#1d1d1f"  # near-black label text
+    _EDGE = "#b4bcc6"  # soft cool rim
+    _DELAY_MS = 400
+    _WRAP = 520
+
+    def __init__(self, widget) -> None:
+        self.widget = widget
+        self._text = ""
+        self._tip: Toplevel | None = None
+        self._label: Label | None = None
+        self._after_id = None
+        widget.bind("<Enter>", self._on_enter, add="+")
+        widget.bind("<Leave>", self._on_leave, add="+")
+        widget.bind("<ButtonPress>", self._on_leave, add="+")
+
+    def set_text(self, text: str) -> None:
+        self._text = (text or "").strip()
+        if not self._text:
+            self._hide()
+            return
+        # Keep an open tip in sync when library status refreshes under the cursor.
+        if self._label is not None:
+            try:
+                self._label.configure(text=self._text)
+            except Exception:
+                self._hide()
+
+    def _on_enter(self, _event=None) -> None:
+        self._schedule()
+
+    def _on_leave(self, _event=None) -> None:
+        self._cancel_schedule()
+        self._hide()
+
+    def _schedule(self) -> None:
+        self._cancel_schedule()
+        if not self._text:
+            return
+        try:
+            self._after_id = self.widget.after(self._DELAY_MS, self._show)
+        except Exception:
+            self._after_id = None
+
+    def _cancel_schedule(self) -> None:
+        if self._after_id is not None:
+            try:
+                self.widget.after_cancel(self._after_id)
+            except Exception:
+                pass
+            self._after_id = None
+
+    def _show(self) -> None:
+        self._after_id = None
+        text = self._text
+        if not text:
+            return
+        if self._tip is not None:
+            if self._label is not None:
+                try:
+                    self._label.configure(text=text)
+                except Exception:
+                    self._hide()
+                else:
+                    return
+            else:
+                self._hide()
+
+        try:
+            master = self.widget.winfo_toplevel()
+            x = int(self.widget.winfo_rootx()) + 12
+            y = int(self.widget.winfo_rooty()) + int(self.widget.winfo_height()) + 6
+        except Exception:
+            return
+
+        tip = Toplevel(master)
+        # Build off-screen, then map — avoids blank overrideredirect windows
+        # on some Tk/macOS builds.
+        try:
+            tip.withdraw()
+        except Exception:
+            pass
+        tip.wm_overrideredirect(True)
+        try:
+            # macOS: true tooltip chrome; does not activate the app.
+            tip.tk.call(
+                "::tk::unsupported::MacWindowStyle",
+                "style",
+                tip._w,
+                "help",
+                "noActivates",
+            )
+        except Exception:
+            pass
+        try:
+            tip.attributes("-topmost", True)
+        except Exception:
+            pass
+
+        # 1px cool rim (Frame) around the panel so it reads against light
+        # window chrome without the old warm “sticky note” look.
+        rim = Frame(tip, background=self._EDGE, borderwidth=0)
+        rim.pack(fill=BOTH, expand=True)
+        label = Label(
+            rim,
+            text=text,
+            justify=LEFT,
+            background=self._BG,
+            foreground=self._FG,
+            activebackground=self._BG,
+            activeforeground=self._FG,
+            disabledforeground=self._FG,
+            relief="flat",
+            borderwidth=0,
+            padx=9,
+            pady=6,
+            wraplength=self._WRAP,
+            # Explicit family avoids theme fonts that can render invisibly
+            # in borderless help windows on some Aqua builds.
+            font=("TkDefaultFont", 12),
+        )
+        label.pack(padx=1, pady=1)
+        try:
+            tip.update_idletasks()
+            tip.wm_geometry(f"+{x}+{y}")
+            tip.deiconify()
+            tip.lift()
+        except Exception:
+            try:
+                tip.destroy()
+            except Exception:
+                pass
+            return
+
+        self._tip = tip
+        self._label = label
+
+    def _hide(self) -> None:
+        tip = self._tip
+        self._tip = None
+        self._label = None
+        if tip is not None:
+            try:
+                tip.destroy()
+            except Exception:
+                pass
+
+
 class MainWindow:
     def __init__(self, root: Tk | None = None):
         self.root = root or Tk()
@@ -157,8 +319,7 @@ class MainWindow:
 
         self.menu_library = Menu(self.menubar, tearoff=0)
         self.menubar.add_cascade(label="Library", menu=self.menu_library)
-        self.menu_library.add_command(label=MENU_SELECT_ROOT)
-        self.menu_library.add_command(label=MENU_UPDATE_LIBRARY, state=DISABLED)
+        self.menu_library.add_command(label=MENU_MANAGE_LIBRARY)
 
         self.menu_transfer = Menu(self.menubar, tearoff=0)
         self.menubar.add_cascade(label="Transfer", menu=self.menu_transfer)
@@ -230,6 +391,7 @@ class MainWindow:
             anchor="w",
         )
         self.lbl_library_path.pack(side=LEFT, fill=X, expand=True, padx=2, pady=4)
+        self._library_path_tip = _HoverTip(self.lbl_library_path)
 
         self.lbl_library_count = Label(library_toolbar, text="0 tracks")
         self.lbl_library_count.pack(side=LEFT, padx=(6, 8), pady=4)
@@ -571,12 +733,19 @@ class MainWindow:
     def set_library_menu_commands(
         self,
         *,
-        on_select_root,
-        on_update,
+        on_manage_library,
+        on_select_root=None,
+        on_update=None,
     ) -> None:
-        """Wire Library menu entries (called once from the controller)."""
-        self.menu_library.entryconfig(MENU_SELECT_ROOT, command=on_select_root)
-        self.menu_library.entryconfig(MENU_UPDATE_LIBRARY, command=on_update)
+        """Wire Library menu entries (called once from the controller).
+
+        *on_manage_library* opens the roots manager (add/remove/update).
+        *on_select_root* / *on_update* are ignored legacy kwargs.
+        """
+        del on_select_root, on_update
+        self.menu_library.entryconfig(
+            MENU_MANAGE_LIBRARY, command=on_manage_library
+        )
 
     def set_transfer_menu_commands(
         self,
@@ -730,39 +899,67 @@ class MainWindow:
     def set_library_menu_state(
         self,
         *,
-        update_enabled: bool,
-        select_enabled: bool = True,
+        manage_enabled: bool = True,
+        update_enabled: bool | None = None,
+        select_enabled: bool | None = None,
     ) -> None:
-        """Enable/disable Library menu commands."""
+        """Enable/disable Library → Manage Library….
+
+        *update_enabled* / *select_enabled* are legacy aliases: the menu stays
+        enabled when either would have been true (roots manager is always
+        useful to add a first root).
+        """
+        if update_enabled is not None or select_enabled is not None:
+            # Legacy dual-flag call sites: keep the manager openable whenever
+            # select was allowed; update-only disable no longer hides the menu.
+            legacy_select = True if select_enabled is None else bool(select_enabled)
+            manage_enabled = legacy_select and manage_enabled
         self.menu_library.entryconfig(
-            MENU_SELECT_ROOT,
-            state=NORMAL if select_enabled else DISABLED,
-        )
-        self.menu_library.entryconfig(
-            MENU_UPDATE_LIBRARY,
-            state=NORMAL if update_enabled else DISABLED,
+            MENU_MANAGE_LIBRARY,
+            state=NORMAL if manage_enabled else DISABLED,
         )
 
     def set_library_status(
         self,
-        root_path: str,
-        track_count: int,
+        root_path: str = "",
+        track_count: int = 0,
         *,
+        root_paths: list[str] | None = None,
         root_reachable: bool = True,
         busy_message: str | None = None,
     ) -> None:
         """Update toolbar path label and track count.
 
+        When multiple *root_paths* are present, the label shows
+        ``Multiple Library Roots`` and the hover tip lists every root.
+        A single root shows an elided path (full path on hover).
+
         When *busy_message* is set (e.g. during a background scan), the count
         label shows that status instead of a numeric track total.
         """
-        if root_path:
-            display = _elide_path(root_path)
+        if root_paths is not None:
+            paths = [p for p in root_paths if p]
+        elif root_path:
+            paths = [root_path]
+        else:
+            paths = []
+
+        if len(paths) > 1:
+            display = "Multiple Library Roots"
             if not root_reachable:
                 display = f"(unreachable) {display}"
             self.lbl_library_path.configure(text=display)
+            self._library_path_tip.set_text("\n".join(paths))
+        elif len(paths) == 1:
+            display = _elide_path(paths[0])
+            if not root_reachable:
+                display = f"(unreachable) {display}"
+            self.lbl_library_path.configure(text=display)
+            self._library_path_tip.set_text(paths[0])
         else:
             self.lbl_library_path.configure(text="No library selected")
+            self._library_path_tip.set_text("")
+
         if busy_message:
             self.lbl_library_count.configure(text=busy_message)
             return

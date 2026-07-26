@@ -9,7 +9,7 @@ End-to-end send path, Stable vs Experimental behavior, and where to change thing
 ## End-to-end flow
 
 ```text
-[index load | Select/Scan Library] → Library / Track
+[index load | Manage Library / scan] → Library / Track
      → user action → transfer_track(s)
      → (optional) FFmpegTranscoder → Transport.send_track
 ```
@@ -17,11 +17,13 @@ End-to-end send path, Stable vs Experimental behavior, and where to change thing
 | Step | Module | Notes |
 |------|--------|--------|
 | Restore index | `ui/controllers._start_index_restore` | Startup: background load of durable JSON |
-| Library menu | `ui/window` menubar **Library** | Select root / Update (see below) |
+| Library menu | `ui/window` menubar **Library** | Manage Library… (see below) |
 | Library toolbar | `ui/window` (full-width under title) | Status only: path + track count (shows Scanning… / Loading index… when busy) |
-| Select root | `ui/controllers.on_select_library_root` | Folder picker → **background** full scan → save index |
-| Update | `ui/controllers.on_update_library` | **Background** re-scan of stored root; disabled if root missing/unreachable or busy |
-| Scan | `app/scan_library.scan_library` | Recursive music files → tags via mutagen (worker thread) |
+| Manage library | `ui/controllers.on_manage_library` + `dialogs.ManageLibraryDialog` | **Library → Manage Library…**: list roots; **Add Root…** / **Remove Selected** / **Update Library** |
+| Add root | `ui/controllers.on_add_library_root` | Folder picker → **add** root (if new) → **background** full scan of **all** roots → save index |
+| Remove root(s) | `ui/controllers.on_remove_library_roots` | Drop selected roots → **background** re-scan of remaining (or clear library if none left) |
+| Update | `ui/controllers.on_update_library` | **Background** re-scan of **all** stored roots; disabled in dialog when no root reachable or busy |
+| Scan | `app/scan_library.scan_library` / `scan_library_roots` | Recursive music files → tags via mutagen (worker thread); multi-root merge + path dedupe |
 | Background jobs | `ui/bg.TkBackgroundRunner` | Thread + queue + `root.after` poll; never touch Tk from workers |
 | Persist index | `infra/library_index` | SQLite `{data_dir}/library_index.db`; GUID per track; saved in scan worker |
 | Index (in-memory) | `domain/library.Library` | Source of truth; Treeview is a sorted view |
@@ -38,15 +40,18 @@ End-to-end send path, Stable vs Experimental behavior, and where to change thing
 
 | Chrome | Role |
 |--------|------|
-| **Library** menu | Commands: **Select Library Root…**, **Update Library** |
-| Status toolbar | Path + track count only (not action buttons) |
+| **Library** menu | Command: **Manage Library…** (add/remove roots + update scan) |
+| Status toolbar | Path (or **Multiple Library Roots**) + track count only (not action buttons). Hover the path label for the full path, or the full list of roots when multi-root. |
 
-| Menu command | Behavior |
-|--------------|----------|
-| **Select Library Root…** | Folder picker → background full scan → save index |
-| **Update Library** | Background re-scan of stored root → rewrite index; **disabled** when no root, root unreachable, or a library job is running |
+| Menu / dialog action | Behavior |
+|----------------------|----------|
+| **Library → Manage Library…** | Modeless window listing roots; **Add Root…**, **Remove Selected**, **Update Library**, **Close** |
+| **Add Root…** | Folder picker → add folder if new → background full scan of **all** roots → save index |
+| **Remove Selected** | Confirm → drop root(s) → background re-scan of remaining (empty library if none left) |
+| **Update Library** | Background re-scan of **all** stored roots → rewrite index; **disabled** when no root is reachable or a library job is running |
 
-- **Startup:** schedule index restore after the UI is up (`after(0, …)`). Worker loads `{data_dir}/library_index.db` (migrates legacy `library_index.json` once if needed); main thread fills the listbox. If `root_path` is still a directory, missing files are dropped. If the root is **unreachable**, still show index entries greyed/disabled and leave **Update Library** disabled.
+- **Startup:** schedule index restore after the UI is up (`after(0, …)`). Worker loads `{data_dir}/library_index.db` (migrates legacy `library_index.json` once if needed); main thread fills the listbox. If **any** root is still a directory, missing files are dropped. If **all** roots are **unreachable**, still show index entries greyed/disabled; Manage Library remains available so roots can be fixed.
+- **Multiple roots:** the durable index stores `root_paths` (JSON list) plus legacy `root_path` (first root). One mixed tree or several media locations can share a single library view.
 - **Send names:** ObjectFileName is `{guid}{ext}` under Music folder 100; full tags still go on the wire. Multi-track sync **skips** tracks whose GUID stem is in the durable device index (SQLite) — **not** a live `list_files` per job.
 - **Device index (skip only):** one `list_files` seed after Experimental connect (or **Refresh Device Index…**); successful send/delete update the cache. Used for **skip-if-present**, not as the sole browse UI.
 - **Experimental List Files / pickers:** **live** `get_filelisting` (may also refresh the durable index).

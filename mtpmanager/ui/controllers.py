@@ -12,12 +12,17 @@ from mtpmanager.app import device_ops
 from mtpmanager.app import retail_ops
 from mtpmanager.app.artist_folders import ensure_album_folder, ensure_artist_folder
 from mtpmanager.app.cancellation import JobCancelled
-from mtpmanager.app.scan_library import scan_library
+from mtpmanager.app.scan_library import scan_library, scan_library_roots
 from mtpmanager.app.transfer import transfer_track, transfer_tracks
 from mtpmanager.app.transfer_queue import BatchTransferQueue
 from mtpmanager.domain.device_profile import DeviceProfile, match_device_profile
 from mtpmanager.domain.device_profiles import BUILTIN_PROFILES
-from mtpmanager.domain.library import Library, primary_artist, year_from_date
+from mtpmanager.domain.library import (
+    Library,
+    normalize_library_roots,
+    primary_artist,
+    year_from_date,
+)
 from mtpmanager.domain.library_sort import (
     SortPrimary,
     group_by_album,
@@ -79,8 +84,10 @@ from mtpmanager.infra.sync_job import (
 from mtpmanager.ports.transport import TransportError
 from mtpmanager.ui.bg import TkBackgroundRunner
 from mtpmanager.ui.dialogs import (
+    ManageLibraryDialog,
     ask_text,
     ask_video_destination,
+    open_manage_library_dialog,
     pick_file_entry_dialog,
     show_config_dialog,
     show_device_info_dialog,
@@ -122,6 +129,8 @@ class AppController:
         self._bg = TkBackgroundRunner(window.root)
         self._library_busy = False
         self._transfer_busy = False
+        # Modeless Library → Manage Library… window (if open).
+        self._manage_library_dlg: ManageLibraryDialog | None = None
         # Cooperative cancel for transfer / device batch jobs (checked between items).
         self._job_cancel = threading.Event()
         # Durable multi-track sync plan (resume after failure / cancel).
@@ -172,8 +181,7 @@ class AppController:
     def _wire(self) -> None:
         w = self.win
         w.set_library_menu_commands(
-            on_select_root=self.on_select_library_root,
-            on_update=self.on_update_library,
+            on_manage_library=self.on_manage_library,
         )
         w.set_transfer_menu_commands(
             on_sync_entire=self.action_entire_library,
@@ -441,8 +449,9 @@ class AppController:
             self._disconnect_for_stable()
 
     def _library_root_reachable(self) -> bool:
-        root = self.library.root_path
-        return bool(root) and os.path.isdir(root)
+        """True when at least one configured library root exists on disk."""
+        roots = self.library.root_paths
+        return any(os.path.isdir(r) for r in roots)
 
     def _require_experimental_connected(self) -> bool:
         """In PyMTP mode, require an open session before sync."""
@@ -481,18 +490,18 @@ class AppController:
                     "batch transfer queue is running.",
                 )
                 return False
-        if not self.library.root_path:
+        if not self.library.root_paths:
             messagebox.showinfo(
                 "Library",
-                "Select a library root first (Library → Select Library Root…).",
+                "Add a library root first (Library → Manage Library…).",
             )
             return False
         if not self._library_root_reachable():
             messagebox.showinfo(
                 "Library",
                 "Library root is not reachable.\n"
-                "Reconnect the volume or choose a new root "
-                "(Library → Select Library Root…).",
+                "Reconnect the volume or add a root "
+                "(Library → Manage Library…).",
             )
             return False
         return True
@@ -1979,36 +1988,44 @@ class AppController:
     def _set_library_busy(self, busy: bool, *, message: str | None = None) -> None:
         self._library_busy = busy
         if busy:
-            self.win.set_library_menu_state(
-                update_enabled=False,
-                select_enabled=False,
-            )
+            self.win.set_library_menu_state(manage_enabled=False)
             self.win.set_library_status(
-                self.library.root_path,
-                len(self.library),
+                track_count=len(self.library),
+                root_paths=list(self.library.root_paths),
                 root_reachable=self._library_root_reachable()
-                if self.library.root_path
+                if self.library.root_paths
                 else True,
                 busy_message=message or "Working…",
             )
+            self._refresh_manage_library_dialog()
         else:
             self._sync_library_chrome()
 
     def _sync_library_chrome(self) -> None:
         """Update toolbar status, menu enablement, and dead/live list appearance."""
         if self._library_busy:
+            self._refresh_manage_library_dialog()
             return
         reachable = self._library_root_reachable()
         self.win.set_library_status(
-            self.library.root_path,
-            len(self.library),
-            root_reachable=reachable if self.library.root_path else True,
+            track_count=len(self.library),
+            root_paths=list(self.library.root_paths),
+            root_reachable=reachable if self.library.root_paths else True,
         )
-        self.win.set_library_menu_state(
-            update_enabled=reachable,
-            select_enabled=True,
-        )
+        # Manage Library stays available so the user can add a first root
+        # even when none are reachable yet.
+        self.win.set_library_menu_state(manage_enabled=True)
         self.win.set_tracks_usable(reachable)
+        self._refresh_manage_library_dialog()
+
+    def _refresh_manage_library_dialog(self) -> None:
+        dlg = self._manage_library_dlg
+        if dlg is None:
+            return
+        if not dlg.is_open():
+            self._manage_library_dlg = None
+            return
+        dlg.refresh()
 
     @staticmethod
     def _warm_art_for_library(library: Library) -> None:
@@ -2028,11 +2045,12 @@ class AppController:
 
     @staticmethod
     def _load_index_worker() -> Library | None:
-        """Worker: load durable index and filter missing files if root is live."""
+        """Worker: load durable index and filter missing files if any root is live."""
         loaded = load_library_index(drop_missing_files=False)
-        if loaded is None or not loaded.root_path:
+        if loaded is None or not loaded.root_paths:
             return None
-        if os.path.isdir(loaded.root_path):
+        any_reachable = any(os.path.isdir(r) for r in loaded.root_paths)
+        if any_reachable:
             live = [t for t in loaded.tracks if os.path.isfile(t.path)]
             dropped = len(loaded.tracks) - len(live)
             if dropped:
@@ -2041,11 +2059,11 @@ class AppController:
                     dropped,
                     len(live),
                 )
-            lib = Library(tracks=live, root_path=loaded.root_path)
+            lib = Library(tracks=live, root_paths=list(loaded.root_paths))
         else:
             logger.warning(
-                "Library index root not reachable: %r — showing stale index",
-                loaded.root_path,
+                "Library index root(s) not reachable: %r — showing stale index",
+                loaded.root_paths,
             )
             lib = loaded
         try:
@@ -2055,13 +2073,13 @@ class AppController:
         return lib
 
     @staticmethod
-    def _scan_and_save_worker(path: str) -> tuple[Library, str | None]:
-        """Worker: full tree scan + persist index (no Tk).
+    def _scan_and_save_worker(roots: list[str]) -> tuple[Library, str | None]:
+        """Worker: full tree scan of all roots + persist index (no Tk).
 
         Returns (library, save_error_message). Scan failures raise; save failures
         are returned so the UI can still show the scanned library.
         """
-        library = scan_library(path)
+        library = scan_library_roots(roots)
         try:
             save_library_index(library)
         except OSError as e:
@@ -2095,10 +2113,10 @@ class AppController:
         if self._device_serial and self._device_index_seeded:
             self._schedule_device_music_tree_refresh(enrich_missing_tags=False)
         logger.info(
-            "%s %d tracks (root=%s, reachable=%s)",
+            "%s %d tracks (roots=%s, reachable=%s)",
             kind,
             len(self.library),
-            self.library.root_path,
+            self.library.root_paths,
             self._library_root_reachable(),
         )
 
@@ -2129,19 +2147,21 @@ class AppController:
             name="library-restore",
         )
 
-    def _start_library_scan(self, path: str) -> None:
-        """Background full scan of *path*; previous library kept until done."""
-        # Do not replace self.library until the worker succeeds (stale root safe).
+    def _start_library_scan(self, roots: list[str]) -> None:
+        """Background full scan of all *roots*; previous library kept until done."""
+        # Do not replace self.library until the worker succeeds (stale roots safe).
+        roots = normalize_library_roots(roots)
         self._library_busy = True
-        self.win.set_library_menu_state(update_enabled=False, select_enabled=False)
+        self.win.set_library_menu_state(manage_enabled=False)
         self.win.set_library_status(
-            path,
-            len(self.library),
+            track_count=len(self.library),
+            root_paths=list(roots),
             root_reachable=True,
             busy_message="Scanning…",
         )
+        self._refresh_manage_library_dialog()
         self._bg.submit(
-            lambda: self._scan_and_save_worker(path),
+            lambda: self._scan_and_save_worker(roots),
             on_done=self._on_scan_done,
             on_error=lambda e: self._on_library_job_error(
                 e, title="Library scan failed"
@@ -2153,13 +2173,38 @@ class AppController:
         root = self.library.root_path
         initial = root if root else "~/Music/"
         path = filedialog.askdirectory(
+            parent=self._manage_dialog_parent(),
             initialdir=initial,
             title="Select Music Library Directory",
         )
         return path or None
 
-    def on_select_library_root(self) -> None:
-        """Pick a library root, full scan, and rewrite the durable index."""
+    def on_manage_library(self) -> None:
+        """Open Library → Manage Library… (add/remove roots, update scan)."""
+        existing = self._manage_library_dlg
+        if existing is not None and existing.is_open():
+            existing.focus()
+            existing.refresh()
+            return
+
+        def _clear_ref() -> None:
+            if self._manage_library_dlg is dlg:
+                self._manage_library_dlg = None
+
+        dlg = open_manage_library_dialog(
+            self.win.root,
+            get_roots=lambda: list(self.library.root_paths),
+            on_add=self.on_add_library_root,
+            on_remove=self.on_remove_library_roots,
+            on_update=self.on_update_library,
+            is_busy=lambda: self._library_busy or self._transfer_busy,
+            can_update=self._library_root_reachable,
+            on_close=_clear_ref,
+        )
+        self._manage_library_dlg = dlg
+
+    def on_add_library_root(self) -> None:
+        """Folder picker → add root (if new) → scan all roots."""
         if self._library_busy or self._transfer_busy:
             messagebox.showinfo(
                 "Library",
@@ -2169,29 +2214,67 @@ class AppController:
         path = self._pick_library_directory()
         if not path:
             return
-        logger.info("Select Library Root → %s", path)
-        self._start_library_scan(path)
+        roots = normalize_library_roots([*self.library.root_paths, path])
+        if roots == normalize_library_roots(self.library.root_paths):
+            messagebox.showinfo(
+                "Manage Library",
+                "That folder is already a library root.",
+                parent=self._manage_dialog_parent(),
+            )
+            return
+        logger.info("Add Library Root → %s (roots=%s)", path, roots)
+        self._start_library_scan(roots)
+
+    def on_remove_library_roots(self, paths: list[str]) -> None:
+        """Drop one or more roots and rescan (or clear) the library index."""
+        if self._library_busy or self._transfer_busy:
+            messagebox.showinfo(
+                "Library",
+                "A background job is already running. Wait for it to finish.",
+            )
+            return
+        drop = set(normalize_library_roots(paths))
+        if not drop:
+            return
+        remaining = [r for r in self.library.root_paths if r not in drop]
+        logger.info(
+            "Remove Library Root(s) → drop=%s remaining=%s",
+            sorted(drop),
+            remaining,
+        )
+        self._start_library_scan(remaining)
 
     def on_update_library(self) -> None:
-        """Rescan the stored root and rewrite the index (menu is disabled if unusable)."""
+        """Rescan every stored root and rewrite the index."""
         if self._library_busy or self._transfer_busy:
             return
         if not self._library_root_reachable():
             messagebox.showinfo(
                 "Library",
-                "Cannot update: library root is not selected or not reachable.",
+                "Cannot update: no library root is selected or reachable.\n"
+                "Use Library → Manage Library… to add a folder.",
+                parent=self._manage_dialog_parent(),
             )
             return
-        path = self.library.root_path
-        logger.info("Update Library → %s", path)
-        self._start_library_scan(path)
+        roots = list(self.library.root_paths)
+        logger.info("Update Library → %s", roots)
+        self._start_library_scan(roots)
+
+    def _manage_dialog_parent(self):
+        dlg = self._manage_library_dlg
+        if dlg is not None and dlg.is_open():
+            return dlg.window
+        return self.win.root
 
     # Back-compat aliases for older call sites / mental models.
+    def on_select_library_root(self) -> None:
+        self.on_manage_library()
+
     def on_change_library(self) -> None:
-        self.on_select_library_root()
+        self.on_manage_library()
 
     def on_select_library(self, event=None) -> None:
-        self.on_select_library_root()
+        self.on_manage_library()
 
 
     def _log_transport_error(self, label: str, exc: TransportError) -> None:

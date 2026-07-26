@@ -128,12 +128,45 @@ def _album_path_hint(candidate: Track, seed: Track, album: str) -> bool:
     return len(parts) >= 2
 
 
+def normalize_library_roots(paths: Iterable[str]) -> list[str]:
+    """Deduplicate library roots preserving order; drop empties.
+
+    Paths are normalized with :func:`os.path.normpath` (not realpath) so
+    distinct mount points and intentional symlink layouts stay distinct.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in paths:
+        if not raw or not isinstance(raw, str):
+            continue
+        key = os.path.normpath(raw)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(key)
+    return out
+
+
 @dataclass
 class Library:
-    """Ordered collection of tracks for UI indexing (0-based)."""
+    """Ordered collection of tracks for UI indexing (0-based).
+
+    *root_paths* is the durable list of host folders that compose this
+    library (one mixed tree, or several media locations). ``root_path`` is
+    the first entry when present — convenient for single-root callers and
+    file-dialog defaults.
+    """
 
     tracks: list[Track] = field(default_factory=list)
-    root_path: str = ""
+    root_paths: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.root_paths = normalize_library_roots(self.root_paths)
+
+    @property
+    def root_path(self) -> str:
+        """First library root, or empty string when none are set."""
+        return self.root_paths[0] if self.root_paths else ""
 
     def __len__(self) -> int:
         return len(self.tracks)
@@ -236,5 +269,5 @@ class Library:
     def sorted_by_path(self) -> Library:
         return Library(
             tracks=sorted(self.tracks, key=lambda t: t.path),
-            root_path=self.root_path,
+            root_paths=list(self.root_paths),
         )

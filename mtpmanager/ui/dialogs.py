@@ -7,7 +7,10 @@ from dataclasses import dataclass
 
 from tkinter import (
     BOTH,
+    DISABLED,
+    END,
     LEFT,
+    NORMAL,
     RIGHT,
     BooleanVar,
     Button,
@@ -15,9 +18,12 @@ from tkinter import (
     Entry,
     Frame,
     Label,
+    Listbox,
     Radiobutton,
+    Scrollbar,
     StringVar,
     Toplevel,
+    Y,
     messagebox,
     simpledialog,
 )
@@ -245,6 +251,256 @@ def show_config_dialog(
         pass
     parent.wait_window(dlg)
     return result[0]
+
+
+class ManageLibraryDialog:
+    """Modeless Library roots manager (add / remove / rescan).
+
+    Kept modeless so background scan/update can finish and refresh the list
+    without blocking the main window.
+    """
+
+    def __init__(
+        self,
+        parent,
+        *,
+        get_roots: Callable[[], list[str]],
+        on_add: Callable[[], None],
+        on_remove: Callable[[list[str]], None],
+        on_update: Callable[[], None],
+        is_busy: Callable[[], bool],
+        can_update: Callable[[], bool],
+        on_close: Callable[[], None] | None = None,
+    ) -> None:
+        self._get_roots = get_roots
+        self._on_add = on_add
+        self._on_remove = on_remove
+        self._on_update = on_update
+        self._is_busy = is_busy
+        self._can_update = can_update
+        self._on_close = on_close
+
+        dlg = Toplevel(parent)
+        dlg.title("Manage Library")
+        dlg.transient(parent)
+        dlg.minsize(480, 320)
+        dlg.geometry("560x360")
+        self._dlg = dlg
+
+        body = Frame(dlg, padx=14, pady=12)
+        body.pack(fill=BOTH, expand=True)
+
+        Label(
+            body,
+            text="Library roots — folders scanned into the track list.",
+            anchor="w",
+            justify=LEFT,
+        ).pack(fill="x")
+
+        list_frame = Frame(body)
+        list_frame.pack(fill=BOTH, expand=True, pady=(8, 8))
+        scroll = Scrollbar(list_frame)
+        scroll.pack(side=RIGHT, fill=Y)
+        self._lb = Listbox(
+            list_frame,
+            yscrollcommand=scroll.set,
+            selectmode="extended",
+            activestyle="dotbox",
+            exportselection=False,
+        )
+        self._lb.pack(side=LEFT, fill=BOTH, expand=True)
+        scroll.config(command=self._lb.yview)
+        try:
+            self._lb.configure(font=("Menlo", 11))
+        except Exception:
+            try:
+                self._lb.configure(font=("Courier", 11))
+            except Exception:
+                pass
+
+        self._status = Label(body, text="", anchor="w", justify=LEFT)
+        self._status.pack(fill="x", pady=(0, 8))
+
+        row = Frame(body)
+        row.pack(fill="x")
+        self._btn_add = Button(row, text="Add Root…", width=12, command=self._click_add)
+        self._btn_add.pack(side=LEFT)
+        self._btn_remove = Button(
+            row, text="Remove Selected", width=14, command=self._click_remove
+        )
+        self._btn_remove.pack(side=LEFT, padx=(8, 0))
+        self._btn_update = Button(
+            row, text="Update Library", width=14, command=self._click_update
+        )
+        self._btn_update.pack(side=LEFT, padx=(8, 0))
+        Button(row, text="Close", width=10, command=self.close).pack(side=RIGHT)
+
+        dlg.protocol("WM_DELETE_WINDOW", self.close)
+        self._lb.bind("<Delete>", lambda _e: self._click_remove())
+        self._lb.bind("<BackSpace>", lambda _e: self._click_remove())
+
+        try:
+            px = parent.winfo_rootx() + max(
+                0, (parent.winfo_width() - 560) // 2
+            )
+            py = parent.winfo_rooty() + max(
+                0, (parent.winfo_height() - 360) // 3
+            )
+            dlg.geometry(f"+{px}+{py}")
+        except Exception:
+            pass
+
+        self.refresh()
+        try:
+            dlg.focus_set()
+        except Exception:
+            pass
+
+    @property
+    def window(self) -> Toplevel:
+        """Underlying Tk window (for parenting file pickers / messageboxes)."""
+        return self._dlg
+
+    def is_open(self) -> bool:
+        try:
+            return bool(self._dlg.winfo_exists())
+        except Exception:
+            return False
+
+    def focus(self) -> None:
+        if not self.is_open():
+            return
+        try:
+            self._dlg.lift()
+            self._dlg.focus_force()
+        except Exception:
+            pass
+
+    def close(self) -> None:
+        dlg = self._dlg
+        try:
+            if dlg.winfo_exists():
+                dlg.destroy()
+        except Exception:
+            pass
+        if self._on_close is not None:
+            try:
+                self._on_close()
+            except Exception:
+                pass
+
+    def refresh(self) -> None:
+        """Reload root list and button enablement from callbacks."""
+        if not self.is_open():
+            return
+        roots = list(self._get_roots() or [])
+        selected = set(self._selected_paths())
+        self._lb.delete(0, END)
+        for path in roots:
+            self._lb.insert(END, path)
+            if path in selected:
+                self._lb.selection_set(END)
+
+        busy = False
+        try:
+            busy = bool(self._is_busy())
+        except Exception:
+            busy = False
+        can_up = False
+        try:
+            can_up = bool(self._can_update())
+        except Exception:
+            can_up = False
+
+        if busy:
+            self._status.configure(text="Library is scanning or a job is running…")
+        elif not roots:
+            self._status.configure(text="No roots yet. Add a folder to build the library.")
+        elif not can_up:
+            self._status.configure(
+                text="No reachable roots — reconnect volumes or add another folder."
+            )
+        else:
+            n = len(roots)
+            self._status.configure(
+                text=f"{n} library root{'s' if n != 1 else ''}."
+            )
+
+        add_state = DISABLED if busy else NORMAL
+        rem_state = DISABLED if busy or not roots else NORMAL
+        upd_state = DISABLED if busy or not can_up else NORMAL
+        try:
+            self._btn_add.configure(state=add_state)
+            self._btn_remove.configure(state=rem_state)
+            self._btn_update.configure(state=upd_state)
+        except Exception:
+            pass
+
+    def _selected_paths(self) -> list[str]:
+        try:
+            idxs = self._lb.curselection()
+        except Exception:
+            return []
+        out: list[str] = []
+        for i in idxs:
+            try:
+                out.append(str(self._lb.get(i)))
+            except Exception:
+                continue
+        return out
+
+    def _click_add(self) -> None:
+        if self._is_busy():
+            return
+        self._on_add()
+
+    def _click_remove(self) -> None:
+        if self._is_busy():
+            return
+        paths = self._selected_paths()
+        if not paths:
+            messagebox.showinfo(
+                "Manage Library",
+                "Select one or more roots to remove.",
+                parent=self._dlg,
+            )
+            return
+        if len(paths) == 1:
+            msg = f"Remove this library root?\n\n{paths[0]}"
+        else:
+            msg = f"Remove {len(paths)} library roots?"
+        if not messagebox.askyesno("Remove Library Root", msg, parent=self._dlg):
+            return
+        self._on_remove(paths)
+
+    def _click_update(self) -> None:
+        if self._is_busy() or not self._can_update():
+            return
+        self._on_update()
+
+
+def open_manage_library_dialog(
+    parent,
+    *,
+    get_roots: Callable[[], list[str]],
+    on_add: Callable[[], None],
+    on_remove: Callable[[list[str]], None],
+    on_update: Callable[[], None],
+    is_busy: Callable[[], bool],
+    can_update: Callable[[], bool],
+    on_close: Callable[[], None] | None = None,
+) -> ManageLibraryDialog:
+    """Open (or the caller reuses) the Manage Library window."""
+    return ManageLibraryDialog(
+        parent,
+        get_roots=get_roots,
+        on_add=on_add,
+        on_remove=on_remove,
+        on_update=on_update,
+        is_busy=is_busy,
+        can_update=can_update,
+        on_close=on_close,
+    )
 
 
 @dataclass(frozen=True)

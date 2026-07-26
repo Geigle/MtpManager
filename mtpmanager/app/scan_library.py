@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import logging
 import os
+from typing import Iterable
 
-from mtpmanager.domain.library import Library, is_music_file
+from mtpmanager.domain.library import Library, is_music_file, normalize_library_roots
 from mtpmanager.domain.models import Track
 from mtpmanager.infra.mutagen_tags import read_metadata
 
@@ -38,9 +39,41 @@ def _scan_dir(dir_path: str) -> list[Track]:
 
 
 def scan_library(root_path: str) -> Library:
-    """Recursively scan root_path for music; return sorted Library."""
-    if not root_path or not os.path.isdir(root_path):
-        return Library(tracks=[], root_path=root_path or "")
-    found = _scan_dir(root_path)
+    """Recursively scan *root_path* for music; return a single-root Library."""
+    roots = normalize_library_roots([root_path] if root_path else [])
+    if not roots or not os.path.isdir(roots[0]):
+        return Library(tracks=[], root_paths=roots)
+    found = _scan_dir(roots[0])
     found.sort(key=lambda t: t.path)
-    return Library(tracks=found, root_path=root_path)
+    return Library(tracks=found, root_paths=roots)
+
+
+def scan_library_roots(root_paths: Iterable[str]) -> Library:
+    """Scan every library root and merge tracks (dedupe by absolute path).
+
+    Unreachable roots are kept in ``Library.root_paths`` but contribute no
+    tracks (logged). Nested roots that share files only appear once.
+    """
+    roots = normalize_library_roots(root_paths)
+    if not roots:
+        return Library(tracks=[], root_paths=[])
+
+    found: list[Track] = []
+    seen_paths: set[str] = set()
+    for root in roots:
+        if not os.path.isdir(root):
+            logger.warning("Library root not reachable during scan: %r", root)
+            continue
+        for track in _scan_dir(root):
+            if track.path in seen_paths:
+                continue
+            seen_paths.add(track.path)
+            found.append(track)
+
+    found.sort(key=lambda t: t.path)
+    logger.info(
+        "Scanned %d library root(s) → %d track(s)",
+        len(roots),
+        len(found),
+    )
+    return Library(tracks=found, root_paths=roots)

@@ -1,7 +1,9 @@
 """Persist and restore a Library as a SQLite index under the app data dir.
 
-Schema version 1: library root + flat track rows (path, guid, tags).
-Optional device_objects table records last-known on-device basename / item id.
+Schema version 3: one or more library roots + flat track rows (path, guid, tags).
+``library_meta.root_path`` remains the first root (back-compat); ``root_paths``
+is a JSON array of all roots. Optional device_objects table records last-known
+on-device basename / item id.
 
 Legacy ``library_index.json`` is imported once when the DB is missing.
 """
@@ -17,14 +19,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Collection, Iterable
 
-from mtpmanager.domain.library import Library
+from mtpmanager.domain.library import Library, normalize_library_roots
 from mtpmanager.domain.models import Track, TrackMetadata
 from mtpmanager.domain.track_id import is_track_guid, new_track_guid
 from mtpmanager.infra.app_paths import default_data_dir
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 INDEX_FILENAME = "library_index.db"
 LEGACY_JSON_FILENAME = "library_index.json"
 
@@ -36,6 +38,7 @@ _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS library_meta (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   root_path TEXT NOT NULL,
+  root_paths TEXT NOT NULL DEFAULT '[]',
   scanned_at TEXT NOT NULL
 );
 
@@ -92,8 +95,60 @@ def _connect(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
+def _library_meta_columns(conn: sqlite3.Connection) -> set[str]:
+    rows = conn.execute("PRAGMA table_info(library_meta)").fetchall()
+    return {str(r[1]) for r in rows}
+
+
+def _migrate_library_meta(conn: sqlite3.Connection) -> None:
+    """Add multi-root column on existing DBs created before schema v3."""
+    cols = _library_meta_columns(conn)
+    if not cols:
+        return
+    if "root_paths" not in cols:
+        conn.execute(
+            "ALTER TABLE library_meta ADD COLUMN root_paths TEXT NOT NULL DEFAULT '[]'"
+        )
+        # Seed root_paths from legacy single root_path where still empty.
+        row = conn.execute(
+            "SELECT root_path, root_paths FROM library_meta WHERE id = 1"
+        ).fetchone()
+        if row is not None:
+            primary = row["root_path"] if "root_path" in row.keys() else ""
+            existing = row["root_paths"] if "root_paths" in row.keys() else "[]"
+            roots = _roots_from_meta(
+                str(primary or ""),
+                existing if existing not in ("", "[]", None) else None,
+            )
+            if roots:
+                conn.execute(
+                    "UPDATE library_meta SET root_paths = ? WHERE id = 1",
+                    (_roots_to_json(roots),),
+                )
+
+
+def _roots_to_json(root_paths: list[str]) -> str:
+    return json.dumps(list(root_paths), ensure_ascii=False)
+
+
+def _roots_from_meta(root_path: str, root_paths_raw: Any) -> list[str]:
+    """Parse durable roots from meta row (JSON list or legacy single path)."""
+    roots: list[str] = []
+    if isinstance(root_paths_raw, str) and root_paths_raw.strip():
+        try:
+            parsed = json.loads(root_paths_raw)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, list):
+            roots = [p for p in parsed if isinstance(p, str)]
+    if not roots and isinstance(root_path, str) and root_path:
+        roots = [root_path]
+    return normalize_library_roots(roots)
+
+
 def _init_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(_SCHEMA_SQL)
+    _migrate_library_meta(conn)
     # Device inventory tables (same DB); safe no-op if already present.
     try:
         from mtpmanager.infra.device_index import _ensure_schema as _device_schema
@@ -186,16 +241,24 @@ def save_library_index(
         assigned = ensure_track_guids(library.tracks, path_to_guid=path_map)
         library.tracks[:] = assigned
 
+        roots = normalize_library_roots(library.root_paths)
+        if not roots and library.root_path:
+            roots = normalize_library_roots([library.root_path])
+        library.root_paths[:] = roots
+        primary = roots[0] if roots else ""
+        roots_json = _roots_to_json(roots)
+
         with conn:
             conn.execute(
                 """
-                INSERT INTO library_meta (id, root_path, scanned_at)
-                VALUES (1, ?, ?)
+                INSERT INTO library_meta (id, root_path, root_paths, scanned_at)
+                VALUES (1, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                   root_path = excluded.root_path,
+                  root_paths = excluded.root_paths,
                   scanned_at = excluded.scanned_at
                 """,
-                (library.root_path or "", now),
+                (primary, roots_json, now),
             )
             # Full replace of track set for this library (matches old JSON rewrite).
             keep_guids = [t.guid for t in assigned]
@@ -257,9 +320,10 @@ def save_library_index(
         conn.close()
 
     logger.info(
-        "Saved library index: %d tracks under %s → %s",
+        "Saved library index: %d tracks under %d root(s) %s → %s",
         len(library.tracks),
-        library.root_path,
+        len(library.root_paths),
+        library.root_paths,
         dest,
     )
     return dest
@@ -297,7 +361,7 @@ def load_library_index(
     try:
         _init_schema(conn)
         meta_row = conn.execute(
-            "SELECT root_path, scanned_at FROM library_meta WHERE id = 1"
+            "SELECT root_path, root_paths, scanned_at FROM library_meta WHERE id = 1"
         ).fetchone()
         if meta_row is None:
             # Empty DB — try JSON migration into this path.
@@ -316,6 +380,12 @@ def load_library_index(
         root_path = meta_row["root_path"]
         if not isinstance(root_path, str):
             logger.warning("Library index %s: invalid root_path", dest)
+            return None
+        roots = _roots_from_meta(root_path, meta_row["root_paths"])
+        if not roots and root_path:
+            roots = normalize_library_roots([root_path])
+        if not roots:
+            logger.warning("Library index %s: no library roots", dest)
             return None
 
         rows = conn.execute(
@@ -340,12 +410,13 @@ def load_library_index(
             )
 
         logger.info(
-            "Loaded library index: %d tracks under %s from %s",
+            "Loaded library index: %d tracks under %d root(s) %s from %s",
             len(tracks),
-            root_path,
+            len(roots),
+            roots,
             dest,
         )
-        return Library(tracks=tracks, root_path=root_path)
+        return Library(tracks=tracks, root_paths=roots)
     except sqlite3.Error as e:
         logger.warning("Cannot read library index %s: %s", dest, e)
         return None
@@ -440,7 +511,13 @@ def load_legacy_json_library(json_path: Path) -> Library | None:
     if not isinstance(raw, dict):
         return None
     root_path = raw.get("root_path")
-    if not isinstance(root_path, str):
+    roots_raw = raw.get("root_paths")
+    roots: list[str] = []
+    if isinstance(roots_raw, list):
+        roots = [p for p in roots_raw if isinstance(p, str)]
+    if not roots and isinstance(root_path, str) and root_path:
+        roots = [root_path]
+    if not roots:
         return None
     tracks_raw = raw.get("tracks")
     if not isinstance(tracks_raw, list):
@@ -452,7 +529,7 @@ def load_legacy_json_library(json_path: Path) -> Library | None:
         track = _track_from_json_dict(item)
         if track is not None:
             tracks.append(track)
-    return Library(tracks=tracks, root_path=root_path)
+    return Library(tracks=tracks, root_paths=roots)
 
 
 def migrate_json_if_needed(

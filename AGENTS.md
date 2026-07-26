@@ -50,11 +50,11 @@ Do **not**:
 | PyMTP send, filetype enum, ctypes | `mtpmanager/infra/pymtp_wrapper.py`, `pymtp_device.py` + `tests/test_pymtp_filetypes.py` |
 | Transcode → send pipeline, batch abort | `mtpmanager/app/transfer.py` |
 | Live batch queue (append mid-job) | `mtpmanager/app/transfer_queue.py` + controllers `_enqueue_tracks` |
-| UI actions, mode, recovery dialogs | `mtpmanager/ui/controllers.py`, `window.py` |
+| UI actions, mode, recovery dialogs | `mtpmanager/ui/controllers.py`, `window.py`, `dialogs.py` (incl. Manage Library) |
 | Artist/album selection | `mtpmanager/domain/library.py` |
 | Scan / tags | `app/scan_library.py`, `infra/mutagen_tags.py` |
 | Album art thumbs | `infra/album_art.py` (mutagen + Pillow; album header rows only) |
-| Library index (SQLite + GUID) | `infra/library_index.py`, `domain/track_id.py`, `infra/app_paths.py` |
+| Library index (SQLite + GUID; multi-root) | `infra/library_index.py`, `domain/library.py` (`root_paths`), `app/scan_library.py`, `domain/track_id.py`, `infra/app_paths.py` |
 | Device list join / skip-if-present | `domain/device_media.py`, `app/transfer.py`, controllers list/sync |
 | Durable device inventory (list_files once) | `infra/device_index.py` + connect seed / Refresh menu in controllers |
 | Device profiles / graphics | `domain/device_profile.py`, `domain/device_profiles.py`, `assets/devices/` |
