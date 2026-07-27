@@ -20,7 +20,9 @@ from mtpmanager.domain.device_profile import DeviceProfile, match_device_profile
 from mtpmanager.domain.device_profiles import BUILTIN_PROFILES
 from mtpmanager.domain.library import (
     Library,
+    is_audiobook_track,
     normalize_library_roots,
+    partition_music_and_audiobooks,
     primary_artist,
     year_from_date,
 )
@@ -29,6 +31,7 @@ from mtpmanager.domain.library_sort import (
     group_by_album,
     group_by_artist_album,
     group_by_artist_dash_album,
+    group_by_artist_album_year,
     group_by_directory,
     group_by_year,
     iter_track_cells,
@@ -199,10 +202,16 @@ class AppController:
         self._device_tag_enrich_inflight = False
         self._device_music_refs: list[DeviceTrackRef] = []
         self._device_video_refs: list[DeviceTrackRef] = []
+        self._device_audiobook_refs: list[DeviceTrackRef] = []
         self._device_track_by_iid: dict[str, Track] = {}
         self._device_video_track_by_iid: dict[str, Track] = {}
+        self._device_audiobook_track_by_iid: dict[str, Track] = {}
         self._device_tree_refresh_after_id: str | None = None
         self._device_video_populate_after_id: str | None = None
+        self._device_audiobook_populate_after_id: str | None = None
+        self._audiobooks_populate_after_id: str | None = None
+        # Roots for the in-flight scan (toolbar path while busy_message updates).
+        self._scan_roots: list[str] = []
         self._active_profile: DeviceProfile | None = None
         # Default: "{artist} - {album}" (Artist-column option 3; VA via algorithm).
         self._sort_primary = SortPrimary.ARTIST_ALBUM_COMBO
@@ -280,12 +289,16 @@ class AppController:
         # gesture via the platform binding when present; prefer right-click.
         w.tree.bind("<Button-3>", w.popup_track_context)
         w.tree.bind("<Button-2>", w.popup_track_context)
+        w.audiobooks_tree.bind("<Button-3>", w.popup_track_context)
+        w.audiobooks_tree.bind("<Button-2>", w.popup_track_context)
         import sys as _sys
 
         if _sys.platform == "darwin":
             # macOS: Control-click = context menu; multi-toggle is Command-click.
             w.tree.bind("<Control-Button-1>", w.popup_track_context)
+            w.audiobooks_tree.bind("<Control-Button-1>", w.popup_track_context)
         w.tree.bind("<<TreeviewSelect>>", self._on_tree_selection_changed)
+        w.audiobooks_tree.bind("<<TreeviewSelect>>", self._on_tree_selection_changed)
         # Apply persisted mode (PyMTP default; Stable only if config says so).
         self._apply_transfer_mode(
             self._config.active_mode(),
@@ -603,6 +616,7 @@ class AppController:
         """Map row iids to tracks; group headers include all descendant tracks."""
         tracks: list[Track] = []
         seen: set[str] = set()
+        tree = self.win.active_library_tree()
 
         def add_from_iid(iid: str) -> None:
             track = self._track_by_iid.get(iid)
@@ -611,7 +625,7 @@ class AppController:
                     tracks.append(track)
                     seen.add(track.path)
                 return
-            for child in self.win.tree.get_children(iid):
+            for child in tree.get_children(iid):
                 add_from_iid(child)
 
         for iid in iids:
@@ -650,7 +664,8 @@ class AppController:
             return
 
         iid = iids[0]
-        tags = set(self.win.tree.item(iid, "tags"))
+        tree = self.win.active_library_tree()
+        tags = set(tree.item(iid, "tags"))
         seed = self._group_seed_by_iid.get(iid)
 
         if "group_artist" in tags and seed is not None:
@@ -832,6 +847,14 @@ class AppController:
                 pass
             self._populate_after_id = None
 
+    def _cancel_audiobooks_populate(self) -> None:
+        if self._audiobooks_populate_after_id is not None:
+            try:
+                self.win.root.after_cancel(self._audiobooks_populate_after_id)
+            except Exception:
+                pass
+            self._audiobooks_populate_after_id = None
+
     def _cancel_device_populate(self) -> None:
         if self._device_populate_after_id is not None:
             try:
@@ -848,6 +871,14 @@ class AppController:
                 pass
             self._device_video_populate_after_id = None
 
+    def _cancel_device_audiobook_populate(self) -> None:
+        if self._device_audiobook_populate_after_id is not None:
+            try:
+                self.win.root.after_cancel(self._device_audiobook_populate_after_id)
+            except Exception:
+                pass
+            self._device_audiobook_populate_after_id = None
+
     def _track_iid(self, track: Track) -> str:
         # Paths are unique; avoid characters Treeview rejects in iids.
         return "t:" + track.path.replace("\\", "/")
@@ -857,6 +888,9 @@ class AppController:
 
     def _device_video_track_iid(self, track: Track) -> str:
         return "dv:" + track.path.replace("\\", "/")
+
+    def _device_audiobook_track_iid(self, track: Track) -> str:
+        return "dab:" + track.path.replace("\\", "/")
 
     @staticmethod
     def _host_path_for_device_track(track: Track) -> str:
@@ -879,13 +913,14 @@ class AppController:
             return candidate
         return ""
 
-    def _insert_track_row(self, parent: str, track: Track) -> None:
+    def _insert_track_row(self, parent: str, track: Track, *, tree=None) -> None:
         num, title, artist, album, year = iter_track_cells(track)
         iid = self._track_iid(track)
+        target = tree if tree is not None else self.win.tree
         # Avoid duplicate iids if path appears twice
-        if self.win.tree.exists(iid):
+        if target.exists(iid):
             iid = f"{iid}#{id(track)}"
-        self.win.tree.insert(
+        target.insert(
             parent,
             "end",
             iid=iid,
@@ -929,10 +964,28 @@ class AppController:
         )
         self._device_video_track_by_iid[iid] = track
 
+    def _insert_device_audiobook_row(self, parent: str, track: Track) -> None:
+        num, title, artist, album, year = iter_track_cells(track)
+        iid = self._device_audiobook_track_iid(track)
+        if self.win.device_audiobooks_tree.exists(iid):
+            iid = f"{iid}#{id(track)}"
+        self.win.device_audiobooks_tree.insert(
+            parent,
+            "end",
+            iid=iid,
+            text=num,
+            values=(title, artist, album, year),
+            tags=("track", "audiobook"),
+            open=False,
+        )
+        self._device_audiobook_track_by_iid[iid] = track
+
     def _rebuild_track_tree(self) -> None:
-        """Rebuild Treeview from library using current sort primary."""
+        """Rebuild Music + Audiobooks trees from library using current sort."""
         self._cancel_populate()
+        self._cancel_audiobooks_populate()
         self.win.clear_track_tree()
+        self.win.clear_audiobooks_tree()
         self._track_by_iid.clear()
         self._iid_by_path.clear()
         self._group_seed_by_iid.clear()
@@ -940,7 +993,16 @@ class AppController:
         self._pending_album_art = []
         # Tree selection is gone; keep startup hint, else clear context label.
         self._refresh_selection_detail([])
-        tracks = list(self.library.tracks)
+        all_tracks = list(self.library.tracks)
+        if not all_tracks:
+            self.win.set_tracks_usable(self._library_root_reachable())
+            return
+
+        music_tracks, audiobook_tracks = partition_music_and_audiobooks(all_tracks)
+        # Always rebuild audiobooks (fixed Author → Year order).
+        self._rebuild_audiobooks_tree(audiobook_tracks)
+
+        tracks = music_tracks
         if not tracks:
             self.win.set_tracks_usable(self._library_root_reachable())
             return
@@ -1126,10 +1188,89 @@ class AppController:
 
         run_chunk(0)
 
+    def _rebuild_audiobooks_tree(self, tracks: list[Track]) -> None:
+        """Rebuild Library → Audiobooks (genre Audiobook; Author → Year)."""
+        self._cancel_audiobooks_populate()
+        self.win.clear_audiobooks_tree()
+        if not tracks:
+            return
+
+        ops: list = []
+        groups = group_by_artist_album_year(tracks)
+        for ag in groups:
+            # Prefix group iids so they never collide with Music tree maps.
+            artist_iid = f"ab:{ag.key}"
+            artist_seed = None
+            for release in ag.children:
+                if release.tracks:
+                    artist_seed = release.tracks[0]
+                    break
+            ops.append(
+                (
+                    "group",
+                    "",
+                    artist_iid,
+                    ag.label,
+                    ("group", "group_artist"),
+                    artist_seed,
+                )
+            )
+            for release in ag.children:
+                release_iid = f"ab:{release.key}"
+                release_seed = release.tracks[0] if release.tracks else None
+                ops.append(
+                    (
+                        "group",
+                        artist_iid,
+                        release_iid,
+                        release.label,
+                        ("group", "group_album"),
+                        release_seed,
+                    )
+                )
+                for t in release.tracks:
+                    ops.append(("track", release_iid, t))
+
+        chunks = fibonacci_chunk_bounds(len(ops))
+        if not chunks:
+            return
+
+        def run_chunk(chunk_i: int) -> None:
+            self._audiobooks_populate_after_id = None
+            start, end = chunks[chunk_i]
+            tree = self.win.audiobooks_tree
+            for i in range(start, end):
+                op = ops[i]
+                if op[0] == "group":
+                    _, parent, iid, label, tags, seed = op
+                    if not tree.exists(iid):
+                        tree.insert(
+                            parent,
+                            "end",
+                            iid=iid,
+                            text="",
+                            values=(label, "", "", ""),
+                            tags=tags,
+                            open=False,
+                        )
+                        if seed is not None:
+                            self._group_seed_by_iid[iid] = seed
+                else:
+                    _, parent, track = op
+                    self._insert_track_row(parent, track, tree=tree)
+            nxt = chunk_i + 1
+            if nxt < len(chunks):
+                self._audiobooks_populate_after_id = self.win.root.after(
+                    1, lambda i=nxt: run_chunk(i)
+                )
+
+        run_chunk(0)
+
     def _clear_device_media_trees(self) -> None:
-        """Drop Device → Music/Video trees and in-memory maps."""
+        """Drop Device → Music/Video/Audiobooks trees and in-memory maps."""
         self._cancel_device_populate()
         self._cancel_device_video_populate()
+        self._cancel_device_audiobook_populate()
         if self._device_tree_refresh_after_id is not None:
             try:
                 self.win.root.after_cancel(self._device_tree_refresh_after_id)
@@ -1139,10 +1280,13 @@ class AppController:
         self._device_album_art_job_gen += 1
         self.win.clear_device_track_tree()
         self.win.clear_device_video_tree()
+        self.win.clear_device_audiobooks_tree()
         self._device_track_by_iid.clear()
         self._device_video_track_by_iid.clear()
+        self._device_audiobook_track_by_iid.clear()
         self._device_music_refs = []
         self._device_video_refs = []
+        self._device_audiobook_refs = []
         self._device_pending_album_art = []
 
     # Back-compat alias used by older call sites / mental model.
@@ -1186,29 +1330,51 @@ class AppController:
         """Compatibility wrapper — refresh music and video device trees."""
         self._refresh_device_media_trees(enrich_missing_tags=enrich_missing_tags)
 
-    def _refresh_device_media_trees(self, *, enrich_missing_tags: bool = True) -> None:
-        """Rebuild Device → Music and Device → Video from durable index.
+    def _split_device_music_and_audiobook_refs(
+        self,
+        refs: list[DeviceTrackRef],
+        by_guid: dict[str, Track],
+    ) -> tuple[list[DeviceTrackRef], list[DeviceTrackRef]]:
+        """Partition audio refs into music vs audiobook by resolved genre."""
+        music: list[DeviceTrackRef] = []
+        audiobooks: list[DeviceTrackRef] = []
+        display = resolve_device_tracks_for_display(refs, by_guid)
+        for ref, track in zip(refs, display):
+            if is_audiobook_track(track):
+                audiobooks.append(ref)
+            else:
+                music.append(ref)
+        return music, audiobooks
 
-        Music: GUID basename → host library tags, then device tags, then filename.
-        Video: device tags (Get Track Info), then filename (no library GUID on
-        Send Video). When *enrich_missing_tags* is True, objects still missing
-        titles are filled via ``get_track_metadata`` after the USB quiet window.
+    def _refresh_device_media_trees(self, *, enrich_missing_tags: bool = True) -> None:
+        """Rebuild Device → Music / Video / Audiobooks from durable index.
+
+        Music/Audiobooks: GUID basename → host library tags, then device tags,
+        then filename. Audiobooks are audio objects whose genre is Audiobook
+        (host or device tags). Video: device tags then filename. When
+        *enrich_missing_tags* is True, objects still missing titles are filled
+        via ``get_track_metadata`` after the USB quiet window.
         """
         serial = self._device_serial
         if not serial:
             self._clear_device_media_trees()
             return
 
-        # --- Music ---
+        # --- Audio (Music + Audiobooks) ---
         try:
-            music_refs = list_cached_music_refs(serial)
+            audio_refs = list_cached_music_refs(serial)
         except Exception:
             logger.warning("list_cached_music_refs failed", exc_info=True)
-            music_refs = []
-        music_by_guid = self._host_tracks_by_guid_for_refs(music_refs)
-        music_refs = enrich_refs_from_host(music_refs, music_by_guid)
+            audio_refs = []
+        audio_by_guid = self._host_tracks_by_guid_for_refs(audio_refs)
+        audio_refs = enrich_refs_from_host(audio_refs, audio_by_guid)
+        music_refs, audiobook_refs = self._split_device_music_and_audiobook_refs(
+            audio_refs, audio_by_guid
+        )
         self._device_music_refs = list(music_refs)
-        self._rebuild_device_music_tree(music_refs, music_by_guid)
+        self._device_audiobook_refs = list(audiobook_refs)
+        self._rebuild_device_music_tree(music_refs, audio_by_guid)
+        self._rebuild_device_audiobooks_tree(audiobook_refs, audio_by_guid)
 
         # --- Video ---
         try:
@@ -1224,12 +1390,13 @@ class AppController:
         self._rebuild_device_video_tree(video_refs, video_by_guid)
 
         if enrich_missing_tags:
-            need_music = refs_needing_device_tags(music_refs, music_by_guid)
+            need_music = refs_needing_device_tags(music_refs, audio_by_guid)
+            need_ab = refs_needing_device_tags(audiobook_refs, audio_by_guid)
             need_video = refs_needing_device_tags(video_refs, video_by_guid)
-            # Deduplicate by item_id (same object should not appear in both).
+            # Deduplicate by item_id (same object should not appear twice).
             seen: set[int] = set()
             need: list[DeviceTrackRef] = []
-            for ref in list(need_music) + list(need_video):
+            for ref in list(need_music) + list(need_ab) + list(need_video):
                 oid = int(ref.item_id or 0)
                 if oid <= 0 or oid in seen:
                     continue
@@ -1246,13 +1413,19 @@ class AppController:
                         self._device_music_refs,
                         self._host_tracks_by_guid_for_refs(self._device_music_refs),
                     )
+                    still_ab = refs_needing_device_tags(
+                        self._device_audiobook_refs,
+                        self._host_tracks_by_guid_for_refs(
+                            self._device_audiobook_refs
+                        ),
+                    )
                     still_video = refs_needing_device_tags(
                         self._device_video_refs,
                         self._host_tracks_by_guid_for_refs(self._device_video_refs),
                     )
                     still_seen: set[int] = set()
                     still: list[DeviceTrackRef] = []
-                    for ref in list(still_music) + list(still_video):
+                    for ref in list(still_music) + list(still_ab) + list(still_video):
                         oid = int(ref.item_id or 0)
                         if oid <= 0 or oid in still_seen:
                             continue
@@ -1364,6 +1537,89 @@ class AppController:
                 )
             else:
                 self._start_device_background_album_art()
+
+        run_chunk(0)
+
+    def _rebuild_device_audiobooks_tree(
+        self,
+        refs: list[DeviceTrackRef],
+        by_guid: dict[str, Track] | None = None,
+    ) -> None:
+        """Chunked Treeview insert for Device → Audiobooks (Author → Year)."""
+        self._cancel_device_audiobook_populate()
+        self.win.clear_device_audiobooks_tree()
+        self._device_audiobook_track_by_iid.clear()
+
+        if by_guid is None:
+            by_guid = self._host_tracks_by_guid_for_refs(refs)
+        tracks = resolve_device_tracks_for_display(refs, by_guid)
+        if not tracks:
+            return
+
+        ops: list = []
+        groups = group_by_artist_album_year(tracks)
+        for ag in groups:
+            artist_iid = f"dab:{ag.key}"
+            artist_seed = None
+            for release in ag.children:
+                if release.tracks:
+                    artist_seed = release.tracks[0]
+                    break
+            ops.append(
+                (
+                    "group",
+                    "",
+                    artist_iid,
+                    ag.label,
+                    ("group", "group_artist"),
+                    artist_seed,
+                )
+            )
+            for release in ag.children:
+                release_iid = f"dab:{release.key}"
+                ops.append(
+                    (
+                        "group",
+                        artist_iid,
+                        release_iid,
+                        release.label,
+                        ("group", "group_album"),
+                        release.tracks[0] if release.tracks else None,
+                    )
+                )
+                for t in release.tracks:
+                    ops.append(("track", release_iid, t))
+
+        chunks = fibonacci_chunk_bounds(len(ops))
+        if not chunks:
+            return
+
+        def run_chunk(chunk_i: int) -> None:
+            self._device_audiobook_populate_after_id = None
+            start, end = chunks[chunk_i]
+            tree = self.win.device_audiobooks_tree
+            for i in range(start, end):
+                op = ops[i]
+                if op[0] == "group":
+                    _, parent, iid, label, tags, _seed = op
+                    if not tree.exists(iid):
+                        tree.insert(
+                            parent,
+                            "end",
+                            iid=iid,
+                            text="",
+                            values=(label, "", "", ""),
+                            tags=tags,
+                            open=False,
+                        )
+                else:
+                    _, parent, track = op
+                    self._insert_device_audiobook_row(parent, track)
+            nxt = chunk_i + 1
+            if nxt < len(chunks):
+                self._device_audiobook_populate_after_id = self.win.root.after(
+                    1, lambda i=nxt: run_chunk(i)
+                )
 
         run_chunk(0)
 
@@ -1539,13 +1795,21 @@ class AppController:
                 ]
 
             music_merged = _merge(self._device_music_refs)
+            ab_merged = _merge(self._device_audiobook_refs)
             video_merged = _merge(self._device_video_refs)
+            # Re-partition audio after tags (genre may have arrived).
+            audio_merged = list(music_merged) + list(ab_merged)
+            audio_by_guid = self._host_tracks_by_guid_for_refs(audio_merged)
+            music_merged, ab_merged = self._split_device_music_and_audiobook_refs(
+                audio_merged, audio_by_guid
+            )
             self._device_music_refs = music_merged
+            self._device_audiobook_refs = ab_merged
             self._device_video_refs = video_merged
-            music_by_guid = self._host_tracks_by_guid_for_refs(music_merged)
             video_by_guid = self._host_tracks_by_guid_for_refs(video_merged)
             # Do not re-trigger enrich after this pass.
-            self._rebuild_device_music_tree(music_merged, music_by_guid)
+            self._rebuild_device_music_tree(music_merged, audio_by_guid)
+            self._rebuild_device_audiobooks_tree(ab_merged, audio_by_guid)
             self._rebuild_device_video_tree(video_merged, video_by_guid)
             logger.info(
                 "Device media tags enriched updated=%s failed=%s aborted=%s",
@@ -2217,20 +2481,46 @@ class AppController:
         )
 
     @staticmethod
-    def _scan_and_save_worker(roots: list[str]) -> tuple[Library, str | None]:
+    def _scan_and_save_worker(
+        roots: list[str],
+        report: Callable[..., None] | None = None,
+    ) -> tuple[Library, str | None]:
         """Worker: full tree scan of all roots + persist index (no Tk).
 
         Returns (library, save_error_message). Scan failures raise; save failures
         are returned so the UI can still show the scanned library.
         Album art is warmed after the UI starts populating (not here).
+
+        *report* receives ``("dir", dir_path)`` for each folder whose music
+        files are being tag-read (toolbar Scanning… indicator).
         """
-        library = scan_library_roots(roots)
+        def on_dir(dir_path: str) -> None:
+            if report is not None:
+                report("dir", dir_path)
+
+        library = scan_library_roots(roots, on_dir_progress=on_dir)
         try:
             save_library_index(library)
         except OSError as e:
             logger.exception("Failed to save library index")
             return library, str(e)
         return library, None
+
+    def _on_scan_progress(self, kind: str, *args) -> None:
+        """Main-thread: show bottom-level directory while scanning."""
+        if kind != "dir" or not self._library_busy:
+            return
+        dir_path = str(args[0] or "") if args else ""
+        if not dir_path:
+            return
+        bottom = os.path.basename(dir_path.rstrip(os.sep + "/")) or dir_path
+        roots = list(getattr(self, "_scan_roots", None) or self.library.root_paths)
+        self.win.set_library_status(
+            track_count=len(self.library),
+            root_paths=roots,
+            root_reachable=True,
+            busy_message=f"Scanning… /{bottom}",
+        )
 
     def _on_index_restore_progress(self, kind: str, *args) -> None:
         """Main-thread: paint tree rows while the worker still reads SQLite."""
@@ -2239,7 +2529,9 @@ class AppController:
             total = int(args[1] or 0) if len(args) > 1 else 0
             self._index_stream_total = total
             self._cancel_populate()
+            self._cancel_audiobooks_populate()
             self.win.clear_track_tree()
+            self.win.clear_audiobooks_tree()
             self._track_by_iid.clear()
             self._iid_by_path.clear()
             self._group_seed_by_iid.clear()
@@ -2294,7 +2586,9 @@ class AppController:
         if library is None:
             self.library = Library()
             self._cancel_populate()
+            self._cancel_audiobooks_populate()
             self.win.clear_track_tree()
+            self.win.clear_audiobooks_tree()
             self._track_by_iid.clear()
             self._iid_by_path.clear()
             self._group_seed_by_iid.clear()
@@ -2323,6 +2617,7 @@ class AppController:
 
     def _on_scan_done(self, result: tuple[Library, str | None]) -> None:
         library, save_err = result
+        self._scan_roots = []
         self._on_library_job_done(library, kind="Scanned")
         if save_err:
             messagebox.showwarning(
@@ -2333,6 +2628,7 @@ class AppController:
     def _on_library_job_error(self, exc: BaseException, *, title: str) -> None:
         self._library_busy = False
         self._index_stream_active = False
+        self._scan_roots = []
         self._sync_library_chrome()
         logger.exception("%s", title)
         messagebox.showerror(title, str(exc))
@@ -2362,6 +2658,7 @@ class AppController:
         """Background full scan of all *roots*; previous library kept until done."""
         # Do not replace self.library until the worker succeeds (stale roots safe).
         roots = normalize_library_roots(roots)
+        self._scan_roots = list(roots)
         self._library_busy = True
         self.win.set_library_menu_state(manage_enabled=False)
         self.win.set_library_status(
@@ -2371,12 +2668,19 @@ class AppController:
             busy_message="Scanning…",
         )
         self._refresh_manage_library_dialog()
+
+        def work() -> tuple[Library, str | None]:
+            gen = self._bg.generation
+            report = self._bg.progress_callback(gen)
+            return AppController._scan_and_save_worker(roots, report)
+
         self._bg.submit(
-            lambda: self._scan_and_save_worker(roots),
+            work,
             on_done=self._on_scan_done,
             on_error=lambda e: self._on_library_job_error(
                 e, title="Library scan failed"
             ),
+            on_progress=self._on_scan_progress,
             name="library-scan",
         )
 
@@ -3256,7 +3560,7 @@ class AppController:
         kind = "album"
         if iid:
             try:
-                tags = set(self.win.tree.item(iid, "tags"))
+                tags = set(self.win.active_library_tree().item(iid, "tags"))
             except Exception:
                 tags = set()
             if "group_directory" in tags:

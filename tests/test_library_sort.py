@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import unittest
 
-from mtpmanager.domain.library import primary_artist
+from mtpmanager.domain.library import (
+    is_audiobook_genre,
+    is_audiobook_track,
+    partition_music_and_audiobooks,
+    primary_artist,
+)
 from mtpmanager.domain.library_sort import (
     ARTIST_COLUMN_CYCLE,
     SortPrimary,
@@ -12,6 +17,7 @@ from mtpmanager.domain.library_sort import (
     group_by_album,
     group_by_artist_album,
     group_by_artist_dash_album,
+    group_by_artist_album_year,
     group_by_directory,
     group_by_year,
     is_various_artists_name,
@@ -62,6 +68,28 @@ class PrimaryArtistTests(unittest.TestCase):
     def test_falls_back_to_artist(self) -> None:
         t = _t("/x", artist="Solo", albumartist="Unknown Artist")
         self.assertEqual(primary_artist(t), "Solo")
+
+
+class AudiobookGenreTests(unittest.TestCase):
+    def test_exact_and_plural(self) -> None:
+        self.assertTrue(is_audiobook_genre("Audiobook"))
+        self.assertTrue(is_audiobook_genre("audiobooks"))
+        self.assertFalse(is_audiobook_genre("Rock"))
+        self.assertFalse(is_audiobook_genre("Unknown Genre"))
+        self.assertFalse(is_audiobook_genre(""))
+
+    def test_multi_value_token(self) -> None:
+        self.assertTrue(is_audiobook_genre("Spoken Word / Audiobook"))
+        self.assertTrue(is_audiobook_genre("Fiction; Audiobook"))
+
+    def test_partition_music_and_audiobooks(self) -> None:
+        music = _t("/m.mp3", genre="Rock")
+        book = _t("/b.mp3", genre="Audiobook", artist="Author")
+        m, a = partition_music_and_audiobooks([music, book])
+        self.assertEqual(m, [music])
+        self.assertEqual(a, [book])
+        self.assertTrue(is_audiobook_track(book))
+        self.assertFalse(is_audiobook_track(music))
 
 
 class LibrarySortTests(unittest.TestCase):
@@ -138,6 +166,39 @@ class LibrarySortTests(unittest.TestCase):
         self.assertEqual(labels[0], "2020")
         self.assertEqual(labels[1], "2010")
         self.assertEqual(labels[-1], "Unknown year")
+
+    def test_group_by_artist_album_year_author_then_release(self) -> None:
+        tracks = [
+            _t("/1", artist="Zed", date="2015", album="B", title="t1"),
+            _t("/2", artist="Ann", date="2020", album="Late", title="t2"),
+            _t("/3", artist="Ann", date="2010", album="Early", title="t3"),
+            _t("/4", artist="Ann", date="", album="NoYear", title="t4"),
+            _t("/5", artist="Zed", date="2001", album="A", title="t5"),
+            _t(
+                "/6",
+                artist="Ann",
+                date="2010",
+                album="Early",
+                title="t3b",
+                tracknumber="02",
+            ),
+        ]
+        groups = group_by_artist_album_year(tracks)
+        self.assertEqual([g.label for g in groups], ["Ann", "Zed"])
+        ann = groups[0]
+        self.assertEqual(
+            [c.label for c in ann.children],
+            ["Early - 2010", "Late - 2020", "NoYear - Unknown year"],
+        )
+        self.assertEqual(
+            [t.meta.title for t in ann.children[0].tracks],
+            ["t3", "t3b"],
+        )
+        zed = groups[1]
+        self.assertEqual(
+            [c.label for c in zed.children],
+            ["A - 2001", "B - 2015"],
+        )
 
     def test_group_album(self) -> None:
         tracks = [

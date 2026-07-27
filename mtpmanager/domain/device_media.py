@@ -265,6 +265,7 @@ def apply_track_info(ref: DeviceTrackRef, info: DeviceTrackInfo) -> DeviceTrackR
     name = (info.name or ref.name or "").strip()
     tn = int(info.tracknumber or 0)
     tracknumber = str(tn) if tn > 0 else (ref.tracknumber or "")
+    genre = (info.genre or "").strip() or ref.genre
     return DeviceTrackRef(
         item_id=int(ref.item_id or info.item_id or 0),
         name=name,
@@ -273,6 +274,7 @@ def apply_track_info(ref: DeviceTrackRef, info: DeviceTrackInfo) -> DeviceTrackR
         album=(info.album or "").strip(),
         date=(info.date or "").strip() or ref.date,
         tracknumber=tracknumber,
+        genre=genre,
         parent_id=int(info.parent_id or ref.parent_id or 0),
         storage_id=int(info.storage_id or ref.storage_id or 0),
         filetype=int(info.filetype or ref.filetype or 0),
@@ -289,6 +291,7 @@ def apply_host_meta(ref: DeviceTrackRef, meta: TrackMetadata) -> DeviceTrackRef:
         album=(meta.album or "").strip() or ref.album,
         date=(meta.date or "").strip() or ref.date,
         tracknumber=(str(meta.tracknumber or "").strip() or ref.tracknumber),
+        genre=(meta.genre or "").strip() or ref.genre,
         parent_id=int(ref.parent_id or 0),
         storage_id=int(ref.storage_id or 0),
         filetype=int(ref.filetype or 0),
@@ -381,6 +384,7 @@ def resolve_device_tracks_for_display(
         title = (ref.title or "").strip()
         artist = (ref.artist or "").strip()
         album = (ref.album or "").strip()
+        genre = (ref.genre or "").strip()
         # Empty or placeholder titles (common on device video) → filename.
         if not title or title.casefold() == "unknown title":
             title = name
@@ -394,6 +398,7 @@ def resolve_device_tracks_for_display(
             artist=artist,
             albumartist=artist,
             album=album,
+            genre=genre or "Unknown Genre",
             date=(ref.date or "").strip(),
             tracknumber=tn or "01",
         )

@@ -203,6 +203,7 @@ class ApplyTrackInfoTests(unittest.TestCase):
             album="The Album",
             date="2005",
             tracknumber=3,
+            genre="Audiobook",
             parent_id=100,
             storage_id=0x00010001,
             filetype=2,
@@ -214,6 +215,7 @@ class ApplyTrackInfoTests(unittest.TestCase):
         self.assertEqual(out.album, "The Album")
         self.assertEqual(out.date, "2005")
         self.assertEqual(out.tracknumber, "3")
+        self.assertEqual(out.genre, "Audiobook")
         self.assertEqual(out.name, "short.mp3")
         self.assertEqual(out.parent_id, 100)
 
@@ -266,6 +268,7 @@ class GuidJoinTests(unittest.TestCase):
                     title="Host Title",
                     artist="Host Artist",
                     album="Host Album",
+                    genre="Audiobook",
                 ),
                 guid=g,
             )
@@ -275,8 +278,13 @@ class GuidJoinTests(unittest.TestCase):
         self.assertEqual(by_id[1].title, "Host Title")
         self.assertEqual(by_id[1].artist, "Host Artist")
         self.assertEqual(by_id[1].album, "Host Album")
+        self.assertEqual(by_id[1].genre, "Audiobook")
         self.assertEqual(by_id[2].title, "")
         self.assertEqual(by_id[2].name, "foreign.mp3")
+
+        display = resolve_device_tracks_for_display(out, by_guid)
+        host_row = next(t for t in display if t.guid == g)
+        self.assertEqual(host_row.meta.genre, "Audiobook")
 
     def test_resolve_device_tracks_for_display_priority(self) -> None:
         g = new_track_guid()

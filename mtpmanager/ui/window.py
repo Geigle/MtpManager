@@ -524,7 +524,7 @@ class MainWindow:
         p_tree_frame.pack(fill=BOTH, expand=True)
 
         # Device tab: nested notebook by media category.
-        # Music + Video trees for now; Audiobooks / Podcasts deferred.
+        # Music + Video + Audiobooks; Podcasts deferred.
         self.device_notebook = ttk.Notebook(self.device_tab)
         self.device_notebook.pack(side=TOP, fill=BOTH, expand=True)
 
@@ -542,6 +542,9 @@ class MainWindow:
 
         dv_tree_frame = Frame(self.device_video_tab)
         dv_tree_frame.pack(fill=BOTH, expand=True)
+
+        dab_tree_frame = Frame(self.device_audiobooks_tab)
+        dab_tree_frame.pack(fill=BOTH, expand=True)
 
         yscroll = Scrollbar(tree_frame)
         yscroll.pack(side=RIGHT, fill=Y)
@@ -661,6 +664,78 @@ class MainWindow:
         self.device_video_tree.column("album", width=140, minwidth=60)
         self.device_video_tree.column("year", width=56, minwidth=40, stretch=False)
 
+        # Library audiobooks tree (same columns; Author → Year grouping).
+        ab_yscroll = Scrollbar(ab_tree_frame)
+        ab_yscroll.pack(side=RIGHT, fill=Y)
+        ab_xscroll = Scrollbar(ab_tree_frame, orient="horizontal")
+        ab_xscroll.pack(side=BOTTOM, fill=X)
+
+        self.audiobooks_tree = ttk.Treeview(
+            ab_tree_frame,
+            columns=TREE_COLS,
+            show="tree headings",
+            selectmode="extended",
+            yscrollcommand=ab_yscroll.set,
+            xscrollcommand=ab_xscroll.set,
+        )
+        self.audiobooks_tree.pack(side=LEFT, fill=BOTH, expand=True)
+        ab_yscroll.config(command=self.audiobooks_tree.yview)
+        ab_xscroll.config(command=self.audiobooks_tree.xview)
+
+        self.audiobooks_tree.heading("#0", text="#", anchor="w")
+        self.audiobooks_tree.heading("title", text="Title", anchor="w")
+        self.audiobooks_tree.heading("artist", text="Author", anchor="w")
+        self.audiobooks_tree.heading("album", text="Album", anchor="w")
+        self.audiobooks_tree.heading("year", text="Year", anchor="w")
+        self.audiobooks_tree.column(
+            "#0",
+            width=self._thumb_size + 28,
+            minwidth=self._thumb_size + 20,
+            stretch=False,
+        )
+        self.audiobooks_tree.column("title", width=280, minwidth=120, stretch=True)
+        self.audiobooks_tree.column("artist", width=140, minwidth=60)
+        self.audiobooks_tree.column("album", width=140, minwidth=60)
+        self.audiobooks_tree.column("year", width=56, minwidth=40, stretch=False)
+
+        # Device audiobooks tree (same columns/grouping as library audiobooks).
+        dab_yscroll = Scrollbar(dab_tree_frame)
+        dab_yscroll.pack(side=RIGHT, fill=Y)
+        dab_xscroll = Scrollbar(dab_tree_frame, orient="horizontal")
+        dab_xscroll.pack(side=BOTTOM, fill=X)
+
+        self.device_audiobooks_tree = ttk.Treeview(
+            dab_tree_frame,
+            columns=TREE_COLS,
+            show="tree headings",
+            selectmode="extended",
+            yscrollcommand=dab_yscroll.set,
+            xscrollcommand=dab_xscroll.set,
+        )
+        self.device_audiobooks_tree.pack(side=LEFT, fill=BOTH, expand=True)
+        dab_yscroll.config(command=self.device_audiobooks_tree.yview)
+        dab_xscroll.config(command=self.device_audiobooks_tree.xview)
+
+        self.device_audiobooks_tree.heading("#0", text="#", anchor="w")
+        self.device_audiobooks_tree.heading("title", text="Title", anchor="w")
+        self.device_audiobooks_tree.heading("artist", text="Author", anchor="w")
+        self.device_audiobooks_tree.heading("album", text="Album", anchor="w")
+        self.device_audiobooks_tree.heading("year", text="Year", anchor="w")
+        self.device_audiobooks_tree.column(
+            "#0",
+            width=self._thumb_size + 28,
+            minwidth=self._thumb_size + 20,
+            stretch=False,
+        )
+        self.device_audiobooks_tree.column(
+            "title", width=280, minwidth=120, stretch=True
+        )
+        self.device_audiobooks_tree.column("artist", width=140, minwidth=60)
+        self.device_audiobooks_tree.column("album", width=140, minwidth=60)
+        self.device_audiobooks_tree.column(
+            "year", width=56, minwidth=40, stretch=False
+        )
+
         # Group headers bold (label lives in Title values[0]); transfer tags tint rows.
         self.tree.tag_configure("group", font=("", 11, "bold"))
         self.tree.tag_configure("group_artist", font=("", 12, "bold"))
@@ -670,12 +745,27 @@ class MainWindow:
         self.tree.tag_configure(
             "xfer_transferring", background=BG_TRANSFER_TRANSFERRING
         )
+        self.audiobooks_tree.tag_configure("group", font=("", 11, "bold"))
+        self.audiobooks_tree.tag_configure("group_artist", font=("", 12, "bold"))
+        self.audiobooks_tree.tag_configure("dead", foreground=_DEAD_TRACK_FG)
+        self.audiobooks_tree.tag_configure("xfer_queued", background=BG_TRANSFER_QUEUED)
+        self.audiobooks_tree.tag_configure(
+            "xfer_transcoding", background=BG_TRANSFER_TRANSCODING
+        )
+        self.audiobooks_tree.tag_configure(
+            "xfer_transferring", background=BG_TRANSFER_TRANSFERRING
+        )
         self.device_tree.tag_configure("group", font=("", 11, "bold"))
         self.device_tree.tag_configure("group_artist", font=("", 12, "bold"))
         self.device_tree.tag_configure("dead", foreground=_DEAD_TRACK_FG)
         self.device_video_tree.tag_configure("group", font=("", 11, "bold"))
         self.device_video_tree.tag_configure("group_folder", font=("", 12, "bold"))
         self.device_video_tree.tag_configure("dead", foreground=_DEAD_TRACK_FG)
+        self.device_audiobooks_tree.tag_configure("group", font=("", 11, "bold"))
+        self.device_audiobooks_tree.tag_configure(
+            "group_artist", font=("", 12, "bold")
+        )
+        self.device_audiobooks_tree.tag_configure("dead", foreground=_DEAD_TRACK_FG)
 
         # Callbacks set by controller for column-header sort / context menus.
         self._on_sort_heading = None
@@ -987,6 +1077,13 @@ class MainWindow:
         # Drop in-memory PhotoImage refs; on-disk thumbs remain.
         self._album_art_cache.clear()
 
+    def clear_audiobooks_tree(self) -> None:
+        """Clear Library → Audiobooks tree."""
+        try:
+            self.audiobooks_tree.delete(*self.audiobooks_tree.get_children())
+        except Exception:
+            pass
+
     def clear_device_track_tree(self) -> None:
         """Clear Device → Music tree (album-art cache shared with library)."""
         try:
@@ -998,6 +1095,15 @@ class MainWindow:
         """Clear Device → Video tree."""
         try:
             self.device_video_tree.delete(*self.device_video_tree.get_children())
+        except Exception:
+            pass
+
+    def clear_device_audiobooks_tree(self) -> None:
+        """Clear Device → Audiobooks tree."""
+        try:
+            self.device_audiobooks_tree.delete(
+                *self.device_audiobooks_tree.get_children()
+            )
         except Exception:
             pass
 
@@ -1056,25 +1162,42 @@ class MainWindow:
     def set_tracks_usable(self, usable: bool) -> None:
         """Allow interaction, or mark the tree as dead/unreachable."""
         self._tracks_interactive = usable
+        trees = (self.tree, self.audiobooks_tree)
         if usable:
-            self.tree.configure(selectmode="extended")
-            # Drop dead tag from all items
-            for iid in self._all_iids():
-                tags = [t for t in self.tree.item(iid, "tags") if t != "dead"]
-                self.tree.item(iid, tags=tags)
+            for tree in trees:
+                tree.configure(selectmode="extended")
+                # Drop dead tag from all items
+                for iid in self._all_iids(tree):
+                    tags = [t for t in tree.item(iid, "tags") if t != "dead"]
+                    tree.item(iid, tags=tags)
             return
-        self.tree.configure(selectmode="none")
-        for iid in self._all_iids():
-            tags = list(self.tree.item(iid, "tags"))
-            if "dead" not in tags:
-                tags.append("dead")
-            self.tree.item(iid, tags=tags)
+        for tree in trees:
+            tree.configure(selectmode="none")
+            for iid in self._all_iids(tree):
+                tags = list(tree.item(iid, "tags"))
+                if "dead" not in tags:
+                    tags.append("dead")
+                tree.item(iid, tags=tags)
 
-    def _all_iids(self) -> list[str]:
+    def active_library_tree(self):
+        """Treeview for the currently selected library media tab (Music / Audiobooks)."""
+        try:
+            current = self.media_notebook.select()
+        except Exception:
+            return self.tree
+        try:
+            if current == str(self.audiobooksLibrary_tab):
+                return self.audiobooks_tree
+        except Exception:
+            pass
+        return self.tree
+
+    def _all_iids(self, tree=None) -> list[str]:
+        tree = tree if tree is not None else self.tree
         out: list[str] = []
 
         def walk(parent: str) -> None:
-            for child in self.tree.get_children(parent):
+            for child in tree.get_children(parent):
                 out.append(child)
                 walk(child)
 
@@ -1083,15 +1206,20 @@ class MainWindow:
 
     def set_track_transfer_style(self, iid: str, status: str | None) -> None:
         """Tint a track row for transfer state via tags."""
-        if not self.tree.exists(iid):
+        tree = None
+        if self.tree.exists(iid):
+            tree = self.tree
+        elif self.audiobooks_tree.exists(iid):
+            tree = self.audiobooks_tree
+        if tree is None:
             return
         tags = [
             t
-            for t in self.tree.item(iid, "tags")
+            for t in tree.item(iid, "tags")
             if not str(t).startswith("xfer_")
         ]
         if status in (None, "done", "failed", "skipped", ""):
-            self.tree.item(iid, tags=tags)
+            tree.item(iid, tags=tags)
             return
         if status == "transferring":
             tags.append("xfer_transferring")
@@ -1099,17 +1227,18 @@ class MainWindow:
             tags.append("xfer_transcoding")
         else:
             tags.append("xfer_queued")
-        self.tree.item(iid, tags=tags)
+        tree.item(iid, tags=tags)
 
     def clear_transfer_styles(self) -> None:
-        """Clear all transfer tint tags from the tree."""
-        for iid in self._all_iids():
-            tags = [
-                t
-                for t in self.tree.item(iid, "tags")
-                if not str(t).startswith("xfer_")
-            ]
-            self.tree.item(iid, tags=tags)
+        """Clear all transfer tint tags from library trees."""
+        for tree in (self.tree, self.audiobooks_tree):
+            for iid in self._all_iids(tree):
+                tags = [
+                    t
+                    for t in tree.item(iid, "tags")
+                    if not str(t).startswith("xfer_")
+                ]
+                tree.item(iid, tags=tags)
 
     def popup_track_context(self, event) -> str | None:
         """Show context menu for the row under the pointer.
@@ -1124,16 +1253,20 @@ class MainWindow:
         try:
             if not self._tracks_interactive:
                 return "break"
-            row = self.tree.identify_row(event.y)
+            # Prefer the widget that received the click (Music or Audiobooks).
+            tree = event.widget if event is not None else self.tree
+            if tree not in (self.tree, self.audiobooks_tree):
+                tree = self.active_library_tree()
+            row = tree.identify_row(event.y)
             if not row:
                 return "break"
-            tags = set(self.tree.item(row, "tags"))
+            tags = set(tree.item(row, "tags"))
             # Preserve multi-select when right-clicking inside the selection.
-            current = self.tree.selection()
+            current = tree.selection()
             if row not in current:
-                self.tree.selection_set(row)
-            self.tree.focus(row)
-            self.tree.see(row)
+                tree.selection_set(row)
+            tree.focus(row)
+            tree.see(row)
 
             if "track" in tags:
                 menu = self.menu_track_ctx
@@ -1163,17 +1296,18 @@ class MainWindow:
 
     def selected_tree_iid(self) -> str | None:
         """Primary selected row (focus preferred, else first in selection)."""
-        focus = self.tree.focus()
-        if focus and self.tree.exists(focus):
+        tree = self.active_library_tree()
+        focus = tree.focus()
+        if focus and tree.exists(focus):
             return focus
-        sel = self.tree.selection()
+        sel = tree.selection()
         if not sel:
             return None
         return sel[0]
 
     def selected_tree_iids(self) -> list[str]:
-        """All selected row iids (multi-select)."""
-        return list(self.tree.selection())
+        """All selected row iids (multi-select) from the active library tab."""
+        return list(self.active_library_tree().selection())
 
     def set_progress_status(self, text: str) -> None:
         """Update the status line above the progress bar (sync track, etc.)."""

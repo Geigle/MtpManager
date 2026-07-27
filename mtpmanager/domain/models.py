@@ -126,6 +126,7 @@ class DeviceTrackRef:
     album: str = ""
     date: str = ""
     tracknumber: str = ""
+    genre: str = ""
     parent_id: int = 0
     storage_id: int = 0
     filetype: int = 0

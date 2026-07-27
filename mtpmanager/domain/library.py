@@ -55,6 +55,47 @@ def year_from_date(date: str) -> str | None:
 # Back-compat alias for internal call sites.
 _year_from_date = year_from_date
 
+# Genre tokens that mean spoken-word audiobook (case-insensitive).
+_AUDIOBOOK_GENRE_TOKENS = frozenset({"audiobook", "audiobooks"})
+
+
+def is_audiobook_genre(genre: str) -> bool:
+    """True when *genre* is (or includes) the Audiobook genre token.
+
+    Matches exact ``Audiobook`` / ``Audiobooks`` (any case) and multi-value
+    tags split on spaces, slashes, semicolons, commas, or pipes
+    (e.g. ``Spoken Word / Audiobook``).
+    """
+    raw = (genre or "").strip()
+    if not raw:
+        return False
+    key = raw.casefold()
+    if key in ("unknown genre", "unknown"):
+        return False
+    if key in _AUDIOBOOK_GENRE_TOKENS:
+        return True
+    tokens = re.split(r"[\s/;,|]+", key)
+    return any(t in _AUDIOBOOK_GENRE_TOKENS for t in tokens if t)
+
+
+def is_audiobook_track(track: Track) -> bool:
+    """True when the track's genre tags it as an audiobook."""
+    return is_audiobook_genre(track.meta.genre if track and track.meta else "")
+
+
+def partition_music_and_audiobooks(
+    tracks: Iterable[Track],
+) -> tuple[list[Track], list[Track]]:
+    """Split tracks into (music, audiobooks) by :func:`is_audiobook_track`."""
+    music: list[Track] = []
+    audiobooks: list[Track] = []
+    for t in tracks:
+        if is_audiobook_track(t):
+            audiobooks.append(t)
+        else:
+            music.append(t)
+    return music, audiobooks
+
 
 def _albumartist_meaningful(albumartist: str) -> bool:
     return bool(albumartist) and albumartist != _UNKNOWN_ARTIST

@@ -615,6 +615,82 @@ def group_by_year(tracks: Sequence[Track]) -> list[GroupNode]:
     return groups
 
 
+def group_by_artist_album_year(tracks: Sequence[Track]) -> list[GroupNode]:
+    """Artist/Author groups → ``{album} - {year}`` → tracks (#, title).
+
+    Primary order is author (albumartist preferred via :func:`primary_artist`).
+    Under each author, releases sort by year ascending then album title.
+    Unknown year sorts last. Used by the Audiobooks tabs.
+    """
+    by_artist: dict[str, list[Track]] = defaultdict(list)
+    artist_labels: dict[str, str] = {}
+    for t in tracks:
+        key = _artist_key(t)
+        by_artist[key].append(t)
+        artist_labels.setdefault(key, primary_artist(t))
+
+    def year_sort_key(y: str) -> tuple:
+        # Ascending years; unknown last.
+        if y == UNKNOWN_YEAR:
+            return (1, "")
+        return (0, y)
+
+    artists: list[GroupNode] = []
+    for akey in sorted(by_artist.keys()):
+        atracks = by_artist[akey]
+        # Composite key: year + album so same title in different years stay separate.
+        by_release: dict[str, list[Track]] = defaultdict(list)
+        release_meta: dict[str, tuple[str, str, str]] = {}  # key → (y, alkey, label)
+        for t in atracks:
+            y = year_from_date(t.meta.date) or UNKNOWN_YEAR
+            alkey = _casefold(t.meta.album) or "unknown album"
+            album_label = t.meta.album or "Unknown Album"
+            composite = f"{y}\0{alkey}"
+            by_release[composite].append(t)
+            if composite not in release_meta:
+                release_meta[composite] = (
+                    y,
+                    alkey,
+                    f"{album_label} - {y}",
+                )
+
+        def release_sort_key(composite: str) -> tuple:
+            y, alkey, _label = release_meta[composite]
+            yk = year_sort_key(y)
+            return (yk, alkey)
+
+        release_nodes: list[GroupNode] = []
+        for composite in sorted(by_release.keys(), key=release_sort_key):
+            y, alkey, label = release_meta[composite]
+            rtracks = sorted(
+                by_release[composite],
+                key=lambda t: (
+                    track_number_key(t),
+                    _casefold(t.meta.title),
+                    t.path,
+                ),
+            )
+            release_nodes.append(
+                GroupNode(
+                    key=f"artist_album_year:{akey}:{y}:{alkey}",
+                    label=label,
+                    tracks=tuple(rtracks),
+                )
+            )
+        artists.append(
+            GroupNode(
+                key=f"artist:{akey}",
+                label=artist_labels[akey],
+                children=tuple(release_nodes),
+            )
+        )
+    return artists
+
+
+# Back-compat alias (previous Author → Year hierarchy).
+group_by_artist_year = group_by_artist_album_year
+
+
 def iter_track_cells(track: Track) -> tuple[str, str, str, str, str]:
     """Values for tree columns: #0 text, title, artist, album, year.
 

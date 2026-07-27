@@ -465,6 +465,29 @@ class NormalizeRootsAndScanTests(unittest.TestCase):
                 normalize_library_roots([str(live), missing]),
             )
 
+    def test_scan_library_roots_reports_bottom_dirs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "Music"
+            album_a = root / "Artist" / "AlbumA"
+            album_b = root / "Artist" / "AlbumB"
+            album_a.mkdir(parents=True)
+            album_b.mkdir(parents=True)
+            (album_a / "1.mp3").write_bytes(b"a")
+            (album_b / "2.mp3").write_bytes(b"b")
+            seen: list[str] = []
+
+            def on_dir(path: str) -> None:
+                seen.append(os.path.basename(path.rstrip(os.sep)))
+
+            with mock.patch(
+                "mtpmanager.app.scan_library.read_metadata",
+                return_value=TrackMetadata(title="t"),
+            ):
+                lib = scan_library_roots([str(root)], on_dir_progress=on_dir)
+
+            self.assertEqual(len(lib.tracks), 2)
+            self.assertEqual(sorted(seen), ["AlbumA", "AlbumB"])
+
 
 if __name__ == "__main__":
     unittest.main()
