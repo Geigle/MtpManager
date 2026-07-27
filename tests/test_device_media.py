@@ -8,13 +8,18 @@ from mtpmanager.domain.device_media import (
     apply_track_info,
     enrich_refs_from_host,
     guid_stems_from_files,
+    is_placeholder_tag,
     looks_like_music,
     looks_like_track,
     looks_like_video,
     merge_track_refs,
     music_refs_from_files,
+    ref_tags_look_placeholder,
     refs_needing_device_tags,
     resolve_device_tracks_for_display,
+    tags_look_placeholder,
+    track_meta_is_usable,
+    track_meta_looks_placeholder,
     track_refs_from_files,
     video_folder_label,
     video_refs_from_files,
@@ -240,6 +245,117 @@ class TrackLineFallbackTests(unittest.TestCase):
         )
         self.assertIn("Real Title", with_title)
         self.assertIn("Band", with_title)
+
+
+class PlaceholderTagTests(unittest.TestCase):
+    def test_is_placeholder_tag(self) -> None:
+        self.assertTrue(is_placeholder_tag(""))
+        self.assertTrue(is_placeholder_tag("Unknown Artist"))
+        self.assertTrue(is_placeholder_tag("unknown title"))
+        self.assertTrue(is_placeholder_tag("—"))
+        # Device firmware / Creative-style angle brackets (not our defaults).
+        self.assertTrue(is_placeholder_tag("<Unknown>"))
+        self.assertTrue(is_placeholder_tag("<unknown>"))
+        self.assertTrue(is_placeholder_tag("<Unknown Artist>"))
+        self.assertFalse(is_placeholder_tag("Radiohead"))
+        self.assertFalse(is_placeholder_tag("Paranoid Android"))
+
+    def test_tags_look_placeholder_requires_artist_and_title(self) -> None:
+        self.assertTrue(
+            tags_look_placeholder(
+                title="Unknown Title",
+                artist="Unknown Artist",
+                album="Unknown Album",
+            )
+        )
+        self.assertTrue(
+            tags_look_placeholder(title="", artist="", album="Something")
+        )
+        # Device literal <Unknown> + filename-as-title.
+        self.assertTrue(
+            tags_look_placeholder(
+                title="song.mp3",
+                artist="<Unknown>",
+                album="<Unknown>",
+                object_name="song.mp3",
+            )
+        )
+        self.assertTrue(
+            tags_look_placeholder(
+                title="song",
+                artist="<Unknown>",
+                album="<Unknown>",
+                object_name="song.mp3",
+            )
+        )
+        # Real title alone is enough to treat as usable listing.
+        self.assertFalse(
+            tags_look_placeholder(
+                title="Song",
+                artist="Unknown Artist",
+                album="Unknown Album",
+            )
+        )
+        self.assertFalse(
+            tags_look_placeholder(
+                title="Unknown Title",
+                artist="Band",
+                album="Unknown Album",
+            )
+        )
+
+    def test_ref_and_meta_helpers(self) -> None:
+        empty = DeviceTrackRef(
+            item_id=1,
+            name="x.mp3",
+            title="Unknown Title",
+            artist="Unknown Artist",
+            album="Unknown Album",
+        )
+        self.assertTrue(ref_tags_look_placeholder(empty))
+        # Mass-storage-ish dump: device tags are <Unknown>, title = filename.
+        angle = DeviceTrackRef(
+            item_id=3,
+            name="dump.mp3",
+            title="dump.mp3",
+            artist="<Unknown>",
+            album="<Unknown>",
+        )
+        self.assertTrue(ref_tags_look_placeholder(angle))
+        good = DeviceTrackRef(
+            item_id=2, name="y.mp3", title="T", artist="A", album="B"
+        )
+        self.assertFalse(ref_tags_look_placeholder(good))
+        self.assertTrue(
+            track_meta_looks_placeholder(
+                TrackMetadata(
+                    title="Unknown Title",
+                    artist="Unknown Artist",
+                    album="Unknown Album",
+                )
+            )
+        )
+        self.assertTrue(
+            track_meta_is_usable(
+                TrackMetadata(title="Hello", artist="Unknown Artist")
+            )
+        )
+        self.assertFalse(
+            track_meta_is_usable(
+                TrackMetadata(
+                    title="Unknown Title", artist="Unknown Artist"
+                )
+            )
+        )
+        # Angle-bracket artist from device is not "usable" identity alone.
+        self.assertTrue(is_placeholder_tag("<Unknown>"))
+        self.assertFalse(
+            track_meta_is_usable(
+                TrackMetadata(
+                    title="Unknown Title", artist="<Unknown>"
+                )
+            )
+        )
 
 
 class GuidJoinTests(unittest.TestCase):

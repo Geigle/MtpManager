@@ -9,7 +9,13 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
 from mtpmanager.app.cancellation import CancelCheck
-from mtpmanager.domain.device_media import apply_track_info
+from mtpmanager.domain.device_media import (
+    apply_host_meta,
+    apply_track_info,
+    track_info_looks_placeholder,
+    track_meta_is_usable,
+    track_meta_looks_placeholder,
+)
 from mtpmanager.domain.models import (
     DeleteAllResult,
     DeviceInfo,
@@ -19,7 +25,7 @@ from mtpmanager.domain.models import (
     FolderEntry,
     TrackMetadata,
 )
-from mtpmanager.infra.mutagen_tags import write_metadata
+from mtpmanager.infra.mutagen_tags import read_metadata, write_metadata
 from mtpmanager.infra.remote_naming import (
     DEFAULT_MUSIC_FOLDER_ID,
     DEFAULT_TV_FOLDER_ID,
@@ -258,6 +264,218 @@ def track_info_to_metadata(info: DeviceTrackInfo) -> TrackMetadata:
     )
 
 
+def metadata_to_track_info(
+    meta: TrackMetadata,
+    *,
+    item_id: int = 0,
+    name: str = "",
+    parent_id: int = 0,
+    storage_id: int = 0,
+    filetype: int = 0,
+) -> DeviceTrackInfo:
+    """Host tags → DeviceTrackInfo shape (for path helpers that take *info*)."""
+    tn = 0
+    try:
+        raw = str(meta.tracknumber or "").split("/")[0].strip()
+        tn = int(raw) if raw else 0
+    except (TypeError, ValueError):
+        tn = 0
+    duration_ms = 0
+    if meta.length_sec and float(meta.length_sec) > 0:
+        duration_ms = int(float(meta.length_sec) * 1000)
+    return DeviceTrackInfo(
+        item_id=int(item_id or 0),
+        name=name or "",
+        parent_id=int(parent_id or 0),
+        storage_id=int(storage_id or 0),
+        filetype=int(filetype or 0),
+        title=(meta.title or "").strip(),
+        artist=(meta.artist or "").strip(),
+        album=(meta.album or "").strip(),
+        genre=(meta.genre or "").strip(),
+        composer=(meta.composer or "").strip(),
+        date=(meta.date or "").strip(),
+        tracknumber=tn,
+        duration_ms=duration_ms,
+        sample_rate=int(meta.sample_rate or 0),
+        channels=int(meta.channels or 0),
+        bitrate=int(meta.bitrate or 0),
+        bitrate_type=int(meta.bitrate_mode or 0),
+    )
+
+
+@dataclass(frozen=True)
+class EmbeddedMetaProbeResult:
+    """Outcome of downloading a device object to read embedded file tags."""
+
+    meta: TrackMetadata | None = None
+    path: str | None = None  # temp (or kept) download path
+    usable: bool = False
+    error: str = ""
+
+
+def _temp_download_path_for_ref(ref: DeviceTrackRef) -> str:
+    """Build a unique temp path preserving the remote extension."""
+    import tempfile
+
+    raw_name = (ref.name or "").strip() or f"track_{ref.item_id}"
+    _, ext = os.path.splitext(raw_name)
+    if not ext:
+        ext = ".mp3"
+    if len(ext) > 8:
+        ext = ".bin"
+    fd, path = tempfile.mkstemp(
+        prefix=f"mtpmanager_meta_{int(ref.item_id or 0)}_",
+        suffix=ext.lower(),
+    )
+    os.close(fd)
+    return path
+
+
+def probe_embedded_metadata(
+    device: DevicePort,
+    ref: DeviceTrackRef,
+    *,
+    keep_file: bool = False,
+) -> EmbeddedMetaProbeResult:
+    """Download *ref* to a temp file and read tags with mutagen.
+
+    Used when on-device LIBMTP track metadata is empty/placeholder (typical when
+    someone treated an MTP-only player like mass storage). The temp file is
+    deleted unless *keep_file* is True (caller owns cleanup / move).
+    """
+    oid = int(ref.item_id or 0)
+    if oid <= 0:
+        return EmbeddedMetaProbeResult(error="invalid object id")
+
+    getter = getattr(device, "get_file_to_file", None)
+    if getter is None:
+        return EmbeddedMetaProbeResult(
+            error="Device adapter does not support get_file_to_file"
+        )
+
+    dest = _temp_download_path_for_ref(ref)
+    try:
+        logger.info(
+            "probe_embedded_metadata download id=%s name=%r → %s",
+            oid,
+            ref.name,
+            dest,
+        )
+        getter(oid, dest)
+        meta = read_metadata(dest)
+        usable = track_meta_is_usable(meta) and not track_meta_looks_placeholder(
+            meta
+        )
+        # Stricter: reject if both title and artist are still placeholders.
+        if track_meta_looks_placeholder(meta):
+            usable = False
+        logger.info(
+            "probe_embedded_metadata id=%s usable=%s title=%r artist=%r",
+            oid,
+            usable,
+            (meta.title if meta else ""),
+            (meta.artist if meta else ""),
+        )
+        if keep_file:
+            return EmbeddedMetaProbeResult(
+                meta=meta if usable else None,
+                path=dest,
+                usable=usable,
+            )
+        # Always expose meta when usable; drop file.
+        try:
+            os.remove(dest)
+        except OSError:
+            pass
+        return EmbeddedMetaProbeResult(
+            meta=meta if usable else None,
+            path=None,
+            usable=usable,
+        )
+    except TransportError as exc:
+        try:
+            if os.path.isfile(dest) and not keep_file:
+                os.remove(dest)
+        except OSError:
+            pass
+        if keep_file and os.path.isfile(dest):
+            return EmbeddedMetaProbeResult(
+                path=dest, usable=False, error=str(exc)
+            )
+        return EmbeddedMetaProbeResult(error=str(exc))
+    except Exception as exc:
+        logger.exception("probe_embedded_metadata failed id=%s", oid)
+        try:
+            if os.path.isfile(dest) and not keep_file:
+                os.remove(dest)
+        except OSError:
+            pass
+        return EmbeddedMetaProbeResult(error=str(exc))
+
+
+def resolve_tags_with_embedded_fallback(
+    device: DevicePort,
+    ref: DeviceTrackRef,
+    *,
+    info: DeviceTrackInfo | None = None,
+    prefer_embedded_when_placeholder: bool = True,
+    keep_download: bool = False,
+) -> tuple[DeviceTrackInfo | None, TrackMetadata | None, str | None]:
+    """Pick the best tags for *ref*: device info, else embedded file tags.
+
+    Returns ``(info, file_meta, download_path)``:
+    - *info*: device Get_Trackmetadata (possibly None)
+    - *file_meta*: usable embedded tags when recovered (else None)
+    - *download_path*: temp path when *keep_download* and a download was done
+
+    When device tags look like placeholders and *prefer_embedded_when_placeholder*
+    is True, downloads once and reads the file with mutagen.
+    """
+    meta_info = info
+    if meta_info is None:
+        try:
+            meta_info = device.get_track_metadata(int(ref.item_id or 0))
+        except TransportError as exc:
+            if exc.fatal:
+                raise
+            logger.debug(
+                "resolve_tags: no track metadata id=%s (%s)",
+                ref.item_id,
+                exc,
+            )
+            meta_info = None
+        except Exception:
+            logger.debug(
+                "resolve_tags: track metadata failed id=%s",
+                ref.item_id,
+                exc_info=True,
+            )
+            meta_info = None
+
+    if not prefer_embedded_when_placeholder:
+        return meta_info, None, None
+    if meta_info is not None and not track_info_looks_placeholder(meta_info):
+        return meta_info, None, None
+
+    probe = probe_embedded_metadata(device, ref, keep_file=keep_download)
+    if not probe.usable or probe.meta is None:
+        if keep_download and probe.path:
+            return meta_info, None, probe.path
+        return meta_info, None, None
+
+    # Synthesize DeviceTrackInfo so path helpers see recovered tags.
+    recovered = metadata_to_track_info(
+        probe.meta,
+        item_id=int(ref.item_id or 0),
+        name=(ref.name or "").strip(),
+        parent_id=int(ref.parent_id or 0),
+        storage_id=int(ref.storage_id or 0),
+        filetype=int(ref.filetype or 0),
+    )
+    return recovered, probe.meta, probe.path if keep_download else None
+
+
 def suggested_retrieve_basename(
     ref: DeviceTrackRef,
     *,
@@ -319,11 +537,12 @@ def suggested_library_relpath(
     ref: DeviceTrackRef,
     *,
     info: DeviceTrackInfo | None = None,
+    file_meta: TrackMetadata | None = None,
 ) -> str:
     """Relative ``Artist/Album/Title.ext`` path under a library root.
 
     Used when pulling an un-indexed (non-GUID ObjectFileName) object into the
-    host library. Tags come from *info* when present, else from the listing ref.
+    host library. Tag priority: *file_meta* (embedded) → *info* (device) → ref.
     """
     raw_name = (ref.name or "").strip() or (info.name if info else "") or "track"
     _, ext = os.path.splitext(raw_name)
@@ -336,10 +555,17 @@ def suggested_library_relpath(
     title = ""
     artist = ""
     album = ""
+    if file_meta is not None and track_meta_is_usable(file_meta):
+        title = (file_meta.title or "").strip()
+        artist = (file_meta.artist or file_meta.albumartist or "").strip()
+        album = (file_meta.album or "").strip()
     if info is not None:
-        title = (info.title or "").strip()
-        artist = (info.artist or "").strip()
-        album = (info.album or "").strip()
+        if not title:
+            title = (info.title or "").strip()
+        if not artist:
+            artist = (info.artist or "").strip()
+        if not album:
+            album = (info.album or "").strip()
     if not title:
         title = (ref.title or "").strip()
     if not artist:

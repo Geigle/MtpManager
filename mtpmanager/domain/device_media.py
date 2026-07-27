@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterable, Mapping, Sequence
 
 from mtpmanager.domain.models import (
@@ -296,6 +297,153 @@ def apply_host_meta(ref: DeviceTrackRef, meta: TrackMetadata) -> DeviceTrackRef:
         storage_id=int(ref.storage_id or 0),
         filetype=int(ref.filetype or 0),
     )
+
+
+# Placeholder strings devices and our own code use when tags are missing.
+# Common after someone copies files as if the player were mass storage (MTP
+# then surfaces empty track metadata as "Unknown …"). Some firmware/tools
+# use angle-bracket forms such as ``<Unknown>`` (not invented by this app).
+_PLACEHOLDER_TAG_VALUES = frozenset(
+    {
+        "",
+        "—",
+        "-",
+        "unknown",
+        "unknown artist",
+        "unknown album",
+        "unknown title",
+        "unknown genre",
+        "unknown composer",
+        "n/a",
+        "na",
+        "none",
+        "null",
+        # Device / libmtp / Creative-style literals (with or without <>).
+        "<unknown>",
+        "<unknown artist>",
+        "<unknown album>",
+        "<unknown title>",
+        "<unknown genre>",
+        "<unknown composer>",
+    }
+)
+
+
+def is_placeholder_tag(value: str | None) -> bool:
+    """True when *value* is empty or a known unknown/placeholder label.
+
+    Recognizes host defaults (``Unknown Artist``), bare ``Unknown``, and
+    device-supplied forms like ``<Unknown>``. Angle brackets are stripped
+    before matching so ``<Unknown Artist>`` counts as well.
+    """
+    text = (value or "").strip()
+    if not text:
+        return True
+    key = text.casefold()
+    if key in _PLACEHOLDER_TAG_VALUES:
+        return True
+    # Strip one layer of surrounding <…> / […] / (…) then re-check.
+    if len(key) >= 2 and key[0] in "<[(" and key[-1] in ">])":
+        inner = key[1:-1].strip()
+        if not inner or inner in _PLACEHOLDER_TAG_VALUES:
+            return True
+        if inner == "unknown" or inner.startswith("unknown "):
+            return True
+    # Bare "Unknown …" already covered via casefold set; also accept any
+    # tag that is only the word unknown (optionally with spaces).
+    if key == "unknown" or key.startswith("unknown "):
+        return True
+    return False
+
+
+def tags_look_placeholder(
+    *,
+    title: str | None = None,
+    artist: str | None = None,
+    album: str | None = None,
+    object_name: str | None = None,
+) -> bool:
+    """True when core identity tags look like empty/placeholder device metadata.
+
+    Used to detect MTP inventory that never received proper track tags (e.g.
+    files dropped via a mass-storage workflow the device does not support).
+
+    Requires **artist** placeholder and **title** either placeholder or equal
+    to the object basename (UI often shows filename when title is empty; some
+    devices also copy the filename into the title field).
+    """
+    if not is_placeholder_tag(artist):
+        return False
+    if is_placeholder_tag(title):
+        return True
+    # Filename-as-title: empty device title was replaced for display, or the
+    # player stored the ObjectFileName stem/basename as the title tag.
+    name = (object_name or "").strip()
+    if not name:
+        return False
+    t = (title or "").strip()
+    if not t:
+        return True
+    if t.casefold() == name.casefold():
+        return True
+    stem, _ext = os.path.splitext(name)
+    if stem and t.casefold() == stem.casefold():
+        return True
+    return False
+
+
+def track_meta_looks_placeholder(
+    meta: TrackMetadata | None,
+    *,
+    object_name: str | None = None,
+) -> bool:
+    """:func:`tags_look_placeholder` for a host :class:`TrackMetadata`."""
+    if meta is None:
+        return True
+    return tags_look_placeholder(
+        title=meta.title,
+        artist=meta.artist,
+        album=meta.album,
+        object_name=object_name,
+    )
+
+
+def ref_tags_look_placeholder(ref: DeviceTrackRef | None) -> bool:
+    """Placeholder check against listing / Get Track Info fields on *ref*."""
+    if ref is None:
+        return True
+    return tags_look_placeholder(
+        title=ref.title,
+        artist=ref.artist,
+        album=ref.album,
+        object_name=ref.name,
+    )
+
+
+def track_info_looks_placeholder(
+    info: DeviceTrackInfo | None,
+    *,
+    object_name: str | None = None,
+) -> bool:
+    """Placeholder check against LIBMTP_Get_Trackmetadata fields."""
+    if info is None:
+        return True
+    return tags_look_placeholder(
+        title=info.title,
+        artist=info.artist,
+        album=info.album,
+        object_name=object_name or info.name,
+    )
+
+
+def track_meta_is_usable(meta: TrackMetadata | None) -> bool:
+    """True when embedded file tags are worth preferring over placeholders."""
+    if meta is None:
+        return False
+    # Need at least a real title *or* a real artist (not both empty).
+    title_ok = not is_placeholder_tag(meta.title)
+    artist_ok = not is_placeholder_tag(meta.artist)
+    return title_ok or artist_ok
 
 
 def guid_stems_from_files(

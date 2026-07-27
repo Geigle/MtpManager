@@ -124,6 +124,7 @@ CTX_EXCLUDE_GROUP_FOLDER = "Exclude this folder…"
 # Device media context menus (on-device Music / Video / Audiobooks trees)
 CTX_DEVICE_DELETE = "Delete from device…"
 CTX_DEVICE_PULL = "Pull to library…"
+CTX_DEVICE_PULL_FOLDER = "Pull to folder…"
 CTX_DEVICE_DELETE_ARTIST = "Delete all from Artist…"
 CTX_DEVICE_DELETE_ALBUM = "Delete album from device…"
 CTX_DEVICE_DELETE_FOLDER = "Delete all in folder…"
@@ -399,6 +400,7 @@ class MainWindow:
         # Device on-media context menus (delete / pull).
         self.menu_device_track_ctx = Menu(self.root, tearoff=0)
         self.menu_device_track_ctx.add_command(label=CTX_DEVICE_PULL)
+        self.menu_device_track_ctx.add_command(label=CTX_DEVICE_PULL_FOLDER)
         self.menu_device_track_ctx.add_separator()
         self.menu_device_track_ctx.add_command(label=CTX_DEVICE_DELETE)
 
@@ -1450,6 +1452,7 @@ class MainWindow:
         *,
         on_delete=None,
         on_pull=None,
+        on_pull_folder=None,
         on_delete_artist=None,
         on_delete_album=None,
         on_delete_folder=None,
@@ -1460,6 +1463,10 @@ class MainWindow:
         if on_pull is not None:
             self.menu_device_track_ctx.entryconfig(
                 CTX_DEVICE_PULL, command=on_pull
+            )
+        if on_pull_folder is not None:
+            self.menu_device_track_ctx.entryconfig(
+                CTX_DEVICE_PULL_FOLDER, command=on_pull_folder
             )
         if on_delete is not None:
             self.menu_device_track_ctx.entryconfig(

@@ -43,10 +43,14 @@ from mtpmanager.domain.library_sort import (
     sort_tracks_flat,
 )
 from mtpmanager.domain.device_media import (
+    apply_host_meta,
     enrich_refs_from_host,
+    looks_like_music,
     looks_like_track,
+    ref_tags_look_placeholder,
     refs_needing_device_tags,
     resolve_device_tracks_for_display,
+    track_meta_is_usable,
     video_folder_label,
 )
 from mtpmanager.domain.models import DeviceInfo, DeviceTrackRef, Track, TrackMetadata
@@ -224,6 +228,10 @@ class AppController:
         self._device_tree_refresh_after_id: str | None = None
         self._device_context_tree = None
         self._device_context_row: str | None = None
+        # Object ids we already asked (or ran) embedded-tag recovery for.
+        self._file_meta_probe_asked: set[int] = set()
+        self._file_meta_probe_after_id: str | None = None
+        self._file_meta_probe_inflight = False
         self._device_video_populate_after_id: str | None = None
         self._device_audiobook_populate_after_id: str | None = None
         self._audiobooks_populate_after_id: str | None = None
@@ -306,6 +314,7 @@ class AppController:
         w.set_device_context_commands(
             on_delete=self.action_device_delete_selected,
             on_pull=self.action_device_pull_selected,
+            on_pull_folder=self.action_device_pull_to_folder,
             on_delete_artist=self.action_device_delete_artist_group,
             on_delete_album=self.action_device_delete_album_group,
             on_delete_folder=self.action_device_delete_folder_group,
@@ -326,6 +335,9 @@ class AppController:
         for dev_tree in w.device_media_trees():
             dev_tree.bind("<Button-3>", w.popup_device_context)
             dev_tree.bind("<Button-2>", w.popup_device_context)
+            dev_tree.bind(
+                "<<TreeviewSelect>>", self._on_device_tree_selection_changed
+            )
         for panel_w in (
             w.device_panel,
             w.lbl_device_title,
@@ -696,6 +708,205 @@ class AppController:
         self.win.set_sync_selected_enabled(bool(tracks), count=len(tracks))
         self._refresh_selection_detail(tracks)
 
+    def _on_device_tree_selection_changed(self, event=None) -> None:
+        """Update selection detail + maybe offer embedded-tag recovery."""
+        tree = event.widget if event is not None else self.win.active_device_tree()
+        try:
+            selection = list(tree.selection())
+        except Exception:
+            selection = []
+        # Debounce: wait until selection settles (rapid multi-click).
+        if self._file_meta_probe_after_id is not None:
+            try:
+                self.win.root.after_cancel(self._file_meta_probe_after_id)
+            except Exception:
+                pass
+            self._file_meta_probe_after_id = None
+
+        if len(selection) != 1:
+            return
+        iid = selection[0]
+        tags = set(tree.item(iid, "tags") or ())
+        if "track" not in tags:
+            return
+
+        # Show host-shaped detail when we can.
+        by_iid = self._device_track_map_for_tree(tree)
+        track = by_iid.get(iid)
+        if track is not None:
+            try:
+                self.win.set_context_detail(
+                    track_selection_detail(track),
+                    path=track.path,
+                )
+            except Exception:
+                pass
+
+        self._file_meta_probe_after_id = self.win.root.after(
+            350,
+            lambda t=tree, i=iid: self._maybe_offer_embedded_meta_probe(t, i),
+        )
+
+    def _maybe_offer_embedded_meta_probe(self, tree, iid: str) -> None:
+        """If a single device audio row has placeholder tags, ask to probe file."""
+        self._file_meta_probe_after_id = None
+        if self.win.active_mode() == "stable":
+            return
+        if not self.device.is_connected():
+            return
+        if self._transfer_busy or self._file_meta_probe_inflight:
+            return
+        try:
+            sel = list(tree.selection())
+            if sel != [iid]:
+                return
+        except Exception:
+            return
+        tags = set(tree.item(iid, "tags") or ())
+        if "track" not in tags:
+            return
+        # Video tab / video rows: skip (not the mass-storage audio case).
+        if "video" in tags or tree is self.win.device_video_tree:
+            return
+
+        by_iid = self._device_track_map_for_tree(tree)
+        track = by_iid.get(iid)
+        if track is None:
+            return
+        oid = self._item_id_from_device_track(track)
+        if oid is None or oid in self._file_meta_probe_asked:
+            return
+
+        refs = self._device_refs_for_tracks([track])
+        if not refs:
+            return
+        ref = refs[0]
+
+        # Prefer audio-looking objects (music + audiobook).
+        if not looks_like_music(ref) and not looks_like_track(ref):
+            self._file_meta_probe_asked.add(oid)
+            return
+
+        # Host GUID join already has real tags — nothing to recover.
+        if track.guid and is_track_guid(track.guid):
+            try:
+                host = get_tracks_by_guids([track.guid])
+            except Exception:
+                host = {}
+            hit = host.get(track.guid) if host else None
+            if hit is not None and track_meta_is_usable(hit.meta):
+                self._file_meta_probe_asked.add(oid)
+                return
+
+        # Listing/ref tags are authoritative for "device listed Unknown…".
+        # Display may substitute the filename for Unknown Title.
+        needs = ref_tags_look_placeholder(ref)
+        if not needs:
+            self._file_meta_probe_asked.add(oid)
+            return
+
+        name = (ref.name or track.meta.title or f"id={oid}").strip()
+        self._file_meta_probe_asked.add(oid)
+        if not messagebox.askyesno(
+            "Fetch file metadata?",
+            "This track has empty or placeholder tags on the device "
+            "(Unknown Artist / Album / Title).\n\n"
+            "That often happens when files were copied as if the player "
+            "were a mass-storage drive instead of MTP.\n\n"
+            f"Download “{name}” to a temporary folder and read tags "
+            "from the file itself?\n\n"
+            "(The temp copy is discarded after reading.)",
+            default=messagebox.YES,
+        ):
+            return
+
+        self._start_embedded_meta_probe(ref)
+
+    def _start_embedded_meta_probe(self, ref: DeviceTrackRef) -> None:
+        """Background: download temp copy + mutagen; update device tree on hit."""
+        if self._file_meta_probe_inflight or self._transfer_busy:
+            messagebox.showinfo(
+                "Fetch file metadata",
+                "A transfer or device job is already in progress.",
+            )
+            return
+        if not self._require_device_ready():
+            return
+
+        oid = int(ref.item_id or 0)
+        self._file_meta_probe_inflight = True
+        device = self.device
+        batch_ref = ref
+
+        def work():
+            return device_ops.probe_embedded_metadata(device, batch_ref)
+
+        def on_done(result) -> None:
+            self._file_meta_probe_inflight = False
+            self._mark_usb_quiet(_DEVICE_USB_COOLDOWN_S)
+            try:
+                self.win.set_progress_status("")
+            except Exception:
+                pass
+            if not result.usable or result.meta is None:
+                messagebox.showinfo(
+                    "Fetch file metadata",
+                    "Could not recover usable tags from the downloaded file.\n"
+                    "The device listing is unchanged.",
+                )
+                return
+            meta = result.meta
+            updated = apply_host_meta(batch_ref, meta)
+
+            def _merge(refs: list[DeviceTrackRef]) -> list[DeviceTrackRef]:
+                out: list[DeviceTrackRef] = []
+                for r in refs:
+                    if int(r.item_id or 0) == oid:
+                        out.append(updated)
+                    else:
+                        out.append(r)
+                return out
+
+            self._device_music_refs = _merge(self._device_music_refs)
+            self._device_audiobook_refs = _merge(self._device_audiobook_refs)
+            # Re-partition in case genre appeared.
+            audio = list(self._device_music_refs) + list(
+                self._device_audiobook_refs
+            )
+            by_guid = self._host_tracks_by_guid_for_refs(audio)
+            music, ab = self._split_device_music_and_audiobook_refs(
+                audio, by_guid
+            )
+            self._device_music_refs = music
+            self._device_audiobook_refs = ab
+            self._rebuild_device_music_tree(music, by_guid)
+            self._rebuild_device_audiobooks_tree(ab, by_guid)
+            messagebox.showinfo(
+                "Fetch file metadata",
+                "Updated tags from the file:\n\n"
+                f"Artist: {meta.artist or '—'}\n"
+                f"Album: {meta.album or '—'}\n"
+                f"Title: {meta.title or '—'}",
+            )
+
+        def on_error(exc: BaseException) -> None:
+            self._file_meta_probe_inflight = False
+            self._mark_usb_quiet(_DEVICE_USB_COOLDOWN_S)
+            try:
+                self.win.set_progress_status("")
+            except Exception:
+                pass
+            logger.exception("embedded meta probe failed id=%s", oid)
+            messagebox.showerror("Fetch file metadata", str(exc))
+
+        self.win.set_progress_status("Downloading temp copy for tag read…")
+        self._bg.submit(
+            work,
+            on_done=on_done,
+            on_error=on_error,
+            name="device-embedded-meta-probe",
+        )
+
     def _refresh_selection_detail(self, tracks: list[Track] | None = None) -> None:
         """Update left-panel label from the current tree selection.
 
@@ -845,24 +1056,28 @@ class AppController:
         n = len(tracks)
         try:
             if n >= 1:
+                noun = "item" if n == 1 else "items"
                 self.win.menu_device_track_ctx.entryconfig(
                     0,
-                    label=(
-                        f"Pull {n} item{'s' if n != 1 else ''} to library…"
-                    ),
+                    label=f"Pull {n} {noun} to library…",
                 )
                 self.win.menu_device_track_ctx.entryconfig(
-                    2,
-                    label=(
-                        f"Delete {n} item{'s' if n != 1 else ''} from device…"
-                    ),
+                    1,
+                    label=f"Pull {n} {noun} to folder…",
+                )
+                self.win.menu_device_track_ctx.entryconfig(
+                    3,
+                    label=f"Delete {n} {noun} from device…",
                 )
             else:
                 self.win.menu_device_track_ctx.entryconfig(
                     0, label="Pull to library…"
                 )
                 self.win.menu_device_track_ctx.entryconfig(
-                    2, label="Delete from device…"
+                    1, label="Pull to folder…"
+                )
+                self.win.menu_device_track_ctx.entryconfig(
+                    3, label="Delete from device…"
                 )
         except Exception:
             pass
@@ -2458,6 +2673,14 @@ class AppController:
         self._device_index_seeded = False
         self._device_index_seed_inflight = False
         self._device_tag_enrich_inflight = False
+        self._file_meta_probe_asked.clear()
+        self._file_meta_probe_inflight = False
+        if self._file_meta_probe_after_id is not None:
+            try:
+                self.win.root.after_cancel(self._file_meta_probe_after_id)
+            except Exception:
+                pass
+            self._file_meta_probe_after_id = None
         self._clear_device_music_tree()
 
     def _note_device_session(self, info: DeviceInfo | None) -> None:
@@ -5544,30 +5767,30 @@ class AppController:
         )
 
     def action_device_pull_selected(self) -> None:
-        """Context menu: download selected device objects into the library.
+        """Context menu: download selected device objects into the library."""
+        self._start_device_pull(to_library=True)
 
-        Non-GUID ObjectFileNames are treated as un-indexed device content:
-        downloaded under ``{library root}/Artist/Album/Title.ext`` from
-        available metadata, then added to the host library index (new GUID).
-        GUID-named objects reuse a known host GUID when present.
+    def action_device_pull_to_folder(self) -> None:
+        """Context menu: download selected device objects to a chosen folder.
+
+        Same download / tag-recovery path as Pull to library, but does **not**
+        add files to the library index. Destination is chosen via folder dialog.
         """
+        self._start_device_pull(to_library=False)
+
+    def _start_device_pull(self, *, to_library: bool) -> None:
+        """Download selected device objects under *dest_root*.
+
+        *to_library*: write into a library root and index the tracks.
+        Otherwise prompt for a folder and leave the library unchanged.
+        """
+        title = "Pull to library" if to_library else "Pull to folder"
         if not self._require_device_ready():
             return
         if self._transfer_busy:
             messagebox.showinfo(
-                "Pull to library",
+                title,
                 "A transfer or device job is already in progress.",
-            )
-            return
-        roots = normalize_library_roots(self.library.root_paths)
-        if not roots and self.library.root_path:
-            roots = normalize_library_roots([self.library.root_path])
-        root = device_ops.pick_library_root(roots)
-        if not root:
-            messagebox.showerror(
-                "Pull to library",
-                "No library root is configured.\n\n"
-                "Use Library → Manage Library… to add a root first.",
             )
             return
 
@@ -5575,30 +5798,87 @@ class AppController:
         tracks = self._device_tracks_from_tree_selection(tree)
         refs = self._device_refs_for_tracks(tracks)
         if not refs:
-            messagebox.showinfo("Pull to library", "No objects selected.")
+            messagebox.showinfo(title, "No objects selected.")
             return
 
+        if to_library:
+            roots = normalize_library_roots(self.library.root_paths)
+            if not roots and self.library.root_path:
+                roots = normalize_library_roots([self.library.root_path])
+            dest_root = device_ops.pick_library_root(roots)
+            if not dest_root:
+                messagebox.showerror(
+                    title,
+                    "No library root is configured.\n\n"
+                    "Use Library → Manage Library… to add a root first.",
+                )
+                return
+        else:
+            initial = ""
+            roots = normalize_library_roots(self.library.root_paths)
+            if not roots and self.library.root_path:
+                roots = normalize_library_roots([self.library.root_path])
+            if roots:
+                initial = roots[0]
+            if not initial:
+                initial = os.path.expanduser("~")
+            dest_root = filedialog.askdirectory(
+                title="Choose folder for pulled files",
+                initialdir=initial if os.path.isdir(initial) else os.path.expanduser("~"),
+                mustexist=True,
+                parent=self.win.root,
+            )
+            if not dest_root:
+                return
+            dest_root = os.path.abspath(dest_root)
+            if not os.path.isdir(dest_root):
+                messagebox.showerror(
+                    title, f"Folder does not exist:\n{dest_root}"
+                )
+                return
+
         n = len(refs)
-        if not messagebox.askyesno(
-            "Pull to library",
-            f"Download {n} object(s) into the library?\n\n"
-            f"Root:\n{root}\n\n"
-            "Paths use Artist → Album → Title from device tags when available.",
-        ):
+        layout_note = (
+            "Paths use Artist → Album → Title from device tags when available "
+            "(embedded file tags recovered if the device only has placeholders)."
+        )
+        if to_library:
+            confirm = (
+                f"Download {n} object(s) into the library?\n\n"
+                f"Root:\n{dest_root}\n\n"
+                f"{layout_note}\n\n"
+                "Files will be added to the library index."
+            )
+        else:
+            confirm = (
+                f"Download {n} object(s) to this folder?\n\n"
+                f"{dest_root}\n\n"
+                f"{layout_note}\n\n"
+                "Files will not be added to the library."
+            )
+        if not messagebox.askyesno(title, confirm):
             return
 
         if not self._begin_transfer_job():
             return
         device = self.device
         batch = list(refs)
-        # GUID → existing host track for reuse when ObjectFileName is a GUID.
-        host_by_guid = {
-            t.guid: t
-            for t in self.library.tracks
-            if is_track_guid(t.guid)
-        }
+        root = dest_root
+        # GUID → existing host track only when indexing into the library.
+        host_by_guid = (
+            {
+                t.guid: t
+                for t in self.library.tracks
+                if is_track_guid(t.guid)
+            }
+            if to_library
+            else {}
+        )
+        index_into_library = to_library
 
         def work():
+            import shutil
+
             gen = self._bg.generation
             report = self._bg.progress_callback(gen)
             pulled: list[dict] = []
@@ -5606,27 +5886,20 @@ class AppController:
             total = len(batch)
             for i, ref in enumerate(batch):
                 if self._should_cancel_job():
-                    raise JobCancelled("Pull to library cancelled")
+                    raise JobCancelled(f"{title} cancelled")
                 oid = int(ref.item_id or 0)
                 label = (ref.name or ref.title or f"id={oid}").strip()
                 report("progress", i, total, f"pulling {label}")
                 try:
-                    # Resolve tags first so library path uses metadata.
-                    info = None
-                    try:
-                        info = device_ops.get_track_metadata(device, oid)
-                    except Exception:
-                        logger.debug(
-                            "pull: track metadata failed id=%s",
-                            oid,
-                            exc_info=True,
-                        )
                     remote_guid = guid_from_remote_name(ref.name)
                     existing = (
                         host_by_guid.get(remote_guid) if remote_guid else None
                     )
-                    if existing is not None and existing.path and os.path.isfile(
-                        existing.path
+                    if (
+                        index_into_library
+                        and existing is not None
+                        and existing.path
+                        and os.path.isfile(existing.path)
                     ):
                         # Already in library on disk — skip download.
                         pulled.append(
@@ -5639,25 +5912,91 @@ class AppController:
                         )
                         continue
 
-                    rel = device_ops.suggested_library_relpath(ref, info=info)
-                    dest = os.path.join(root, rel)
-                    item = device_ops.retrieve_track(
-                        device,
-                        ref,
-                        root,
-                        info=info,
-                        write_tags=True,
-                        dest_path=dest,
+                    # Device tags, then embedded-file recovery when placeholders
+                    # (mass-storage-style dump on an MTP-only player).
+                    info, file_meta, temp_path = (
+                        device_ops.resolve_tags_with_embedded_fallback(
+                            device,
+                            ref,
+                            prefer_embedded_when_placeholder=True,
+                            keep_download=True,
+                        )
                     )
-                    if item.status != "ok" or not item.path:
-                        failed += 1
-                        continue
-                    if item.info is not None:
-                        meta = device_ops.track_info_to_metadata(item.info)
+                    rel = device_ops.suggested_library_relpath(
+                        ref, info=info, file_meta=file_meta
+                    )
+                    dest = os.path.join(root, rel)
+                    dest = os.path.abspath(dest)
+                    os.makedirs(os.path.dirname(dest) or root, exist_ok=True)
+                    if os.path.exists(dest):
+                        dest = device_ops.unique_dest_path(
+                            os.path.dirname(dest), os.path.basename(dest)
+                        )
+
+                    if temp_path and os.path.isfile(temp_path):
+                        # Reuse the probe download; avoid a second USB transfer.
+                        try:
+                            shutil.move(temp_path, dest)
+                        except OSError:
+                            shutil.copy2(temp_path, dest)
+                            try:
+                                os.remove(temp_path)
+                            except OSError:
+                                pass
+                        item_path = dest
+                        if file_meta is not None and track_meta_is_usable(
+                            file_meta
+                        ):
+                            try:
+                                from mtpmanager.infra.mutagen_tags import (
+                                    write_metadata,
+                                )
+
+                                write_metadata(dest, file_meta)
+                            except Exception:
+                                logger.debug(
+                                    "pull: write recovered tags failed",
+                                    exc_info=True,
+                                )
+                    else:
+                        item = device_ops.retrieve_track(
+                            device,
+                            ref,
+                            root,
+                            info=info,
+                            write_tags=True,
+                            dest_path=dest,
+                        )
+                        if item.status != "ok" or not item.path:
+                            failed += 1
+                            continue
+                        item_path = item.path
+                        if file_meta is None:
+                            try:
+                                from mtpmanager.infra.mutagen_tags import (
+                                    read_metadata,
+                                )
+                                from mtpmanager.domain.device_media import (
+                                    track_meta_looks_placeholder,
+                                )
+
+                                local = read_metadata(item_path)
+                                if (
+                                    track_meta_is_usable(local)
+                                    and not track_meta_looks_placeholder(local)
+                                ):
+                                    file_meta = local
+                            except Exception:
+                                pass
+
+                    if file_meta is not None and track_meta_is_usable(file_meta):
+                        meta = file_meta
+                    elif info is not None:
+                        meta = device_ops.track_info_to_metadata(info)
                     else:
                         meta = TrackMetadata(
                             title=(ref.title or "").strip()
-                            or os.path.splitext(os.path.basename(item.path))[0],
+                            or os.path.splitext(os.path.basename(item_path))[0],
                             artist=(ref.artist or "").strip()
                             or "Unknown Artist",
                             album=(ref.album or "").strip() or "Unknown Album",
@@ -5665,10 +6004,14 @@ class AppController:
                             date=(ref.date or "").strip(),
                             tracknumber=(ref.tracknumber or "").strip() or "01",
                         )
-                    guid = remote_guid if is_track_guid(remote_guid) else new_track_guid()
+                    guid = (
+                        remote_guid
+                        if is_track_guid(remote_guid)
+                        else new_track_guid()
+                    )
                     pulled.append(
                         {
-                            "path": item.path,
+                            "path": item_path,
                             "guid": guid,
                             "meta": meta,
                             "skipped_existing": False,
@@ -5685,64 +6028,80 @@ class AppController:
             pulled = result.get("pulled") or []
             failed = int(result.get("failed") or 0)
             added = 0
-            by_path = {
-                os.path.normpath(t.path): i
-                for i, t in enumerate(self.library.tracks)
-                if t.path
-            }
-            for row in pulled:
-                path = os.path.normpath(row["path"])
-                guid = row["guid"]
-                meta = row["meta"]
-                track = Track(path=path, meta=meta, guid=guid)
-                idx = by_path.get(path)
-                if idx is not None:
-                    self.library.tracks[idx] = track
-                else:
-                    self.library.tracks.append(track)
-                    by_path[path] = len(self.library.tracks) - 1
-                    if not row.get("skipped_existing"):
-                        added += 1
-            if pulled:
+            if index_into_library and pulled:
+                by_path = {
+                    os.path.normpath(t.path): i
+                    for i, t in enumerate(self.library.tracks)
+                    if t.path
+                }
+                for row in pulled:
+                    path = os.path.normpath(row["path"])
+                    guid = row["guid"]
+                    meta = row["meta"]
+                    track = Track(path=path, meta=meta, guid=guid)
+                    idx = by_path.get(path)
+                    if idx is not None:
+                        self.library.tracks[idx] = track
+                    else:
+                        self.library.tracks.append(track)
+                        by_path[path] = len(self.library.tracks) - 1
+                        if not row.get("skipped_existing"):
+                            added += 1
                 try:
                     save_library_index(self.library)
                 except Exception:
                     logger.exception("save_library_index after pull failed")
                 try:
                     self._rebuild_track_tree()
-                    roots = normalize_library_roots(self.library.root_paths)
+                    lib_roots = normalize_library_roots(self.library.root_paths)
                     self.win.set_library_status(
                         self.library.root_path or "",
                         len(self.library.tracks),
-                        root_paths=roots or None,
+                        root_paths=lib_roots or None,
                     )
                 except Exception:
                     logger.debug(
                         "library UI refresh after pull failed", exc_info=True
                     )
-            messagebox.showinfo(
-                "Pull to library",
-                f"Downloaded {len(pulled)} of {result.get('total', 0)} "
-                f"object(s) ({added} new).\n"
-                f"Failed: {failed}\n\nLibrary root:\n{root}",
-            )
+                messagebox.showinfo(
+                    title,
+                    f"Downloaded {len(pulled)} of {result.get('total', 0)} "
+                    f"object(s) ({added} new).\n"
+                    f"Failed: {failed}\n\nLibrary root:\n{root}",
+                )
+            else:
+                listing = "\n".join(
+                    os.path.basename(str(r.get("path") or ""))
+                    for r in pulled[:12]
+                )
+                if len(pulled) > 12:
+                    listing += f"\n… and {len(pulled) - 12} more"
+                detail = f"\n\n{listing}" if listing else ""
+                messagebox.showinfo(
+                    title,
+                    f"Downloaded {len(pulled)} of {result.get('total', 0)} "
+                    f"object(s).\n"
+                    f"Failed: {failed}\n\nFolder:\n{root}{detail}",
+                )
 
         def on_error(exc: BaseException) -> None:
             self._end_transfer_job()
             if isinstance(exc, JobCancelled):
-                self._handle_job_cancelled(
-                    exc, title="Pull to library cancelled"
-                )
+                self._handle_job_cancelled(exc, title=f"{title} cancelled")
                 return
-            logger.exception("Pull to library failed")
-            messagebox.showerror("Pull to library", str(exc))
+            logger.exception("%s failed", title)
+            messagebox.showerror(title, str(exc))
 
         self._bg.submit(
             work,
             on_done=on_done,
             on_error=on_error,
             on_progress=self._on_transfer_ui_event,
-            name="device-pull-selection",
+            name=(
+                "device-pull-library"
+                if index_into_library
+                else "device-pull-folder"
+            ),
         )
 
     def action_delete_track(self) -> None:

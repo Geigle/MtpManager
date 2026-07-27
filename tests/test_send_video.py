@@ -342,6 +342,34 @@ class LibraryPullPathTests(unittest.TestCase):
             rel, os.path.join("Dir", "Show", "New Title.avi")
         )
 
+    def test_suggested_library_relpath_prefers_file_meta(self) -> None:
+        from mtpmanager.domain.models import TrackMetadata
+
+        ref = DeviceTrackRef(
+            item_id=1,
+            name="dump.mp3",
+            title="Unknown Title",
+            artist="Unknown Artist",
+            album="Unknown Album",
+        )
+        info = DeviceTrackInfo(
+            item_id=1,
+            name="dump.mp3",
+            title="Unknown Title",
+            artist="Unknown Artist",
+            album="Unknown Album",
+        )
+        file_meta = TrackMetadata(
+            title="Recovered",
+            artist="Real Artist",
+            album="Real Album",
+        )
+        rel = suggested_library_relpath(ref, info=info, file_meta=file_meta)
+        self.assertEqual(
+            rel,
+            os.path.join("Real Artist", "Real Album", "Recovered.mp3"),
+        )
+
     def test_pick_library_root_prefers_existing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             a = os.path.join(tmp, "a")
