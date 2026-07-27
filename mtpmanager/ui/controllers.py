@@ -222,6 +222,8 @@ class AppController:
         self._device_video_track_by_iid: dict[str, Track] = {}
         self._device_audiobook_track_by_iid: dict[str, Track] = {}
         self._device_tree_refresh_after_id: str | None = None
+        self._device_context_tree = None
+        self._device_context_row: str | None = None
         self._device_video_populate_after_id: str | None = None
         self._device_audiobook_populate_after_id: str | None = None
         self._audiobooks_populate_after_id: str | None = None
@@ -300,6 +302,16 @@ class AppController:
             on_exclude_group_folder=self.action_exclude_group_folder,
         )
         w.set_prepare_context_menu(self._prepare_context_menu)
+        w.set_prepare_device_context_menu(self._prepare_device_context_menu)
+        w.set_device_context_commands(
+            on_delete=self.action_device_delete_selected,
+            on_pull=self.action_device_pull_selected,
+            on_delete_artist=self.action_device_delete_artist_group,
+            on_delete_album=self.action_device_delete_album_group,
+            on_delete_folder=self.action_device_delete_folder_group,
+            on_device_info=self.on_device_info,
+            on_delete_all=self.action_delete_all_tracks,
+        )
         w.set_sort_heading_handler(self.on_sort_heading)
         w.set_cancel_job_command(self.on_cancel_job)
         # Context menu: Button-3 (most platforms), Button-2.
@@ -311,12 +323,36 @@ class AppController:
             lib_tree.bind("<Button-3>", w.popup_track_context)
             lib_tree.bind("<Button-2>", w.popup_track_context)
             lib_tree.bind("<<TreeviewSelect>>", self._on_tree_selection_changed)
+        for dev_tree in w.device_media_trees():
+            dev_tree.bind("<Button-3>", w.popup_device_context)
+            dev_tree.bind("<Button-2>", w.popup_device_context)
+        for panel_w in (
+            w.device_panel,
+            w.lbl_device_title,
+            w.lbl_device_caption,
+            w.device_graphic_slot,
+            w.lbl_device_graphic,
+        ):
+            panel_w.bind("<Button-3>", w.popup_device_panel_context)
+            panel_w.bind("<Button-2>", w.popup_device_panel_context)
         import sys as _sys
 
         if _sys.platform == "darwin":
             # macOS: Control-click = context menu; multi-toggle is Command-click.
             for lib_tree in w.library_media_trees():
                 lib_tree.bind("<Control-Button-1>", w.popup_track_context)
+            for dev_tree in w.device_media_trees():
+                dev_tree.bind("<Control-Button-1>", w.popup_device_context)
+            for panel_w in (
+                w.device_panel,
+                w.lbl_device_title,
+                w.lbl_device_caption,
+                w.device_graphic_slot,
+                w.lbl_device_graphic,
+            ):
+                panel_w.bind(
+                    "<Control-Button-1>", w.popup_device_panel_context
+                )
         # Apply persisted mode (PyMTP default; Stable only if config says so).
         self._apply_transfer_mode(
             self._config.active_mode(),
@@ -778,6 +814,58 @@ class AppController:
             self.win.menu_album_ctx.entryconfig(
                 0, label=f"Sync album {album}"
             )
+
+    def _prepare_device_context_menu(self, tree, row_iid: str, tags) -> None:
+        """Update device group delete labels before popup."""
+        self._device_context_tree = tree
+        self._device_context_row = row_iid
+        tagset = set(tags)
+        try:
+            values = tree.item(row_iid, "values") or ()
+            label = str(values[0] if values else "").strip() or "group"
+        except Exception:
+            label = "group"
+        try:
+            if "group_artist" in tagset:
+                self.win.menu_device_artist_ctx.entryconfig(
+                    0, label=f"Delete all from {label}…"
+                )
+            elif "group_album" in tagset:
+                self.win.menu_device_album_ctx.entryconfig(
+                    0, label=f"Delete album {label}…"
+                )
+            elif "group_folder" in tagset:
+                self.win.menu_device_folder_ctx.entryconfig(
+                    0, label=f"Delete all in {label}…"
+                )
+        except Exception:
+            pass
+
+        tracks = self._device_tracks_from_tree_selection(tree)
+        n = len(tracks)
+        try:
+            if n >= 1:
+                self.win.menu_device_track_ctx.entryconfig(
+                    0,
+                    label=(
+                        f"Pull {n} item{'s' if n != 1 else ''} to library…"
+                    ),
+                )
+                self.win.menu_device_track_ctx.entryconfig(
+                    2,
+                    label=(
+                        f"Delete {n} item{'s' if n != 1 else ''} from device…"
+                    ),
+                )
+            else:
+                self.win.menu_device_track_ctx.entryconfig(
+                    0, label="Pull to library…"
+                )
+                self.win.menu_device_track_ctx.entryconfig(
+                    2, label="Delete from device…"
+                )
+        except Exception:
+            pass
 
     @staticmethod
     def _audio_tracks_only(tracks: list[Track]) -> list[Track]:
@@ -4249,32 +4337,70 @@ class AppController:
             )
             return
 
-        # Library tracks → GUID ObjectFileNames under Video/TV; picker paths stay
-        # on host basenames (no GUID).
+        # Library tracks keep GUIDs in the host index (and device_files after
+        # send) for skip-if-present / future joins. ObjectFileName is always
+        # title/basename style — never the GUID wire name used for music.
         by_path = {
             os.path.normpath(t.path): t for t in self.library.tracks if t.path
         }
         guid_by_path: dict[str, str] = {}
+        title_by_path: dict[str, str] = {}
+        basename_by_path: dict[str, str] = {}
         for p in files:
             track = by_path.get(p)
-            if track is None:
-                continue
-            g = track.guid if is_track_guid(track.guid) else ""
-            if not g:
-                g = new_track_guid()
-                # Keep in-memory library identity stable for this session.
-                idx = next(
-                    (i for i, t in enumerate(self.library.tracks) if t.path == track.path),
-                    None,
-                )
-                if idx is not None:
-                    old = self.library.tracks[idx]
-                    self.library.tracks[idx] = Track(
-                        path=old.path, meta=old.meta, guid=g
+            base = os.path.basename(p)
+            stem = os.path.splitext(base)[0] or "video"
+            if track is not None:
+                g = track.guid if is_track_guid(track.guid) else ""
+                if not g:
+                    g = new_track_guid()
+                    # Keep in-memory library identity stable for this session.
+                    idx = next(
+                        (
+                            i
+                            for i, t in enumerate(self.library.tracks)
+                            if t.path == track.path
+                        ),
+                        None,
                     )
-            guid_by_path[p] = g
-        library_named = len(guid_by_path) == len(files) and bool(files)
-        mixed_naming = bool(guid_by_path) and not library_named
+                    if idx is not None:
+                        old = self.library.tracks[idx]
+                        self.library.tracks[idx] = Track(
+                            path=old.path, meta=old.meta, guid=g
+                        )
+                guid_by_path[p] = g
+                display = video_display_title(track)
+                title_by_path[p] = os.path.splitext(display)[0] or stem
+                # Prefer filename stem for ObjectFileName (tags often empty).
+                basename_by_path[p] = base
+            else:
+                title_by_path[p] = stem
+                basename_by_path[p] = base
+
+        # Skip library videos already recorded on this device (GUID index).
+        stems = self._device_guid_stems_for_skip() or set()
+        if stems and guid_by_path:
+            kept: list[str] = []
+            skipped_n = 0
+            for p in files:
+                g = guid_by_path.get(p)
+                if g and g in stems:
+                    skipped_n += 1
+                    continue
+                kept.append(p)
+            if skipped_n:
+                logger.info(
+                    "Send Video: skip %d already on device (GUID index)",
+                    skipped_n,
+                )
+            files = kept
+            if not files:
+                messagebox.showinfo(
+                    "Send Video",
+                    f"All {skipped_n} selected video(s) are already on the "
+                    "device (matched by library GUID in the device index).",
+                )
+                return
 
         video_options = None
         if self._active_profile is not None:
@@ -4316,16 +4442,10 @@ class AppController:
         else:
             encode_note = "Encode: off (send as-is)\n"
 
-        if library_named:
-            name_note = "Object name: library GUID (+ extension) under Video/TV."
-        elif mixed_naming:
-            name_note = (
-                "Object names: library GUID when known, else host basename."
-            )
-        else:
-            name_note = (
-                "Object name: sanitized host basename (not a library GUID)."
-            )
+        name_note = (
+            "Object name: sanitized title / host basename "
+            "(library GUID kept in the host index only)."
+        )
 
         if len(files) == 1:
             confirm = (
@@ -4353,6 +4473,8 @@ class AppController:
         serial = self._device_serial or device_serial_key()
         batch = list(files)
         guid_map = dict(guid_by_path)
+        title_map = dict(title_by_path)
+        basename_map = dict(basename_by_path)
         do_encode = encode and preset is not None
 
         def work(device):
@@ -4398,6 +4520,8 @@ class AppController:
                         encode_for_device=do_encode,
                         ignore_max_fps=ignore_max_fps,
                         on_progress=on_progress,
+                        title=title_map.get(path),
+                        preferred_basename=basename_map.get(path),
                         guid=guid_map.get(path),
                     )
                 )
@@ -4439,6 +4563,16 @@ class AppController:
         def on_success(results) -> None:
             if not isinstance(results, list):
                 results = [results]
+            # Persist any GUIDs assigned for library videos (index only; not
+            # ObjectFileName). Enables skip-if-present on later syncs.
+            if guid_map:
+                try:
+                    save_library_index(self.library)
+                except Exception:
+                    logger.debug(
+                        "save_library_index after video send failed",
+                        exc_info=True,
+                    )
             for result in results:
                 src = os.path.normpath(result.source_path or result.path or "")
                 g = guid_map.get(src)
@@ -5078,6 +5212,537 @@ class AppController:
                 "(mtp-tracks style; scales with track count)…"
             ),
             progress_mode="determinate",
+        )
+
+    @staticmethod
+    def _item_id_from_device_track(track: Track) -> int | None:
+        """Parse MTP object id from synthetic ``device:<id>:…`` path."""
+        path = track.path or ""
+        if not path.startswith("device:"):
+            return None
+        parts = path.split(":", 2)
+        if len(parts) < 2:
+            return None
+        try:
+            oid = int(parts[1])
+        except (TypeError, ValueError):
+            return None
+        return oid if oid > 0 else None
+
+    def _device_track_map_for_tree(self, tree) -> dict[str, Track]:
+        if tree is self.win.device_video_tree:
+            return self._device_video_track_by_iid
+        if tree is self.win.device_audiobooks_tree:
+            return self._device_audiobook_track_by_iid
+        return self._device_track_by_iid
+
+    def _device_refs_by_item_id(self) -> dict[int, DeviceTrackRef]:
+        by_id: dict[int, DeviceTrackRef] = {}
+        for refs in (
+            self._device_music_refs,
+            self._device_video_refs,
+            self._device_audiobook_refs,
+        ):
+            for ref in refs or ():
+                oid = int(getattr(ref, "item_id", 0) or 0)
+                if oid > 0:
+                    by_id[oid] = ref
+        return by_id
+
+    def _device_tracks_under_iid(self, tree, iid: str) -> list[Track]:
+        """Collect track rows under a group (or the row itself if a track)."""
+        by_iid = self._device_track_map_for_tree(tree)
+        out: list[Track] = []
+        seen: set[str] = set()
+
+        def walk(node: str) -> None:
+            track = by_iid.get(node)
+            if track is not None:
+                key = track.path
+                if key not in seen:
+                    seen.add(key)
+                    out.append(track)
+                return
+            try:
+                children = tree.get_children(node)
+            except Exception:
+                return
+            for child in children:
+                walk(child)
+
+        walk(iid)
+        return out
+
+    def _device_tracks_from_tree_selection(self, tree=None) -> list[Track]:
+        tree = tree if tree is not None else self.win.active_device_tree()
+        by_iid = self._device_track_map_for_tree(tree)
+        out: list[Track] = []
+        seen: set[str] = set()
+        try:
+            selection = list(tree.selection())
+        except Exception:
+            selection = []
+        # Prefer the right-clicked row when selection is empty.
+        if not selection and self._device_context_row:
+            selection = [self._device_context_row]
+        for iid in selection:
+            for track in self._device_tracks_under_iid(tree, iid):
+                if track.path in seen:
+                    continue
+                seen.add(track.path)
+                out.append(track)
+            # Direct track map lookup if under_iid missed.
+            direct = by_iid.get(iid)
+            if direct is not None and direct.path not in seen:
+                seen.add(direct.path)
+                out.append(direct)
+        return out
+
+    def _device_refs_for_tracks(
+        self, tracks: list[Track]
+    ) -> list[DeviceTrackRef]:
+        by_id = self._device_refs_by_item_id()
+        refs: list[DeviceTrackRef] = []
+        seen: set[int] = set()
+        for track in tracks:
+            oid = self._item_id_from_device_track(track)
+            if oid is None or oid in seen:
+                continue
+            seen.add(oid)
+            ref = by_id.get(oid)
+            if ref is not None:
+                refs.append(ref)
+            else:
+                # Minimal ref from synthetic path so delete/pull still works.
+                name = ""
+                parts = (track.path or "").split(":", 2)
+                if len(parts) >= 3:
+                    name = os.path.basename(parts[2]) or parts[2]
+                refs.append(
+                    DeviceTrackRef(
+                        item_id=oid,
+                        name=name or f"id={oid}",
+                        title=(track.meta.title or "").strip(),
+                        artist=(track.meta.artist or "").strip(),
+                        album=(track.meta.album or "").strip(),
+                        date=(track.meta.date or "").strip(),
+                        tracknumber=(track.meta.tracknumber or "").strip(),
+                        genre=(track.meta.genre or "").strip(),
+                    )
+                )
+        return refs
+
+    def _delete_device_objects(
+        self,
+        refs: list[DeviceTrackRef],
+        *,
+        title: str,
+        confirm: str,
+    ) -> None:
+        """Confirm and batch-delete *refs* from the connected device."""
+        if not self._require_device_ready():
+            return
+        if self._transfer_busy:
+            messagebox.showinfo(
+                title,
+                "A transfer or device job is already in progress.",
+            )
+            return
+        if not refs:
+            messagebox.showinfo(title, "No objects selected.")
+            return
+        n = len(refs)
+        if not messagebox.askyesno(
+            title,
+            confirm,
+            icon=messagebox.WARNING,
+            default=messagebox.NO,
+        ):
+            return
+        if n >= 10 and not messagebox.askyesno(
+            f"{title} — confirm",
+            f"Really permanently delete {n} object(s) from the device?",
+            icon=messagebox.WARNING,
+            default=messagebox.NO,
+        ):
+            return
+
+        if not self._begin_transfer_job():
+            return
+        device = self.device
+        batch = list(refs)
+        serial = self._device_serial or device_serial_key()
+
+        def work():
+            gen = self._bg.generation
+            report = self._bg.progress_callback(gen)
+            deleted = 0
+            deleted_ids: list[int] = []
+            failed_id = None
+            aborted = False
+            total = len(batch)
+            for i, ref in enumerate(batch):
+                if self._should_cancel_job():
+                    raise JobCancelled(f"{title} cancelled")
+                oid = int(ref.item_id or 0)
+                label = (ref.name or ref.title or f"id={oid}").strip()
+                report("progress", i, total, label)
+                try:
+                    device_ops.delete_object(device, oid)
+                except Exception as exc:
+                    from mtpmanager.ports.transport import TransportError
+
+                    logger.exception("device delete failed id=%s", oid)
+                    if isinstance(exc, TransportError) and exc.fatal:
+                        failed_id = oid
+                        aborted = True
+                        break
+                    failed_id = oid
+                    aborted = True
+                    break
+                deleted += 1
+                deleted_ids.append(oid)
+            report("progress", total, total, "done")
+            return {
+                "deleted": deleted,
+                "total": total,
+                "deleted_ids": deleted_ids,
+                "failed_id": failed_id,
+                "aborted": aborted,
+            }
+
+        def on_done(result) -> None:
+            self._end_transfer_job()
+            for oid in result.get("deleted_ids") or ():
+                try:
+                    remove_by_item_id(serial, int(oid))
+                except Exception:
+                    logger.debug(
+                        "device_index remove after delete failed id=%s",
+                        oid,
+                        exc_info=True,
+                    )
+            self._schedule_device_music_tree_refresh(enrich_missing_tags=False)
+            if result.get("aborted"):
+                messagebox.showerror(
+                    f"{title} aborted",
+                    f"Deleted {result['deleted']} of {result['total']} "
+                    f"object(s).\nStopped at object id={result.get('failed_id')}.",
+                )
+                return
+            messagebox.showinfo(
+                title,
+                f"Deleted {result['deleted']} of {result['total']} object(s).",
+            )
+
+        def on_error(exc: BaseException) -> None:
+            self._end_transfer_job()
+            if isinstance(exc, JobCancelled):
+                self._handle_job_cancelled(exc, title=f"{title} cancelled")
+                return
+            logger.exception("%s failed", title)
+            messagebox.showerror(title, str(exc))
+
+        self._bg.submit(
+            work,
+            on_done=on_done,
+            on_error=on_error,
+            on_progress=self._on_transfer_ui_event,
+            name="device-delete-selection",
+        )
+
+    def action_device_delete_selected(self) -> None:
+        """Context menu: delete selected on-device track/video object(s)."""
+        tree = self._device_context_tree or self.win.active_device_tree()
+        tracks = self._device_tracks_from_tree_selection(tree)
+        refs = self._device_refs_for_tracks(tracks)
+        n = len(refs)
+        if n == 1:
+            r = refs[0]
+            name = (r.name or r.title or f"id={r.item_id}").strip()
+            confirm = (
+                f"Delete this object from the device?\n\n"
+                f"{name}\n(id={r.item_id})\n\n"
+                "This cannot be undone from the app."
+            )
+        else:
+            confirm = (
+                f"Delete {n} selected object(s) from the device?\n\n"
+                "This cannot be undone from the app."
+            )
+        self._delete_device_objects(
+            refs, title="Delete from device", confirm=confirm
+        )
+
+    def action_device_delete_artist_group(self) -> None:
+        """Context menu: delete all tracks under a device artist group."""
+        tree = self._device_context_tree or self.win.device_tree
+        iid = self._device_context_row
+        if not iid:
+            messagebox.showinfo("Delete artist", "No artist group selected.")
+            return
+        tracks = self._device_tracks_under_iid(tree, iid)
+        refs = self._device_refs_for_tracks(tracks)
+        try:
+            values = tree.item(iid, "values") or ()
+            label = str(values[0] if values else "Artist").strip() or "Artist"
+        except Exception:
+            label = "Artist"
+        self._delete_device_objects(
+            refs,
+            title="Delete artist",
+            confirm=(
+                f"Delete all {len(refs)} track(s) from artist “{label}” "
+                f"on the device?\n\nThis cannot be undone from the app."
+            ),
+        )
+
+    def action_device_delete_album_group(self) -> None:
+        """Context menu: delete all tracks under a device album group."""
+        tree = self._device_context_tree or self.win.device_tree
+        iid = self._device_context_row
+        if not iid:
+            messagebox.showinfo("Delete album", "No album group selected.")
+            return
+        tracks = self._device_tracks_under_iid(tree, iid)
+        refs = self._device_refs_for_tracks(tracks)
+        try:
+            values = tree.item(iid, "values") or ()
+            label = str(values[0] if values else "Album").strip() or "Album"
+        except Exception:
+            label = "Album"
+        self._delete_device_objects(
+            refs,
+            title="Delete album",
+            confirm=(
+                f"Delete all {len(refs)} track(s) from album “{label}” "
+                f"on the device?\n\nThis cannot be undone from the app."
+            ),
+        )
+
+    def action_device_delete_folder_group(self) -> None:
+        """Context menu: delete all videos under a device Video/TV folder."""
+        tree = self._device_context_tree or self.win.device_video_tree
+        iid = self._device_context_row
+        if not iid:
+            messagebox.showinfo("Delete folder", "No folder selected.")
+            return
+        tracks = self._device_tracks_under_iid(tree, iid)
+        refs = self._device_refs_for_tracks(tracks)
+        try:
+            values = tree.item(iid, "values") or ()
+            label = str(values[0] if values else "folder").strip() or "folder"
+        except Exception:
+            label = "folder"
+        self._delete_device_objects(
+            refs,
+            title="Delete folder",
+            confirm=(
+                f"Delete all {len(refs)} item(s) under “{label}” on the "
+                f"device?\n\nThis cannot be undone from the app."
+            ),
+        )
+
+    def action_device_pull_selected(self) -> None:
+        """Context menu: download selected device objects into the library.
+
+        Non-GUID ObjectFileNames are treated as un-indexed device content:
+        downloaded under ``{library root}/Artist/Album/Title.ext`` from
+        available metadata, then added to the host library index (new GUID).
+        GUID-named objects reuse a known host GUID when present.
+        """
+        if not self._require_device_ready():
+            return
+        if self._transfer_busy:
+            messagebox.showinfo(
+                "Pull to library",
+                "A transfer or device job is already in progress.",
+            )
+            return
+        roots = normalize_library_roots(self.library.root_paths)
+        if not roots and self.library.root_path:
+            roots = normalize_library_roots([self.library.root_path])
+        root = device_ops.pick_library_root(roots)
+        if not root:
+            messagebox.showerror(
+                "Pull to library",
+                "No library root is configured.\n\n"
+                "Use Library → Manage Library… to add a root first.",
+            )
+            return
+
+        tree = self._device_context_tree or self.win.active_device_tree()
+        tracks = self._device_tracks_from_tree_selection(tree)
+        refs = self._device_refs_for_tracks(tracks)
+        if not refs:
+            messagebox.showinfo("Pull to library", "No objects selected.")
+            return
+
+        n = len(refs)
+        if not messagebox.askyesno(
+            "Pull to library",
+            f"Download {n} object(s) into the library?\n\n"
+            f"Root:\n{root}\n\n"
+            "Paths use Artist → Album → Title from device tags when available.",
+        ):
+            return
+
+        if not self._begin_transfer_job():
+            return
+        device = self.device
+        batch = list(refs)
+        # GUID → existing host track for reuse when ObjectFileName is a GUID.
+        host_by_guid = {
+            t.guid: t
+            for t in self.library.tracks
+            if is_track_guid(t.guid)
+        }
+
+        def work():
+            gen = self._bg.generation
+            report = self._bg.progress_callback(gen)
+            pulled: list[dict] = []
+            failed = 0
+            total = len(batch)
+            for i, ref in enumerate(batch):
+                if self._should_cancel_job():
+                    raise JobCancelled("Pull to library cancelled")
+                oid = int(ref.item_id or 0)
+                label = (ref.name or ref.title or f"id={oid}").strip()
+                report("progress", i, total, f"pulling {label}")
+                try:
+                    # Resolve tags first so library path uses metadata.
+                    info = None
+                    try:
+                        info = device_ops.get_track_metadata(device, oid)
+                    except Exception:
+                        logger.debug(
+                            "pull: track metadata failed id=%s",
+                            oid,
+                            exc_info=True,
+                        )
+                    remote_guid = guid_from_remote_name(ref.name)
+                    existing = (
+                        host_by_guid.get(remote_guid) if remote_guid else None
+                    )
+                    if existing is not None and existing.path and os.path.isfile(
+                        existing.path
+                    ):
+                        # Already in library on disk — skip download.
+                        pulled.append(
+                            {
+                                "path": existing.path,
+                                "guid": existing.guid,
+                                "meta": existing.meta,
+                                "skipped_existing": True,
+                            }
+                        )
+                        continue
+
+                    rel = device_ops.suggested_library_relpath(ref, info=info)
+                    dest = os.path.join(root, rel)
+                    item = device_ops.retrieve_track(
+                        device,
+                        ref,
+                        root,
+                        info=info,
+                        write_tags=True,
+                        dest_path=dest,
+                    )
+                    if item.status != "ok" or not item.path:
+                        failed += 1
+                        continue
+                    if item.info is not None:
+                        meta = device_ops.track_info_to_metadata(item.info)
+                    else:
+                        meta = TrackMetadata(
+                            title=(ref.title or "").strip()
+                            or os.path.splitext(os.path.basename(item.path))[0],
+                            artist=(ref.artist or "").strip()
+                            or "Unknown Artist",
+                            album=(ref.album or "").strip() or "Unknown Album",
+                            genre=(ref.genre or "").strip() or "Unknown Genre",
+                            date=(ref.date or "").strip(),
+                            tracknumber=(ref.tracknumber or "").strip() or "01",
+                        )
+                    guid = remote_guid if is_track_guid(remote_guid) else new_track_guid()
+                    pulled.append(
+                        {
+                            "path": item.path,
+                            "guid": guid,
+                            "meta": meta,
+                            "skipped_existing": False,
+                        }
+                    )
+                except Exception:
+                    logger.exception("pull failed id=%s", oid)
+                    failed += 1
+            report("progress", total, total, "done")
+            return {"pulled": pulled, "failed": failed, "total": total}
+
+        def on_done(result) -> None:
+            self._end_transfer_job()
+            pulled = result.get("pulled") or []
+            failed = int(result.get("failed") or 0)
+            added = 0
+            by_path = {
+                os.path.normpath(t.path): i
+                for i, t in enumerate(self.library.tracks)
+                if t.path
+            }
+            for row in pulled:
+                path = os.path.normpath(row["path"])
+                guid = row["guid"]
+                meta = row["meta"]
+                track = Track(path=path, meta=meta, guid=guid)
+                idx = by_path.get(path)
+                if idx is not None:
+                    self.library.tracks[idx] = track
+                else:
+                    self.library.tracks.append(track)
+                    by_path[path] = len(self.library.tracks) - 1
+                    if not row.get("skipped_existing"):
+                        added += 1
+            if pulled:
+                try:
+                    save_library_index(self.library)
+                except Exception:
+                    logger.exception("save_library_index after pull failed")
+                try:
+                    self._rebuild_track_tree()
+                    roots = normalize_library_roots(self.library.root_paths)
+                    self.win.set_library_status(
+                        self.library.root_path or "",
+                        len(self.library.tracks),
+                        root_paths=roots or None,
+                    )
+                except Exception:
+                    logger.debug(
+                        "library UI refresh after pull failed", exc_info=True
+                    )
+            messagebox.showinfo(
+                "Pull to library",
+                f"Downloaded {len(pulled)} of {result.get('total', 0)} "
+                f"object(s) ({added} new).\n"
+                f"Failed: {failed}\n\nLibrary root:\n{root}",
+            )
+
+        def on_error(exc: BaseException) -> None:
+            self._end_transfer_job()
+            if isinstance(exc, JobCancelled):
+                self._handle_job_cancelled(
+                    exc, title="Pull to library cancelled"
+                )
+                return
+            logger.exception("Pull to library failed")
+            messagebox.showerror("Pull to library", str(exc))
+
+        self._bg.submit(
+            work,
+            on_done=on_done,
+            on_error=on_error,
+            on_progress=self._on_transfer_ui_event,
+            name="device-pull-selection",
         )
 
     def action_delete_track(self) -> None:

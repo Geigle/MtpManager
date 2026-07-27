@@ -121,6 +121,15 @@ CTX_SYNC_ARTIST_GROUP = "Sync all from Artist"
 CTX_SYNC_ALBUM_GROUP = "Sync album"
 CTX_EXCLUDE_GROUP_FOLDER = "Exclude this folder…"
 
+# Device media context menus (on-device Music / Video / Audiobooks trees)
+CTX_DEVICE_DELETE = "Delete from device…"
+CTX_DEVICE_PULL = "Pull to library…"
+CTX_DEVICE_DELETE_ARTIST = "Delete all from Artist…"
+CTX_DEVICE_DELETE_ALBUM = "Delete album from device…"
+CTX_DEVICE_DELETE_FOLDER = "Delete all in folder…"
+CTX_DEVICE_INFO = "Device Info"
+CTX_DEVICE_DELETE_ALL = "Delete All Tracks…"
+
 _DEVICE_MENU_LABELS = (
     MENU_CONNECT,
     MENU_DISCONNECT,
@@ -386,6 +395,29 @@ class MainWindow:
         self.menu_album_ctx.add_command(label=CTX_SYNC_ALBUM_GROUP)
         self.menu_album_ctx.add_separator()
         self.menu_album_ctx.add_command(label=CTX_EXCLUDE_GROUP_FOLDER)
+
+        # Device on-media context menus (delete / pull).
+        self.menu_device_track_ctx = Menu(self.root, tearoff=0)
+        self.menu_device_track_ctx.add_command(label=CTX_DEVICE_PULL)
+        self.menu_device_track_ctx.add_separator()
+        self.menu_device_track_ctx.add_command(label=CTX_DEVICE_DELETE)
+
+        self.menu_device_artist_ctx = Menu(self.root, tearoff=0)
+        self.menu_device_artist_ctx.add_command(label=CTX_DEVICE_DELETE_ARTIST)
+
+        self.menu_device_album_ctx = Menu(self.root, tearoff=0)
+        self.menu_device_album_ctx.add_command(label=CTX_DEVICE_DELETE_ALBUM)
+
+        self.menu_device_folder_ctx = Menu(self.root, tearoff=0)
+        self.menu_device_folder_ctx.add_command(label=CTX_DEVICE_DELETE_FOLDER)
+
+        # Device panel / graphic (same actions as Device menu).
+        self.menu_device_panel_ctx = Menu(self.root, tearoff=0)
+        self.menu_device_panel_ctx.add_command(label=CTX_DEVICE_INFO)
+        self.menu_device_panel_ctx.add_separator()
+        self.menu_device_panel_ctx.add_command(label=CTX_DEVICE_DELETE_ALL)
+
+        self._prepare_device_context_menu = None
 
         # Status toolbar: path + track count only (no duplicate title header).
         library_toolbar = Frame(self.root, borderwidth=1, relief="sunken")
@@ -1284,6 +1316,29 @@ class MainWindow:
         """All host library Treeviews (Music, Video, Audiobooks)."""
         return (self.tree, self.videos_tree, self.audiobooks_tree)
 
+    def device_media_trees(self):
+        """All on-device Treeviews (Music, Video, Audiobooks)."""
+        return (
+            self.device_tree,
+            self.device_video_tree,
+            self.device_audiobooks_tree,
+        )
+
+    def active_device_tree(self):
+        """Treeview for the selected device media tab."""
+        try:
+            current = self.device_notebook.select()
+        except Exception:
+            return self.device_tree
+        try:
+            if current == str(self.device_video_tab):
+                return self.device_video_tree
+            if current == str(self.device_audiobooks_tab):
+                return self.device_audiobooks_tree
+        except Exception:
+            pass
+        return self.device_tree
+
     def _all_iids(self, tree=None) -> list[str]:
         tree = tree if tree is not None else self.tree
         out: list[str] = []
@@ -1385,6 +1440,109 @@ class MainWindow:
     def set_prepare_context_menu(self, handler) -> None:
         """Optional hook(row_iid, tags) called before a context menu is shown."""
         self._prepare_context_menu = handler
+
+    def set_prepare_device_context_menu(self, handler) -> None:
+        """Optional hook(tree, row_iid, tags) before a device context menu."""
+        self._prepare_device_context_menu = handler
+
+    def set_device_context_commands(
+        self,
+        *,
+        on_delete=None,
+        on_pull=None,
+        on_delete_artist=None,
+        on_delete_album=None,
+        on_delete_folder=None,
+        on_device_info=None,
+        on_delete_all=None,
+    ) -> None:
+        """Wire Device tree / panel context menu commands."""
+        if on_pull is not None:
+            self.menu_device_track_ctx.entryconfig(
+                CTX_DEVICE_PULL, command=on_pull
+            )
+        if on_delete is not None:
+            self.menu_device_track_ctx.entryconfig(
+                CTX_DEVICE_DELETE, command=on_delete
+            )
+        if on_delete_artist is not None:
+            self.menu_device_artist_ctx.entryconfig(
+                0, command=on_delete_artist
+            )
+        if on_delete_album is not None:
+            self.menu_device_album_ctx.entryconfig(
+                0, command=on_delete_album
+            )
+        if on_delete_folder is not None:
+            self.menu_device_folder_ctx.entryconfig(
+                0, command=on_delete_folder
+            )
+        if on_device_info is not None:
+            self.menu_device_panel_ctx.entryconfig(
+                CTX_DEVICE_INFO, command=on_device_info
+            )
+        if on_delete_all is not None:
+            self.menu_device_panel_ctx.entryconfig(
+                CTX_DEVICE_DELETE_ALL, command=on_delete_all
+            )
+
+    def popup_device_context(self, event) -> str | None:
+        """Show on-device media context menu for the row under the pointer."""
+        menu = None
+        try:
+            if self._mode == "stable":
+                return "break"
+            tree = event.widget if event is not None else self.device_tree
+            if tree not in self.device_media_trees():
+                tree = self.active_device_tree()
+            row = tree.identify_row(event.y)
+            if not row:
+                return "break"
+            tags = set(tree.item(row, "tags"))
+            current = tree.selection()
+            if row not in current:
+                tree.selection_set(row)
+            tree.focus(row)
+            tree.see(row)
+
+            if "track" in tags:
+                menu = self.menu_device_track_ctx
+            elif "group_artist" in tags:
+                menu = self.menu_device_artist_ctx
+            elif "group_album" in tags:
+                menu = self.menu_device_album_ctx
+            elif "group_folder" in tags:
+                menu = self.menu_device_folder_ctx
+            else:
+                return "break"
+
+            if self._prepare_device_context_menu is not None:
+                self._prepare_device_context_menu(tree, row, tags)
+
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            if menu is not None:
+                try:
+                    menu.grab_release()
+                except Exception:
+                    pass
+        return "break"
+
+    def popup_device_panel_context(self, event) -> str | None:
+        """Show Device Info / Delete All on the device panel or graphic."""
+        menu = None
+        try:
+            if self._mode == "stable":
+                return "break"
+            menu = self.menu_device_panel_ctx
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            if menu is not None:
+                try:
+                    menu.grab_release()
+                except Exception:
+                    pass
+        return "break"
 
     def selected_tree_iid(self) -> str | None:
         """Primary selected row (focus preferred, else first in selection)."""

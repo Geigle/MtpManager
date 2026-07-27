@@ -308,6 +308,77 @@ def unique_dest_path(dest_dir: str, basename: str) -> str:
         n += 1
 
 
+def _host_safe_folder(value: str, *, fallback: str, max_len: int = 80) -> str:
+    """Sanitize a single path component for host filesystem use."""
+    body = _UNSAFE_HOST.sub(" ", (value or "").strip())
+    body = sanitize_component(body, max_len)
+    return body or fallback
+
+
+def suggested_library_relpath(
+    ref: DeviceTrackRef,
+    *,
+    info: DeviceTrackInfo | None = None,
+) -> str:
+    """Relative ``Artist/Album/Title.ext`` path under a library root.
+
+    Used when pulling an un-indexed (non-GUID ObjectFileName) object into the
+    host library. Tags come from *info* when present, else from the listing ref.
+    """
+    raw_name = (ref.name or "").strip() or (info.name if info else "") or "track"
+    _, ext = os.path.splitext(raw_name)
+    if not ext:
+        ext = ".mp3"
+    ext = ext if ext.startswith(".") else f".{ext}"
+    if len(ext) > 8:
+        ext = ".bin"
+
+    title = ""
+    artist = ""
+    album = ""
+    if info is not None:
+        title = (info.title or "").strip()
+        artist = (info.artist or "").strip()
+        album = (info.album or "").strip()
+    if not title:
+        title = (ref.title or "").strip()
+    if not artist:
+        artist = (ref.artist or "").strip()
+    if not album:
+        album = (ref.album or "").strip()
+
+    if not title or title.casefold() in ("unknown title",):
+        title = os.path.splitext(raw_name)[0] or f"track_{ref.item_id}"
+    if not artist or artist in ("—",):
+        artist = "Unknown Artist"
+    if not album or album in ("—",):
+        album = "Unknown Album"
+
+    artist_d = _host_safe_folder(artist, fallback="Unknown Artist")
+    album_d = _host_safe_folder(album, fallback="Unknown Album")
+    stem = _host_safe_folder(title, fallback=f"track_{ref.item_id}")
+    return os.path.join(artist_d, album_d, f"{stem}{ext.lower()}")
+
+
+def pick_library_root(root_paths: Sequence[str]) -> str | None:
+    """Choose a writable-looking library root for device pulls.
+
+    Prefers the first normalized absolute root that exists (or its parent
+    chain is creatable). Returns ``None`` when no roots are configured.
+    """
+    for raw in root_paths or ():
+        root = os.path.abspath(os.path.expanduser(str(raw or "").strip()))
+        if not root:
+            continue
+        if os.path.isdir(root):
+            return root
+        # Allow not-yet-created leaf when parent exists.
+        parent = os.path.dirname(root)
+        if parent and os.path.isdir(parent):
+            return root
+    return None
+
+
 def retrieve_track(
     device: DevicePort,
     ref: DeviceTrackRef,
@@ -315,11 +386,16 @@ def retrieve_track(
     *,
     info: DeviceTrackInfo | None = None,
     write_tags: bool = True,
+    dest_path: str | None = None,
 ) -> RetrievedItem:
     """Download one track/media object to *dest_dir*; optionally write tags.
 
     Uses ``get_file_to_file`` (works for audio and video). Tries track
     metadata when *info* is not provided. Returns a :class:`RetrievedItem`.
+
+    When *dest_path* is set, download directly to that absolute path (parents
+    created as needed); otherwise uses :func:`suggested_retrieve_basename`
+    under *dest_dir*.
     """
     oid = int(ref.item_id or 0)
     if oid <= 0:
@@ -342,8 +418,17 @@ def retrieve_track(
             )
             meta_info = None
 
-    basename = suggested_retrieve_basename(ref, info=meta_info)
-    dest = unique_dest_path(dest_dir, basename)
+    if dest_path:
+        dest = os.path.abspath(dest_path)
+        os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
+        if os.path.exists(dest):
+            # Preserve uniqueness under the same parent.
+            dest = unique_dest_path(
+                os.path.dirname(dest), os.path.basename(dest)
+            )
+    else:
+        basename = suggested_retrieve_basename(ref, info=meta_info)
+        dest = unique_dest_path(dest_dir, basename)
     logger.info(
         "retrieve_track id=%s name=%r → %s", oid, ref.name, dest
     )
@@ -713,14 +798,11 @@ def send_video(
     storage_id, filetype, and parent match the ZEN contract — same approach
     as retail video restore.
 
-    *guid*: when a valid 32-hex library track id is set (library Video tab
-    sync), ObjectFileName is ``{guid}{ext}`` under the Video/TV parent so the
-    host index can join device inventory. When *guid* is omitted (Device →
-    Send Video file picker / retail restore), ObjectFileName is the sanitized
-    host basename.
+    ObjectFileName is always title/basename style (sanitized host stem +
+    extension), never a library GUID. *guid* is accepted for API compatibility
+    and logging only — callers should still record it in the durable device
+    index after a successful send for skip-if-present / future joins.
     """
-    from mtpmanager.domain.track_id import is_track_guid, normalize_guid
-
     parent = int(parent_id)
     if parent not in VIDEO_PARENT_CHOICES:
         raise ValueError(
@@ -745,30 +827,29 @@ def send_video(
         album="Unknown Album",
         tracknumber="01",
     )
-    g = normalize_guid(guid) if guid else None
-    if g is not None and not is_track_guid(g):
-        g = None
+    # Never wire GUID into ObjectFileName for video — title/basename only.
+    _ = guid  # retained for callers / record_send; not used on the wire
     remote = build_remote_path(
         meta,
         ext,
         music_folder_id=parent,
-        guid=g,
-        preferred_basename=None if g else base,
+        guid=None,
+        preferred_basename=base,
     )
     _, remote_base = split_remote_path(remote)
     logger.info(
-        "send_video path=%s parent=%s remote=%s guid=%s",
+        "send_video path=%s parent=%s remote=%s title=%s",
         path,
         parent,
         remote_base,
-        g or "",
+        display_title,
     )
     object_id = transport.send_track(
         path,
         meta,
         parent_id=parent,
-        guid=g,
-        preferred_basename=None if g else base,
+        guid=None,
+        preferred_basename=base,
     )
     return SendVideoResult(
         object_id=object_id,
@@ -790,6 +871,7 @@ def prepare_and_send_video(
     ignore_max_fps: bool = False,
     on_progress: SendVideoProgress | None = None,
     title: str | None = None,
+    preferred_basename: str | None = None,
     guid: str | None = None,
 ) -> SendVideoResult:
     """Optional device-profile encode, then :func:`send_video`.
@@ -801,8 +883,10 @@ def prepare_and_send_video(
     *ignore_max_fps*: when encoding, skip the profile's max_fps cap (keep
     source rate above the device limit — experimental).
 
-    *guid*: library track GUID for ObjectFileName when sending from the
-    library Video tab (see :func:`send_video`).
+    ObjectFileName is title/basename style. *guid* is not used for the wire
+    name (see :func:`send_video`); callers record it in the host device index.
+    *preferred_basename* overrides the host filename when set (extension may
+    still follow the encode container).
     """
     from mtpmanager.domain.device_profile import VideoEncodePreset
     from mtpmanager.infra.ffmpeg_video import (
@@ -870,12 +954,23 @@ def prepare_and_send_video(
                 encoded = True
                 _emit("progress", 85, 100, "encode complete — sending…")
 
-        # ObjectFileName: GUID when provided (library); else host basename.
-        # Encoded sends keep host stem but use the profile container extension.
-        if encoded and profile is not None:
+        # ObjectFileName: title/host basename (never library GUID).
+        # Encoded sends keep the chosen stem but use the profile container.
+        if preferred_basename and preferred_basename.strip():
+            pref_stem, pref_ext = os.path.splitext(preferred_basename.strip())
+            stem = pref_stem or source_stem
+            if encoded and profile is not None:
+                pref = f"{stem}.{profile.container.lstrip('.')}"
+            elif pref_ext:
+                pref = f"{stem}{pref_ext}"
+            else:
+                pref = preferred_basename.strip()
+        elif encoded and profile is not None:
             pref = f"{source_stem}.{profile.container.lstrip('.')}"
         else:
             pref = os.path.basename(src)
+
+        display_title = (title or source_stem).strip() or source_stem
 
         _emit("phase", "send")
         _emit("status", "sending to device…")
@@ -885,7 +980,7 @@ def prepare_and_send_video(
             transport,
             send_path,
             parent_id=parent_id,
-            title=title or source_stem,
+            title=display_title,
             preferred_basename=pref,
             guid=guid,
         )

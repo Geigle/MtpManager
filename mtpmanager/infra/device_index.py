@@ -404,6 +404,32 @@ def replace_device_listing(
     conn, _ = _open(path)
     try:
         with conn:
+            # Keep host-assigned GUIDs for title-named objects (e.g. video)
+            # across a full list_files replace — wire names are not GUID stems.
+            prev_by_id: dict[int, str] = {}
+            prev_by_name: dict[str, str] = {}
+            try:
+                prev_rows = conn.execute(
+                    "SELECT item_id, name, guid FROM device_files "
+                    "WHERE serial = ? AND guid IS NOT NULL AND guid != ''",
+                    (key,),
+                ).fetchall()
+                for r in prev_rows:
+                    g = str(r["guid"] or "")
+                    if not is_track_guid(g):
+                        continue
+                    oid = int(r["item_id"] or 0)
+                    if oid > 0:
+                        prev_by_id[oid] = g
+                    n = (r["name"] or "").strip()
+                    if n:
+                        prev_by_name[n.casefold()] = g
+            except Exception:
+                logger.debug(
+                    "device_index: could not load prior guids for merge",
+                    exc_info=True,
+                )
+
             conn.execute(
                 """
                 INSERT INTO devices (serial, name, manufacturer, model, last_listed_at, list_complete)
@@ -424,6 +450,10 @@ def replace_device_listing(
                 if oid <= 0:
                     oid = synthetic_item_id(name, int(e.parent_id or 0))
                 guid = guid_from_remote_name(name)
+                if not guid:
+                    guid = prev_by_id.get(oid) or prev_by_name.get(
+                        name.casefold()
+                    )
                 conn.execute(
                     """
                     INSERT INTO device_files (
