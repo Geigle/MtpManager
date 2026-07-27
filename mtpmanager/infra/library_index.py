@@ -1,9 +1,15 @@
 """Persist and restore a Library as a SQLite index under the app data dir.
 
-Schema version 3: one or more library roots + flat track rows (path, guid, tags).
+Schema version 5: multi-root library + flat track rows (path, guid, tags) with
+``tracked`` flag, plus ``library_exclusions`` (file/folder paths skipped on
+scan and untracked from the UI). **Tracked** rows appear in the library UI;
+**untracked** rows keep path/tags/GUID forever so device joins and future
+rescans can reuse the same identity (principle: once identified by GUID, keep
+it).
+
 ``library_meta.root_path`` remains the first root (back-compat); ``root_paths``
-is a JSON array of all roots. Optional device_objects table records last-known
-on-device basename / item id.
+is a JSON array of active roots. Device inventory lives alongside in the same
+DB file via ``device_index``.
 
 Legacy ``library_index.json`` is imported once when the DB is missing.
 """
@@ -21,14 +27,19 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Collection, Iterable
 
-from mtpmanager.domain.library import Library, normalize_library_roots
+from mtpmanager.domain.library import (
+    Library,
+    normalize_library_roots,
+    path_is_excluded,
+    path_under_root,
+)
 from mtpmanager.domain.models import Track, TrackMetadata
 from mtpmanager.domain.track_id import is_track_guid, new_track_guid
 from mtpmanager.infra.app_paths import default_data_dir
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 5
 INDEX_FILENAME = "library_index.db"
 LEGACY_JSON_FILENAME = "library_index.json"
 
@@ -60,12 +71,20 @@ CREATE TABLE IF NOT EXISTS tracks (
   channels INTEGER NOT NULL DEFAULT 0,
   bitrate INTEGER NOT NULL DEFAULT 0,
   bitrate_mode INTEGER NOT NULL DEFAULT 0,
+  tracked INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS library_exclusions (
+  path TEXT PRIMARY KEY,
+  kind TEXT NOT NULL DEFAULT 'folder',
+  created_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_tracks_path ON tracks(path);
 CREATE INDEX IF NOT EXISTS idx_tracks_artist_album ON tracks(artist, album);
+CREATE INDEX IF NOT EXISTS idx_library_exclusions_kind ON library_exclusions(kind);
 """
 
 
@@ -129,6 +148,28 @@ def _migrate_library_meta(conn: sqlite3.Connection) -> None:
                 )
 
 
+def _tracks_columns(conn: sqlite3.Connection) -> set[str]:
+    rows = conn.execute("PRAGMA table_info(tracks)").fetchall()
+    return {str(r[1]) for r in rows}
+
+
+def _migrate_tracks_tracked(conn: sqlite3.Connection) -> None:
+    """Add *tracked* column (schema v4). Existing rows default to tracked."""
+    cols = _tracks_columns(conn)
+    if not cols:
+        return
+    if "tracked" not in cols:
+        conn.execute(
+            "ALTER TABLE tracks ADD COLUMN tracked INTEGER NOT NULL DEFAULT 1"
+        )
+    # Index may be missing on brand-new DBs created before this helper ran, or
+    # after ALTER; always ensure it (CREATE INDEX does not need the column to
+    # exist at executescript time of the base schema).
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_tracks_tracked ON tracks(tracked)"
+    )
+
+
 def _roots_to_json(root_paths: list[str]) -> str:
     return json.dumps(list(root_paths), ensure_ascii=False)
 
@@ -151,6 +192,7 @@ def _roots_from_meta(root_path: str, root_paths_raw: Any) -> list[str]:
 def _init_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(_SCHEMA_SQL)
     _migrate_library_meta(conn)
+    _migrate_tracks_tracked(conn)
     # Device inventory tables (same DB); safe no-op if already present.
     try:
         from mtpmanager.infra.device_index import _ensure_schema as _device_schema
@@ -220,8 +262,81 @@ def ensure_track_guids(
 
 
 def _load_path_guid_map(conn: sqlite3.Connection) -> dict[str, str]:
+    """path → guid for *all* rows (tracked and untracked) for GUID reuse."""
     rows = conn.execute("SELECT path, guid FROM tracks").fetchall()
     return {str(r["path"]): str(r["guid"]) for r in rows}
+
+
+def _upsert_tracked_track(
+    conn: sqlite3.Connection,
+    track: Track,
+    *,
+    now: str,
+) -> None:
+    params = _meta_to_params(track.meta)
+    conn.execute(
+        """
+        INSERT INTO tracks (
+          guid, path,
+          artist, albumartist, composer, album, title, genre,
+          tracknumber, date, length_sec,
+          sample_rate, channels, bitrate, bitrate_mode,
+          tracked,
+          created_at, updated_at
+        ) VALUES (
+          :guid, :path,
+          :artist, :albumartist, :composer, :album, :title, :genre,
+          :tracknumber, :date, :length_sec,
+          :sample_rate, :channels, :bitrate, :bitrate_mode,
+          1,
+          :created_at, :updated_at
+        )
+        ON CONFLICT(guid) DO UPDATE SET
+          path = excluded.path,
+          artist = excluded.artist,
+          albumartist = excluded.albumartist,
+          composer = excluded.composer,
+          album = excluded.album,
+          title = excluded.title,
+          genre = excluded.genre,
+          tracknumber = excluded.tracknumber,
+          date = excluded.date,
+          length_sec = excluded.length_sec,
+          sample_rate = excluded.sample_rate,
+          channels = excluded.channels,
+          bitrate = excluded.bitrate,
+          bitrate_mode = excluded.bitrate_mode,
+          tracked = 1,
+          updated_at = excluded.updated_at
+        """,
+        {
+            "guid": track.guid,
+            "path": track.path,
+            "created_at": now,
+            "updated_at": now,
+            **params,
+        },
+    )
+
+
+def _set_library_meta_roots(
+    conn: sqlite3.Connection,
+    roots: list[str],
+    *,
+    now: str,
+) -> None:
+    primary = roots[0] if roots else ""
+    conn.execute(
+        """
+        INSERT INTO library_meta (id, root_path, root_paths, scanned_at)
+        VALUES (1, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          root_path = excluded.root_path,
+          root_paths = excluded.root_paths,
+          scanned_at = excluded.scanned_at
+        """,
+        (primary, _roots_to_json(roots), now),
+    )
 
 
 def save_library_index(
@@ -229,7 +344,11 @@ def save_library_index(
     *,
     path: Path | None = None,
 ) -> Path:
-    """Write *library* to the SQLite index. Assigns/preserves GUIDs on tracks.
+    """Write *library* tracked set to the SQLite index; preserve untracked GUIDs.
+
+    Assigns/preserves GUIDs using path maps that include untracked rows so a
+    file reappearing at the same path reclaims its identity. Rows present in
+    the DB but absent from *library* are **untracked** (not deleted).
 
     Mutates ``library.tracks`` so callers keep the assigned GUIDs.
     Returns the database path written.
@@ -247,88 +366,291 @@ def save_library_index(
         if not roots and library.root_path:
             roots = normalize_library_roots([library.root_path])
         library.root_paths[:] = roots
-        primary = roots[0] if roots else ""
-        roots_json = _roots_to_json(roots)
+        keep_guids = [t.guid for t in assigned if is_track_guid(t.guid)]
 
         with conn:
-            conn.execute(
-                """
-                INSERT INTO library_meta (id, root_path, root_paths, scanned_at)
-                VALUES (1, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                  root_path = excluded.root_path,
-                  root_paths = excluded.root_paths,
-                  scanned_at = excluded.scanned_at
-                """,
-                (primary, roots_json, now),
-            )
-            # Full replace of track set for this library (matches old JSON rewrite).
-            keep_guids = [t.guid for t in assigned]
+            _set_library_meta_roots(conn, roots, now=now)
+
+            for t in assigned:
+                _upsert_tracked_track(conn, t, now=now)
+
+            # Soft-drop: keep GUID/path/tags for device join + future reuse.
             if keep_guids:
                 placeholders = ",".join("?" * len(keep_guids))
                 conn.execute(
-                    f"DELETE FROM tracks WHERE guid NOT IN ({placeholders})",
-                    keep_guids,
+                    f"UPDATE tracks SET tracked = 0, updated_at = ? "
+                    f"WHERE tracked != 0 AND guid NOT IN ({placeholders})",
+                    [now, *keep_guids],
                 )
             else:
-                conn.execute("DELETE FROM tracks")
-
-            for t in assigned:
-                params = _meta_to_params(t.meta)
                 conn.execute(
-                    """
-                    INSERT INTO tracks (
-                      guid, path,
-                      artist, albumartist, composer, album, title, genre,
-                      tracknumber, date, length_sec,
-                      sample_rate, channels, bitrate, bitrate_mode,
-                      created_at, updated_at
-                    ) VALUES (
-                      :guid, :path,
-                      :artist, :albumartist, :composer, :album, :title, :genre,
-                      :tracknumber, :date, :length_sec,
-                      :sample_rate, :channels, :bitrate, :bitrate_mode,
-                      :created_at, :updated_at
-                    )
-                    ON CONFLICT(guid) DO UPDATE SET
-                      path = excluded.path,
-                      artist = excluded.artist,
-                      albumartist = excluded.albumartist,
-                      composer = excluded.composer,
-                      album = excluded.album,
-                      title = excluded.title,
-                      genre = excluded.genre,
-                      tracknumber = excluded.tracknumber,
-                      date = excluded.date,
-                      length_sec = excluded.length_sec,
-                      sample_rate = excluded.sample_rate,
-                      channels = excluded.channels,
-                      bitrate = excluded.bitrate,
-                      bitrate_mode = excluded.bitrate_mode,
-                      updated_at = excluded.updated_at
-                    """,
-                    {
-                        "guid": t.guid,
-                        "path": t.path,
-                        "created_at": now,
-                        "updated_at": now,
-                        **params,
-                    },
+                    "UPDATE tracks SET tracked = 0, updated_at = ? WHERE tracked != 0",
+                    (now,),
                 )
-                # If path changed ownership of a guid collision was handled above;
-                # also clear orphan device_objects for deleted guids via FK cascade
-                # only when row deleted — ON DELETE CASCADE handles that.
     finally:
         conn.close()
 
+    untracked = 0
+    try:
+        conn = _connect(dest)
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM tracks WHERE tracked = 0"
+        ).fetchone()
+        untracked = int(row["n"] if row else 0)
+        conn.close()
+    except sqlite3.Error:
+        pass
+
     logger.info(
-        "Saved library index: %d tracks under %d root(s) %s → %s",
+        "Saved library index: %d tracked, %d untracked under %d root(s) %s → %s",
         len(library.tracks),
+        untracked,
         len(library.root_paths),
         library.root_paths,
         dest,
     )
     return dest
+
+
+def list_library_exclusions(
+    *,
+    path: Path | None = None,
+) -> list[tuple[str, str]]:
+    """Return durable exclusion rules as ``(path, kind)`` sorted by path.
+
+    *kind* is ``\"file\"`` or ``\"folder\"``.
+    """
+    dest = path if path is not None else index_path()
+    if not dest.is_file():
+        return []
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = _connect(dest)
+        _init_schema(conn)
+        rows = conn.execute(
+            "SELECT path, kind FROM library_exclusions "
+            "ORDER BY path COLLATE NOCASE"
+        ).fetchall()
+        out: list[tuple[str, str]] = []
+        for r in rows:
+            p = str(r["path"] or "").strip()
+            if not p:
+                continue
+            kind = str(r["kind"] or "folder").strip().lower()
+            if kind not in ("file", "folder"):
+                kind = "folder"
+            out.append((os.path.normpath(p), kind))
+        return out
+    except sqlite3.Error as e:
+        logger.warning("list_library_exclusions failed: %s", e)
+        return []
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def load_exclusion_paths(*, path: Path | None = None) -> list[str]:
+    """Return just the exclusion paths (for scan filters)."""
+    return [p for p, _k in list_library_exclusions(path=path)]
+
+
+def exclude_library_paths(
+    entries: Iterable[tuple[str, str]],
+    *,
+    path: Path | None = None,
+) -> Library:
+    """Add exclusion rules and untrack matching media; return tracked Library.
+
+    *entries* are ``(path, kind)`` with kind ``file`` or ``folder``. GUIDs for
+    untracked rows are kept. Active library roots are unchanged.
+    """
+    dest = path if path is not None else index_path()
+    now = _utc_now()
+    cleaned: list[tuple[str, str]] = []
+    for raw_path, raw_kind in entries:
+        p = os.path.normpath((raw_path or "").strip())
+        if not p:
+            continue
+        kind = (raw_kind or "folder").strip().lower()
+        if kind not in ("file", "folder"):
+            kind = "folder" if os.path.isdir(p) else "file"
+        cleaned.append((p, kind))
+    if not cleaned:
+        # Still return current tracked set.
+        lib = load_library_index(
+            path=dest,
+            drop_missing_files=False,
+            migrate_json=False,
+            keep_missing_if_roots_unreachable=True,
+        )
+        return lib or Library()
+
+    conn = _connect(dest)
+    try:
+        _init_schema(conn)
+        meta_row = conn.execute(
+            "SELECT root_path, root_paths FROM library_meta WHERE id = 1"
+        ).fetchone()
+        roots: list[str] = []
+        if meta_row is not None:
+            roots = _roots_from_meta(
+                str(meta_row["root_path"] or ""),
+                meta_row["root_paths"],
+            )
+
+        exclusion_paths = [p for p, _k in cleaned]
+        untracked_n = 0
+        with conn:
+            for p, kind in cleaned:
+                conn.execute(
+                    """
+                    INSERT INTO library_exclusions (path, kind, created_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(path) DO UPDATE SET
+                      kind = excluded.kind,
+                      created_at = library_exclusions.created_at
+                    """,
+                    (p, kind, now),
+                )
+
+            rows = conn.execute(
+                "SELECT guid, path FROM tracks WHERE tracked != 0"
+            ).fetchall()
+            to_untrack: list[str] = []
+            for row in rows:
+                tp = str(row["path"] or "")
+                if path_is_excluded(tp, exclusion_paths):
+                    to_untrack.append(str(row["guid"]))
+            if to_untrack:
+                placeholders = ",".join("?" * len(to_untrack))
+                conn.execute(
+                    f"UPDATE tracks SET tracked = 0, updated_at = ? "
+                    f"WHERE guid IN ({placeholders})",
+                    [now, *to_untrack],
+                )
+                untracked_n = len(to_untrack)
+
+            tracked_rows = conn.execute(
+                "SELECT * FROM tracks WHERE tracked != 0 "
+                "ORDER BY path COLLATE NOCASE"
+            ).fetchall()
+            tracks = [_track_from_row(r) for r in tracked_rows if r["path"]]
+
+        logger.info(
+            "Excluded %d path(s); untracked %d track(s); %d tracked remain",
+            len(cleaned),
+            untracked_n,
+            len(tracks),
+        )
+        return Library(tracks=tracks, root_paths=roots)
+    finally:
+        conn.close()
+
+
+def remove_library_exclusions(
+    paths: Iterable[str],
+    *,
+    path: Path | None = None,
+) -> int:
+    """Delete exclusion rules for *paths*. Returns number of rows removed.
+
+    Does not rescan; caller should re-scan affected folders so media reappears.
+    """
+    dest = path if path is not None else index_path()
+    cleaned = [os.path.normpath(p) for p in paths if (p or "").strip()]
+    if not cleaned or not dest.is_file():
+        return 0
+    conn = _connect(dest)
+    try:
+        _init_schema(conn)
+        removed = 0
+        with conn:
+            for p in cleaned:
+                cur = conn.execute(
+                    "DELETE FROM library_exclusions WHERE path = ?",
+                    (p,),
+                )
+                removed += int(cur.rowcount or 0)
+        logger.info("Removed %d library exclusion(s)", removed)
+        return removed
+    finally:
+        conn.close()
+
+
+def untrack_library_roots(
+    removed_roots: Iterable[str],
+    *,
+    final_roots: Iterable[str] | None = None,
+    path: Path | None = None,
+) -> Library:
+    """Mark tracks under *removed_roots* as untracked without rescanning.
+
+    Updates active root list to *final_roots* (or current roots minus removed).
+    Returns the remaining **tracked** library for the UI. GUID rows stay in the
+    DB so device inventory can still resolve tags, and a future rescan of the
+    same path reuses the GUID.
+    """
+    dest = path if path is not None else index_path()
+    now = _utc_now()
+    drop = normalize_library_roots(removed_roots)
+    conn = _connect(dest)
+    try:
+        _init_schema(conn)
+        meta_row = conn.execute(
+            "SELECT root_path, root_paths FROM library_meta WHERE id = 1"
+        ).fetchone()
+        if meta_row is None:
+            roots: list[str] = []
+        else:
+            roots = _roots_from_meta(
+                str(meta_row["root_path"] or ""),
+                meta_row["root_paths"],
+            )
+        if final_roots is not None:
+            remaining = normalize_library_roots(final_roots)
+        else:
+            drop_set = set(drop)
+            remaining = [r for r in roots if r not in drop_set]
+
+        untracked_n = 0
+        with conn:
+            _set_library_meta_roots(conn, remaining, now=now)
+            if drop:
+                # Load paths for rows we might untrack (tracked only).
+                rows = conn.execute(
+                    "SELECT guid, path FROM tracks WHERE tracked != 0"
+                ).fetchall()
+                to_untrack: list[str] = []
+                for row in rows:
+                    p = str(row["path"] or "")
+                    if any(path_under_root(p, r) for r in drop):
+                        to_untrack.append(str(row["guid"]))
+                if to_untrack:
+                    placeholders = ",".join("?" * len(to_untrack))
+                    conn.execute(
+                        f"UPDATE tracks SET tracked = 0, updated_at = ? "
+                        f"WHERE guid IN ({placeholders})",
+                        [now, *to_untrack],
+                    )
+                    untracked_n = len(to_untrack)
+
+            tracked_rows = conn.execute(
+                "SELECT * FROM tracks WHERE tracked != 0 "
+                "ORDER BY path COLLATE NOCASE"
+            ).fetchall()
+            tracks = [_track_from_row(r) for r in tracked_rows if r["path"]]
+
+        logger.info(
+            "Untracked %d track(s) under removed root(s) %s; "
+            "%d tracked remain; roots=%s",
+            untracked_n,
+            drop,
+            len(tracks),
+            remaining,
+        )
+        return Library(tracks=tracks, root_paths=remaining)
+    finally:
+        conn.close()
 
 
 def load_library_index(
@@ -405,25 +727,26 @@ def load_library_index(
 
         root_path = meta_row["root_path"]
         if not isinstance(root_path, str):
-            logger.warning("Library index %s: invalid root_path", dest)
-            return None
+            root_path = ""
         roots = _roots_from_meta(root_path, meta_row["root_paths"])
         if not roots and root_path:
             roots = normalize_library_roots([root_path])
-        if not roots:
-            logger.warning("Library index %s: no library roots", dest)
-            return None
+        # Empty roots are valid (all roots removed; untracked GUIDs may remain).
 
-        any_root_live = any(os.path.isdir(r) for r in roots)
+        any_root_live = any(os.path.isdir(r) for r in roots) if roots else False
         should_drop = bool(drop_missing_files)
         if should_drop and keep_missing_if_roots_unreachable and not any_root_live:
             should_drop = False
-            logger.warning(
-                "Library index root(s) not reachable: %r — keeping stale rows",
-                roots,
-            )
+            if roots:
+                logger.warning(
+                    "Library index root(s) not reachable: %r — keeping stale rows",
+                    roots,
+                )
 
-        row_count_raw = conn.execute("SELECT COUNT(*) FROM tracks").fetchone()
+        # UI only sees tracked rows; untracked GUIDs remain for device join.
+        row_count_raw = conn.execute(
+            "SELECT COUNT(*) FROM tracks WHERE tracked != 0"
+        ).fetchone()
         row_count = int(row_count_raw[0] or 0) if row_count_raw is not None else 0
         if on_progress is not None:
             try:
@@ -432,7 +755,7 @@ def load_library_index(
                 logger.debug("library index on_progress(meta) failed", exc_info=True)
 
         cursor = conn.execute(
-            "SELECT * FROM tracks ORDER BY path COLLATE NOCASE"
+            "SELECT * FROM tracks WHERE tracked != 0 ORDER BY path COLLATE NOCASE"
         )
         tracks: list[Track] = []
         dropped = 0

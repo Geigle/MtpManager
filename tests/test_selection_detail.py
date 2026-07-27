@@ -49,6 +49,8 @@ class SelectionDetailTests(unittest.TestCase):
         self.assertIn("#6", text)
         self.assertIn("5:12", text)
         self.assertIn("Progressive Metal", text)
+        # Path is shown separately (italic label), not inside the detail text.
+        self.assertNotIn("/music/a.flac", text)
 
     def test_track_detail_skips_unknown_genre(self) -> None:
         track = Track(

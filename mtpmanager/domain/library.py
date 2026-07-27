@@ -16,13 +16,19 @@ MUSIC_EXTENSIONS = frozenset(
     {"aac", "alac", "flac", "mp3", "ogg", "vorbis", "wav", "wma"}
 )
 
+# Host Video tab / scan (aligned with Device → Send Video pickers + ZEN video).
+# Intentionally excludes pure-audio containers (m4a/m4b stay music).
+VIDEO_EXTENSIONS = frozenset(
+    {"wmv", "avi", "mpg", "mpeg", "mov", "asf", "mp4", "m4v", "qt", "mkv"}
+)
+
 _UNKNOWN_ARTIST = "Unknown Artist"
 _YEAR_RE = re.compile(r"\b((?:19|20)\d{2})\b")
 
 
 def extension_of(path: str) -> str:
     lower = path.lower()
-    for ext in MUSIC_EXTENSIONS:
+    for ext in MUSIC_EXTENSIONS | VIDEO_EXTENSIONS:
         if lower.endswith("." + ext):
             return ext
     if "." in path:
@@ -42,6 +48,20 @@ def is_music_file(path: str, exclude_formats: Iterable[str] | None = None) -> bo
     if ext in MUSIC_EXTENSIONS and ext not in exclude:
         return True
     return False
+
+
+def is_video_file(path: str) -> bool:
+    """True if path looks like a known video file (by extension)."""
+    return extension_of(path) in VIDEO_EXTENSIONS
+
+
+def is_library_media_file(
+    path: str, exclude_formats: Iterable[str] | None = None
+) -> bool:
+    """True if path is music or video for library scan."""
+    if is_video_file(path):
+        return True
+    return is_music_file(path, exclude_formats=exclude_formats)
 
 
 def year_from_date(date: str) -> str | None:
@@ -83,18 +103,106 @@ def is_audiobook_track(track: Track) -> bool:
     return is_audiobook_genre(track.meta.genre if track and track.meta else "")
 
 
-def partition_music_and_audiobooks(
+def is_video_track(track: Track) -> bool:
+    """True when the track path is a video container (by extension)."""
+    return bool(track and is_video_file(track.path))
+
+
+def partition_library_media(
     tracks: Iterable[Track],
-) -> tuple[list[Track], list[Track]]:
-    """Split tracks into (music, audiobooks) by :func:`is_audiobook_track`."""
+) -> tuple[list[Track], list[Track], list[Track]]:
+    """Split tracks into (music, videos, audiobooks).
+
+    Video is decided by file extension first. Remaining audio with genre
+    Audiobook goes to audiobooks; everything else is music.
+    """
     music: list[Track] = []
+    videos: list[Track] = []
     audiobooks: list[Track] = []
     for t in tracks:
-        if is_audiobook_track(t):
+        if is_video_track(t):
+            videos.append(t)
+        elif is_audiobook_track(t):
             audiobooks.append(t)
         else:
             music.append(t)
+    return music, videos, audiobooks
+
+
+def partition_music_and_audiobooks(
+    tracks: Iterable[Track],
+) -> tuple[list[Track], list[Track]]:
+    """Split tracks into (music, audiobooks); videos are dropped from both.
+
+    Prefer :func:`partition_library_media` when the Video tab is involved.
+    """
+    music, _videos, audiobooks = partition_library_media(tracks)
     return music, audiobooks
+
+
+def path_under_root(path: str, root: str) -> bool:
+    """True when *path* is *root* or a file/dir under *root* (normpath)."""
+    if not path or not root:
+        return False
+    p = os.path.normpath(path)
+    r = os.path.normpath(root)
+    if p == r:
+        return True
+    prefix = r + os.sep
+    return p.startswith(prefix)
+
+
+def path_is_excluded(path: str, exclusions: Iterable[str]) -> bool:
+    """True when *path* matches any exclusion rule (exact path or under a folder).
+
+    Exclusion entries are absolute paths to files or directories. A directory
+    rule excludes the directory itself and every descendant path.
+    """
+    if not path:
+        return False
+    p = os.path.normpath(path)
+    for raw in exclusions:
+        if not raw:
+            continue
+        ex = os.path.normpath(raw)
+        if p == ex or path_under_root(p, ex):
+            return True
+    return False
+
+
+def merge_scanned_roots(
+    existing: Library,
+    scanned: Library,
+    *,
+    scanned_roots: Iterable[str],
+    final_roots: Iterable[str],
+) -> Library:
+    """Merge a partial scan into *existing* without dropping other roots.
+
+    Tracks whose paths fall under any of *scanned_roots* are replaced by
+    *scanned* (so deleted files under the new/updated root disappear). Tracks
+    outside those roots are kept unchanged.
+    """
+    roots_scanned = normalize_library_roots(scanned_roots)
+    keep = [
+        t
+        for t in existing.tracks
+        if not any(path_under_root(t.path, r) for r in roots_scanned)
+    ]
+    merged = list(keep) + list(scanned.tracks)
+    merged.sort(key=lambda t: t.path)
+    return Library(
+        tracks=merged,
+        root_paths=normalize_library_roots(final_roots),
+    )
+
+
+def video_display_title(track: Track) -> str:
+    """Filename (basename) for Video-tab rows — tags are often empty/unreliable."""
+    if not track or not track.path:
+        return "Unknown Title"
+    base = os.path.basename(track.path)
+    return base or "Unknown Title"
 
 
 def _albumartist_meaningful(albumartist: str) -> bool:

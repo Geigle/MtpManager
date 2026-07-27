@@ -705,14 +705,22 @@ def send_video(
     parent_id: int,
     title: str | None = None,
     preferred_basename: str | None = None,
+    guid: str | None = None,
 ) -> SendVideoResult:
     """Send a local video file under Video (120) or TV (124).
 
     Uses the normal track-send path (``LIBMTP_Send_Track_From_File``) so
     storage_id, filetype, and parent match the ZEN contract — same approach
-    as retail video restore. ObjectFileName is the sanitized host basename
-    (no library GUID).
+    as retail video restore.
+
+    *guid*: when a valid 32-hex library track id is set (library Video tab
+    sync), ObjectFileName is ``{guid}{ext}`` under the Video/TV parent so the
+    host index can join device inventory. When *guid* is omitted (Device →
+    Send Video file picker / retail restore), ObjectFileName is the sanitized
+    host basename.
     """
+    from mtpmanager.domain.track_id import is_track_guid, normalize_guid
+
     parent = int(parent_id)
     if parent not in VIDEO_PARENT_CHOICES:
         raise ValueError(
@@ -737,25 +745,30 @@ def send_video(
         album="Unknown Album",
         tracknumber="01",
     )
+    g = normalize_guid(guid) if guid else None
+    if g is not None and not is_track_guid(g):
+        g = None
     remote = build_remote_path(
         meta,
         ext,
         music_folder_id=parent,
-        preferred_basename=base,
+        guid=g,
+        preferred_basename=None if g else base,
     )
     _, remote_base = split_remote_path(remote)
     logger.info(
-        "send_video path=%s parent=%s remote=%s",
+        "send_video path=%s parent=%s remote=%s guid=%s",
         path,
         parent,
         remote_base,
+        g or "",
     )
     object_id = transport.send_track(
         path,
         meta,
         parent_id=parent,
-        guid=None,
-        preferred_basename=base,
+        guid=g,
+        preferred_basename=None if g else base,
     )
     return SendVideoResult(
         object_id=object_id,
@@ -777,6 +790,7 @@ def prepare_and_send_video(
     ignore_max_fps: bool = False,
     on_progress: SendVideoProgress | None = None,
     title: str | None = None,
+    guid: str | None = None,
 ) -> SendVideoResult:
     """Optional device-profile encode, then :func:`send_video`.
 
@@ -786,6 +800,9 @@ def prepare_and_send_video(
 
     *ignore_max_fps*: when encoding, skip the profile's max_fps cap (keep
     source rate above the device limit — experimental).
+
+    *guid*: library track GUID for ObjectFileName when sending from the
+    library Video tab (see :func:`send_video`).
     """
     from mtpmanager.domain.device_profile import VideoEncodePreset
     from mtpmanager.infra.ffmpeg_video import (
@@ -853,7 +870,8 @@ def prepare_and_send_video(
                 encoded = True
                 _emit("progress", 85, 100, "encode complete — sending…")
 
-        # ObjectFileName: keep host stem; use encoded extension when converted.
+        # ObjectFileName: GUID when provided (library); else host basename.
+        # Encoded sends keep host stem but use the profile container extension.
         if encoded and profile is not None:
             pref = f"{source_stem}.{profile.container.lstrip('.')}"
         else:
@@ -869,6 +887,7 @@ def prepare_and_send_video(
             parent_id=parent_id,
             title=title or source_stem,
             preferred_basename=pref,
+            guid=guid,
         )
         _emit("progress", 100, 100, "done")
         return SendVideoResult(

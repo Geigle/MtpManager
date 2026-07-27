@@ -5,10 +5,18 @@ from __future__ import annotations
 import unittest
 
 from mtpmanager.domain.library import (
+    Library,
     is_audiobook_genre,
     is_audiobook_track,
+    is_video_file,
+    is_video_track,
+    merge_scanned_roots,
+    partition_library_media,
     partition_music_and_audiobooks,
+    path_is_excluded,
+    path_under_root,
     primary_artist,
+    video_display_title,
 )
 from mtpmanager.domain.library_sort import (
     ARTIST_COLUMN_CYCLE,
@@ -90,6 +98,60 @@ class AudiobookGenreTests(unittest.TestCase):
         self.assertEqual(a, [book])
         self.assertTrue(is_audiobook_track(book))
         self.assertFalse(is_audiobook_track(music))
+
+    def test_partition_library_media_splits_video(self) -> None:
+        music = _t("/m.mp3", genre="Rock")
+        book = _t("/b.mp3", genre="Audiobook", artist="Author")
+        video = _t("/Movies/clip.avi", title="Clip")
+        m, v, a = partition_library_media([music, book, video])
+        self.assertEqual(m, [music])
+        self.assertEqual(v, [video])
+        self.assertEqual(a, [book])
+        self.assertTrue(is_video_file("/x.mp4"))
+        self.assertTrue(is_video_track(video))
+        self.assertFalse(is_video_track(music))
+        # Videos are not misclassified as music even with audiobook genre tags.
+        tagged_vid = _t("/show.mkv", genre="Audiobook")
+        m2, v2, a2 = partition_library_media([tagged_vid])
+        self.assertEqual(m2, [])
+        self.assertEqual(v2, [tagged_vid])
+        self.assertEqual(a2, [])
+
+    def test_video_display_title_is_filename(self) -> None:
+        t = _t("/Media/Shows/S01E01.avi", title="Ignored Tag Title")
+        self.assertEqual(video_display_title(t), "S01E01.avi")
+
+    def test_merge_scanned_roots_keeps_other_roots(self) -> None:
+        existing = Library(
+            tracks=[
+                _t("/libA/a.mp3", title="A"),
+                _t("/libB/old.mp3", title="Old"),
+            ],
+            root_paths=["/libA", "/libB"],
+        )
+        scanned = Library(
+            tracks=[_t("/libB/new.mp3", title="New")],
+            root_paths=["/libB"],
+        )
+        merged = merge_scanned_roots(
+            existing,
+            scanned,
+            scanned_roots=["/libB"],
+            final_roots=["/libA", "/libB", "/libC"],
+        )
+        paths = [t.path for t in merged.tracks]
+        self.assertIn("/libA/a.mp3", paths)
+        self.assertIn("/libB/new.mp3", paths)
+        self.assertNotIn("/libB/old.mp3", paths)
+        self.assertEqual(merged.root_paths, ["/libA", "/libB", "/libC"])
+        self.assertTrue(path_under_root("/libB/x.mp3", "/libB"))
+        self.assertFalse(path_under_root("/libA/x.mp3", "/libB"))
+        self.assertTrue(
+            path_is_excluded("/Movie/Extras/t.mp4", ["/Movie/Extras"])
+        )
+        self.assertFalse(
+            path_is_excluded("/Movie/feature.mp4", ["/Movie/Extras"])
+        )
 
 
 class LibrarySortTests(unittest.TestCase):

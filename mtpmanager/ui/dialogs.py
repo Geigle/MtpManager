@@ -19,6 +19,7 @@ from tkinter import (
     Frame,
     Label,
     Listbox,
+    Menu,
     Radiobutton,
     Scrollbar,
     StringVar,
@@ -270,6 +271,7 @@ class ManageLibraryDialog:
         on_update: Callable[[], None],
         is_busy: Callable[[], bool],
         can_update: Callable[[], bool],
+        on_exclusions: Callable[[], None] | None = None,
         on_close: Callable[[], None] | None = None,
     ) -> None:
         self._get_roots = get_roots
@@ -278,6 +280,7 @@ class ManageLibraryDialog:
         self._on_update = on_update
         self._is_busy = is_busy
         self._can_update = can_update
+        self._on_exclusions = on_exclusions
         self._on_close = on_close
 
         dlg = Toplevel(parent)
@@ -333,6 +336,12 @@ class ManageLibraryDialog:
             row, text="Update Library", width=14, command=self._click_update
         )
         self._btn_update.pack(side=LEFT, padx=(8, 0))
+        self._btn_exclusions = Button(
+            row, text="Exclusions…", width=12, command=self._click_exclusions
+        )
+        self._btn_exclusions.pack(side=LEFT, padx=(8, 0))
+        if on_exclusions is None:
+            self._btn_exclusions.configure(state=DISABLED)
         Button(row, text="Close", width=10, command=self.close).pack(side=RIGHT)
 
         dlg.protocol("WM_DELETE_WINDOW", self.close)
@@ -478,6 +487,11 @@ class ManageLibraryDialog:
             return
         self._on_update()
 
+    def _click_exclusions(self) -> None:
+        if self._on_exclusions is None:
+            return
+        self._on_exclusions()
+
 
 def open_manage_library_dialog(
     parent,
@@ -488,6 +502,7 @@ def open_manage_library_dialog(
     on_update: Callable[[], None],
     is_busy: Callable[[], bool],
     can_update: Callable[[], bool],
+    on_exclusions: Callable[[], None] | None = None,
     on_close: Callable[[], None] | None = None,
 ) -> ManageLibraryDialog:
     """Open (or the caller reuses) the Manage Library window."""
@@ -499,8 +514,239 @@ def open_manage_library_dialog(
         on_update=on_update,
         is_busy=is_busy,
         can_update=can_update,
+        on_exclusions=on_exclusions,
         on_close=on_close,
     )
+
+
+class ExclusionsManagerDialog:
+    """Modeless list of excluded file/folder paths with de-exclude actions."""
+
+    def __init__(
+        self,
+        parent,
+        *,
+        get_exclusions: Callable[[], list[tuple[str, str]]],
+        on_remove: Callable[[list[str]], None],
+        is_busy: Callable[[], bool],
+        on_close: Callable[[], None] | None = None,
+    ) -> None:
+        self._get_exclusions = get_exclusions
+        self._on_remove = on_remove
+        self._is_busy = is_busy
+        self._on_close = on_close
+        # Display label → absolute path for selection mapping.
+        self._path_by_display: dict[str, str] = {}
+
+        dlg = Toplevel(parent)
+        dlg.title("Exclusions Manager")
+        dlg.transient(parent)
+        dlg.minsize(520, 340)
+        dlg.geometry("640x400")
+        self._dlg = dlg
+
+        body = Frame(dlg, padx=14, pady=12)
+        body.pack(fill=BOTH, expand=True)
+
+        Label(
+            body,
+            text=(
+                "Excluded paths are skipped when scanning and removed from the "
+                "library list. GUIDs stay in the index for device joins."
+            ),
+            anchor="w",
+            justify=LEFT,
+            wraplength=600,
+        ).pack(fill="x")
+
+        list_frame = Frame(body)
+        list_frame.pack(fill=BOTH, expand=True, pady=(8, 8))
+        scroll = Scrollbar(list_frame)
+        scroll.pack(side=RIGHT, fill=Y)
+        self._lb = Listbox(
+            list_frame,
+            yscrollcommand=scroll.set,
+            selectmode="extended",
+            activestyle="dotbox",
+            exportselection=False,
+        )
+        self._lb.pack(side=LEFT, fill=BOTH, expand=True)
+        scroll.config(command=self._lb.yview)
+        try:
+            self._lb.configure(font=("Menlo", 11))
+        except Exception:
+            try:
+                self._lb.configure(font=("Courier", 11))
+            except Exception:
+                pass
+
+        self._status = Label(body, text="", anchor="w", justify=LEFT)
+        self._status.pack(fill="x", pady=(0, 8))
+
+        row = Frame(body)
+        row.pack(fill="x")
+        self._btn_remove = Button(
+            row,
+            text="Remove from Exclusions",
+            width=20,
+            command=self._click_remove,
+        )
+        self._btn_remove.pack(side=LEFT)
+        Button(row, text="Close", width=10, command=self.close).pack(side=RIGHT)
+
+        self._menu = Menu(dlg, tearoff=0)
+        self._menu.add_command(
+            label="Remove from exclusions",
+            command=self._click_remove,
+        )
+        self._lb.bind("<Button-3>", self._popup_menu)
+        self._lb.bind("<Button-2>", self._popup_menu)
+        self._lb.bind("<Delete>", lambda _e: self._click_remove())
+        self._lb.bind("<BackSpace>", lambda _e: self._click_remove())
+        self._lb.bind("<Double-Button-1>", lambda _e: self._click_remove())
+
+        dlg.protocol("WM_DELETE_WINDOW", self.close)
+        try:
+            px = parent.winfo_rootx() + max(
+                0, (parent.winfo_width() - 640) // 2
+            )
+            py = parent.winfo_rooty() + max(
+                0, (parent.winfo_height() - 400) // 3
+            )
+            dlg.geometry(f"+{px}+{py}")
+        except Exception:
+            pass
+
+        self.refresh()
+        try:
+            dlg.focus_set()
+        except Exception:
+            pass
+
+    @property
+    def window(self) -> Toplevel:
+        return self._dlg
+
+    def is_open(self) -> bool:
+        try:
+            return bool(self._dlg.winfo_exists())
+        except Exception:
+            return False
+
+    def focus(self) -> None:
+        if not self.is_open():
+            return
+        try:
+            self._dlg.lift()
+            self._dlg.focus_force()
+        except Exception:
+            pass
+
+    def close(self) -> None:
+        dlg = self._dlg
+        try:
+            if dlg.winfo_exists():
+                dlg.destroy()
+        except Exception:
+            pass
+        if self._on_close is not None:
+            try:
+                self._on_close()
+            except Exception:
+                pass
+
+    def refresh(self) -> None:
+        if not self.is_open():
+            return
+        selected = set(self._selected_paths())
+        rows = list(self._get_exclusions() or [])
+        self._path_by_display.clear()
+        self._lb.delete(0, END)
+        for path, kind in rows:
+            label = f"[{kind}] {path}"
+            self._path_by_display[label] = path
+            self._lb.insert(END, label)
+            if path in selected:
+                self._lb.selection_set(END)
+
+        busy = False
+        try:
+            busy = bool(self._is_busy())
+        except Exception:
+            busy = False
+        n = len(rows)
+        if busy:
+            self._status.configure(text="Library is busy…")
+        elif n == 0:
+            self._status.configure(text="No exclusions. Right-click media to exclude.")
+        else:
+            self._status.configure(
+                text=f"{n} exclusion{'s' if n != 1 else ''}."
+            )
+        rem_state = DISABLED if busy or n == 0 else NORMAL
+        try:
+            self._btn_remove.configure(state=rem_state)
+        except Exception:
+            pass
+
+    def _selected_paths(self) -> list[str]:
+        try:
+            idxs = self._lb.curselection()
+        except Exception:
+            return []
+        out: list[str] = []
+        for i in idxs:
+            try:
+                label = str(self._lb.get(i))
+            except Exception:
+                continue
+            path = self._path_by_display.get(label)
+            if path:
+                out.append(path)
+        return out
+
+    def _popup_menu(self, event) -> str | None:
+        try:
+            idx = self._lb.nearest(event.y)
+            if idx >= 0 and idx not in self._lb.curselection():
+                self._lb.selection_clear(0, END)
+                self._lb.selection_set(idx)
+            self._menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            try:
+                self._menu.grab_release()
+            except Exception:
+                pass
+        return "break"
+
+    def _click_remove(self) -> None:
+        if self._is_busy():
+            return
+        paths = self._selected_paths()
+        if not paths:
+            messagebox.showinfo(
+                "Exclusions Manager",
+                "Select one or more exclusions to remove.",
+                parent=self._dlg,
+            )
+            return
+        if len(paths) == 1:
+            msg = (
+                "Stop excluding this path?\n\n"
+                f"{paths[0]}\n\n"
+                "It will be scanned again if it is still under a library root."
+            )
+        else:
+            msg = (
+                f"Stop excluding {len(paths)} paths?\n\n"
+                "They will be scanned again if still under a library root."
+            )
+        if not messagebox.askyesno(
+            "Remove Exclusion", msg, parent=self._dlg
+        ):
+            return
+        self._on_remove(paths)
+
 
 
 @dataclass(frozen=True)

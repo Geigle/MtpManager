@@ -21,6 +21,7 @@ from mtpmanager.domain.device_profiles import (
     ZEN_WMV_WMA,
 )
 from mtpmanager.domain.models import TrackMetadata
+from mtpmanager.domain.track_id import new_track_guid
 from mtpmanager.infra.remote_naming import (
     DEFAULT_MUSIC_FOLDER_ID,
     DEFAULT_TV_FOLDER_ID,
@@ -110,6 +111,36 @@ class SendVideoTests(unittest.TestCase):
             self.assertIsNone(call["guid"])
             self.assertEqual(call["preferred_basename"], "demo.wmv")
             self.assertEqual(call["meta"].title, "demo")
+
+    def test_send_video_library_guid_naming(self) -> None:
+        """Library Video tab: ObjectFileName is {guid}{ext} under Video parent."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "feature.mp4"
+            path.write_bytes(b"fake")
+            guid = new_track_guid()
+            transport = _FakeTransport()
+            result = send_video(
+                transport,
+                str(path),
+                parent_id=DEFAULT_VIDEO_FOLDER_ID,
+                guid=guid,
+                preferred_basename="feature.mp4",  # ignored when guid set
+            )
+            self.assertEqual(result.remote_basename, f"{guid}.mp4")
+            call = transport.calls[0]
+            self.assertEqual(call["guid"], guid)
+            self.assertIsNone(call["preferred_basename"])
+            self.assertEqual(call["parent_id"], DEFAULT_VIDEO_FOLDER_ID)
+
+            remote = build_remote_path(
+                TrackMetadata(title="Feature"),
+                ".avi",
+                music_folder_id=DEFAULT_VIDEO_FOLDER_ID,
+                guid=guid,
+            )
+            parent, basename = split_remote_path(remote)
+            self.assertEqual(parent, DEFAULT_VIDEO_FOLDER_ID)
+            self.assertEqual(basename, f"{guid}.avi")
 
     def test_send_video_tv_folder(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -15,11 +15,16 @@ from mtpmanager.domain.library import Library, normalize_library_roots
 from mtpmanager.domain.models import Track, TrackMetadata
 from mtpmanager.domain.track_id import is_track_guid, new_track_guid
 from mtpmanager.infra.library_index import (
+    exclude_library_paths,
     get_tracks_by_guids,
+    list_library_exclusions,
+    load_exclusion_paths,
     load_legacy_json_library,
     load_library_index,
     migrate_json_if_needed,
+    remove_library_exclusions,
     save_library_index,
+    untrack_library_roots,
 )
 
 
@@ -255,6 +260,146 @@ class LibraryIndexTests(unittest.TestCase):
             self.assertEqual(found[g].meta.title, "Hit")
             self.assertNotIn("0" * 32, found)
 
+    def test_save_untracks_instead_of_deleting(self) -> None:
+        """Tracks removed from the library stay in SQLite as untracked GUIDs."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "Music"
+            root.mkdir()
+            f1 = root / "a.mp3"
+            f2 = root / "b.mp3"
+            f1.write_bytes(b"x")
+            f2.write_bytes(b"y")
+            dest = Path(tmp) / "library_index.db"
+            lib = Library(
+                tracks=[
+                    _track(str(f1), title="Keep"),
+                    _track(str(f2), title="Drop"),
+                ],
+                root_paths=[str(root)],
+            )
+            save_library_index(lib, path=dest)
+            g_drop = next(t.guid for t in lib.tracks if t.path == str(f2))
+            g_keep = next(t.guid for t in lib.tracks if t.path == str(f1))
+
+            lib2 = Library(
+                tracks=[_track(str(f1), title="Keep", guid=g_keep)],
+                root_paths=[str(root)],
+            )
+            save_library_index(lib2, path=dest)
+
+            loaded = load_library_index(path=dest)
+            self.assertIsNotNone(loaded)
+            assert loaded is not None
+            self.assertEqual(len(loaded.tracks), 1)
+            self.assertEqual(loaded.tracks[0].guid, g_keep)
+
+            # Untracked GUID still resolvable for device inventory joins.
+            found = get_tracks_by_guids([g_drop], path=dest)
+            self.assertIn(g_drop, found)
+            self.assertEqual(found[g_drop].meta.title, "Drop")
+
+            # Re-scan same path reuses the untracked GUID.
+            lib3 = Library(
+                tracks=[
+                    _track(str(f1), title="Keep"),
+                    _track(str(f2), title="Back"),
+                ],
+                root_paths=[str(root)],
+            )
+            save_library_index(lib3, path=dest)
+            by_path = {t.path: t for t in lib3.tracks}
+            self.assertEqual(by_path[str(f2)].guid, g_drop)
+
+    def test_exclude_library_paths_and_scan_skip(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "Media"
+            movie = root / "Movie"
+            extras = movie / "Extras"
+            movie.mkdir(parents=True)
+            extras.mkdir()
+            main = movie / "feature.mp4"
+            bonus = extras / "trailer.mp4"
+            song = root / "song.mp3"
+            main.write_bytes(b"a")
+            bonus.write_bytes(b"b")
+            song.write_bytes(b"c")
+            dest = Path(tmp) / "library_index.db"
+            lib = Library(
+                tracks=[
+                    _track(str(main), title="Feature"),
+                    _track(str(bonus), title="Trailer"),
+                    _track(str(song), title="Song"),
+                ],
+                root_paths=[str(root)],
+            )
+            save_library_index(lib, path=dest)
+            g_bonus = next(t.guid for t in lib.tracks if t.path == str(bonus))
+
+            remaining = exclude_library_paths(
+                [(str(extras), "folder")], path=dest
+            )
+            paths = {t.path for t in remaining.tracks}
+            self.assertIn(str(main), paths)
+            self.assertIn(str(song), paths)
+            self.assertNotIn(str(bonus), paths)
+            self.assertEqual(
+                list_library_exclusions(path=dest),
+                [(str(extras), "folder")],
+            )
+            # GUID retained for device join.
+            self.assertIn(g_bonus, get_tracks_by_guids([g_bonus], path=dest))
+
+            with mock.patch(
+                "mtpmanager.app.scan_library.read_metadata",
+                return_value=TrackMetadata(title="t"),
+            ):
+                scanned = scan_library_roots(
+                    [str(root)],
+                    exclusions=load_exclusion_paths(path=dest),
+                )
+            scanned_paths = {t.path for t in scanned.tracks}
+            self.assertIn(str(main), scanned_paths)
+            self.assertIn(str(song), scanned_paths)
+            self.assertNotIn(str(bonus), scanned_paths)
+
+            remove_library_exclusions([str(extras)], path=dest)
+            self.assertEqual(list_library_exclusions(path=dest), [])
+
+    def test_untrack_library_roots_no_rescan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            r1 = Path(tmp) / "A"
+            r2 = Path(tmp) / "B"
+            r1.mkdir()
+            r2.mkdir()
+            f1 = r1 / "a.mp3"
+            f2 = r2 / "b.mp3"
+            f1.write_bytes(b"x")
+            f2.write_bytes(b"y")
+            dest = Path(tmp) / "library_index.db"
+            lib = Library(
+                tracks=[
+                    _track(str(f1), title="A-track"),
+                    _track(str(f2), title="B-track"),
+                ],
+                root_paths=[str(r1), str(r2)],
+            )
+            save_library_index(lib, path=dest)
+            g_b = next(t.guid for t in lib.tracks if t.path == str(f2))
+
+            remaining = untrack_library_roots(
+                [str(r2)], final_roots=[str(r1)], path=dest
+            )
+            self.assertEqual(remaining.root_paths, [str(r1)])
+            self.assertEqual(len(remaining.tracks), 1)
+            self.assertEqual(remaining.tracks[0].path, str(f1))
+
+            loaded = load_library_index(path=dest)
+            self.assertIsNotNone(loaded)
+            assert loaded is not None
+            self.assertEqual(loaded.root_paths, [str(r1)])
+            self.assertEqual(len(loaded.tracks), 1)
+            self.assertEqual(get_tracks_by_guids([g_b], path=dest)[g_b].meta.title, "B-track")
+
     def test_json_migration(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -487,6 +632,27 @@ class NormalizeRootsAndScanTests(unittest.TestCase):
 
             self.assertEqual(len(lib.tracks), 2)
             self.assertEqual(sorted(seen), ["AlbumA", "AlbumB"])
+
+    def test_scan_library_roots_includes_video_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "Media"
+            music = root / "Music"
+            videos = root / "Videos" / "Shows"
+            music.mkdir(parents=True)
+            videos.mkdir(parents=True)
+            (music / "song.mp3").write_bytes(b"a")
+            (videos / "ep1.avi").write_bytes(b"b")
+            (videos / "notes.txt").write_bytes(b"c")
+            with mock.patch(
+                "mtpmanager.app.scan_library.read_metadata",
+                return_value=TrackMetadata(title="t"),
+            ):
+                lib = scan_library_roots([str(root)])
+            paths = {t.path for t in lib.tracks}
+            self.assertEqual(len(paths), 2)
+            self.assertTrue(any(p.endswith("song.mp3") for p in paths))
+            self.assertTrue(any(p.endswith("ep1.avi") for p in paths))
+            self.assertFalse(any(p.endswith("notes.txt") for p in paths))
 
 
 if __name__ == "__main__":

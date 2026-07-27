@@ -21,9 +21,12 @@ from mtpmanager.domain.device_profiles import BUILTIN_PROFILES
 from mtpmanager.domain.library import (
     Library,
     is_audiobook_track,
+    is_video_track,
+    merge_scanned_roots,
     normalize_library_roots,
-    partition_music_and_audiobooks,
+    partition_library_media,
     primary_artist,
+    video_display_title,
     year_from_date,
 )
 from mtpmanager.domain.library_sort import (
@@ -46,7 +49,11 @@ from mtpmanager.domain.device_media import (
     video_folder_label,
 )
 from mtpmanager.domain.models import DeviceInfo, DeviceTrackRef, Track, TrackMetadata
-from mtpmanager.domain.track_id import guid_from_remote_name, is_track_guid
+from mtpmanager.domain.track_id import (
+    guid_from_remote_name,
+    is_track_guid,
+    new_track_guid,
+)
 from mtpmanager.infra.album_art import (
     DEFAULT_THUMB_SIZE,
     ensure_cached_thumb,
@@ -68,9 +75,14 @@ from mtpmanager.infra.device_index import (
 )
 from mtpmanager.infra.ffmpeg_transcode import FFmpegTranscoder
 from mtpmanager.infra.library_index import (
+    exclude_library_paths,
     get_tracks_by_guids,
+    list_library_exclusions,
+    load_exclusion_paths,
     load_library_index,
+    remove_library_exclusions,
     save_library_index,
+    untrack_library_roots,
 )
 from mtpmanager.infra.logging_setup import start_transfer_log, stop_transfer_log
 from mtpmanager.infra.mutagen_tags import read_metadata
@@ -91,6 +103,7 @@ from mtpmanager.infra.sync_job import (
 from mtpmanager.ports.transport import TransportError
 from mtpmanager.ui.bg import TkBackgroundRunner
 from mtpmanager.ui.dialogs import (
+    ExclusionsManagerDialog,
     ManageLibraryDialog,
     ask_text,
     ask_video_destination,
@@ -176,6 +189,7 @@ class AppController:
         self._index_stream_total = 0
         # Modeless Library → Manage Library… window (if open).
         self._manage_library_dlg: ManageLibraryDialog | None = None
+        self._exclusions_dlg: ExclusionsManagerDialog | None = None
         # Cooperative cancel for transfer / device batch jobs (checked between items).
         self._job_cancel = threading.Event()
         # Durable multi-track sync plan (resume after failure / cancel).
@@ -210,8 +224,10 @@ class AppController:
         self._device_video_populate_after_id: str | None = None
         self._device_audiobook_populate_after_id: str | None = None
         self._audiobooks_populate_after_id: str | None = None
+        self._videos_populate_after_id: str | None = None
         # Roots for the in-flight scan (toolbar path while busy_message updates).
         self._scan_roots: list[str] = []
+        self._scan_display_roots: list[str] = []
         self._active_profile: DeviceProfile | None = None
         # Default: "{artist} - {album}" (Artist-column option 3; VA via algorithm).
         self._sort_primary = SortPrimary.ARTIST_ALBUM_COMBO
@@ -278,6 +294,9 @@ class AppController:
             on_sync_artist_group=self.action_sync_artist_group,
             on_sync_album_group=self.action_sync_album_group,
             on_sync_selected=self.action_sync_selected,
+            on_exclude_file=self.action_exclude_file,
+            on_exclude_folder=self.action_exclude_folder,
+            on_exclude_group_folder=self.action_exclude_group_folder,
         )
         w.set_prepare_context_menu(self._prepare_context_menu)
         w.set_sort_heading_handler(self.on_sort_heading)
@@ -287,18 +306,16 @@ class AppController:
         # Ctrl+click (Windows/Linux) / Cmd+click (macOS) for multi-select.
         # On macOS, Control-click is still available as a secondary context
         # gesture via the platform binding when present; prefer right-click.
-        w.tree.bind("<Button-3>", w.popup_track_context)
-        w.tree.bind("<Button-2>", w.popup_track_context)
-        w.audiobooks_tree.bind("<Button-3>", w.popup_track_context)
-        w.audiobooks_tree.bind("<Button-2>", w.popup_track_context)
+        for lib_tree in w.library_media_trees():
+            lib_tree.bind("<Button-3>", w.popup_track_context)
+            lib_tree.bind("<Button-2>", w.popup_track_context)
+            lib_tree.bind("<<TreeviewSelect>>", self._on_tree_selection_changed)
         import sys as _sys
 
         if _sys.platform == "darwin":
             # macOS: Control-click = context menu; multi-toggle is Command-click.
-            w.tree.bind("<Control-Button-1>", w.popup_track_context)
-            w.audiobooks_tree.bind("<Control-Button-1>", w.popup_track_context)
-        w.tree.bind("<<TreeviewSelect>>", self._on_tree_selection_changed)
-        w.audiobooks_tree.bind("<<TreeviewSelect>>", self._on_tree_selection_changed)
+            for lib_tree in w.library_media_trees():
+                lib_tree.bind("<Control-Button-1>", w.popup_track_context)
         # Apply persisted mode (PyMTP default; Stable only if config says so).
         self._apply_transfer_mode(
             self._config.active_mode(),
@@ -677,13 +694,15 @@ class AppController:
             folder = os.path.basename(
                 (os.path.dirname(seed.path) or seed.path).rstrip(os.sep + "/")
             ) or (os.path.dirname(seed.path) or seed.path)
+            folder_path = os.path.dirname(seed.path) or seed.path
             self.win.set_context_detail(
                 album_selection_detail(
                     folder,
                     artist="",
                     track_count=len(tracks),
                     year="",
-                )
+                ),
+                path=folder_path,
             )
             return
         if "group_album" in tags and seed is not None:
@@ -694,13 +713,17 @@ class AppController:
                     artist=primary_artist(seed),
                     track_count=len(tracks),
                     year=year,
-                )
+                ),
+                path=os.path.dirname(seed.path) or seed.path,
             )
             return
 
         track = self._track_by_iid.get(iid)
         if track is not None:
-            self.win.set_context_detail(track_selection_detail(track))
+            self.win.set_context_detail(
+                track_selection_detail(track),
+                path=track.path,
+            )
             return
 
         # Year group or unknown row: fall back to expanded track count.
@@ -755,6 +778,11 @@ class AppController:
                 0, label=f"Sync album {album}"
             )
 
+    @staticmethod
+    def _audio_tracks_only(tracks: list[Track]) -> list[Track]:
+        """Drop video files from an audio transfer batch."""
+        return [t for t in tracks if not is_video_track(t)]
+
     def _sync_from_seed(self, seed: Track | None, *, kind: str) -> None:
         """Run filter_by_artist / filter_by_album / directory from a seed track."""
         if not self._require_sync_ready():
@@ -791,11 +819,21 @@ class AppController:
             )
             label = f"Album: {seed.meta.album or 'Unknown Album'}"
             job_kind = "album"
-        if not matches:
+        videos = [t for t in matches if is_video_track(t)]
+        audio = self._audio_tracks_only(matches)
+        if videos and not audio:
+            self._start_send_video([t.path for t in videos])
+            return
+        if not audio:
             messagebox.showinfo("Sync", "No matching tracks found.")
             return
+        if videos:
+            logger.info(
+                "Sync group: %d video(s) skipped (use Video tab / Send Video)",
+                len(videos),
+            )
         self._transfer_many(
-            matches,
+            audio,
             self._target_format(),
             kind=job_kind,
             label=label,
@@ -855,6 +893,14 @@ class AppController:
                 pass
             self._audiobooks_populate_after_id = None
 
+    def _cancel_videos_populate(self) -> None:
+        if self._videos_populate_after_id is not None:
+            try:
+                self.win.root.after_cancel(self._videos_populate_after_id)
+            except Exception:
+                pass
+            self._videos_populate_after_id = None
+
     def _cancel_device_populate(self) -> None:
         if self._device_populate_after_id is not None:
             try:
@@ -913,20 +959,46 @@ class AppController:
             return candidate
         return ""
 
-    def _insert_track_row(self, parent: str, track: Track, *, tree=None) -> None:
+    def _insert_track_row(
+        self,
+        parent: str,
+        track: Track,
+        *,
+        tree=None,
+        extra_tags: tuple[str, ...] = (),
+    ) -> None:
         num, title, artist, album, year = iter_track_cells(track)
         iid = self._track_iid(track)
         target = tree if tree is not None else self.win.tree
         # Avoid duplicate iids if path appears twice
         if target.exists(iid):
             iid = f"{iid}#{id(track)}"
+        tags = ("track",) + tuple(extra_tags)
         target.insert(
             parent,
             "end",
             iid=iid,
             text=num,
             values=(title, artist, album, year),
-            tags=("track",),
+            tags=tags,
+            open=False,
+        )
+        self._track_by_iid[iid] = track
+        self._iid_by_path[track.path] = iid
+
+    def _insert_video_row(self, parent: str, track: Track) -> None:
+        """Library Video tab: single Title column showing the filename."""
+        iid = self._track_iid(track)
+        tree = self.win.videos_tree
+        if tree.exists(iid):
+            iid = f"{iid}#{id(track)}"
+        tree.insert(
+            parent,
+            "end",
+            iid=iid,
+            text="",
+            values=(video_display_title(track),),
+            tags=("track", "video"),
             open=False,
         )
         self._track_by_iid[iid] = track
@@ -981,10 +1053,12 @@ class AppController:
         self._device_audiobook_track_by_iid[iid] = track
 
     def _rebuild_track_tree(self) -> None:
-        """Rebuild Music + Audiobooks trees from library using current sort."""
+        """Rebuild Music + Video + Audiobooks trees from library."""
         self._cancel_populate()
+        self._cancel_videos_populate()
         self._cancel_audiobooks_populate()
         self.win.clear_track_tree()
+        self.win.clear_videos_tree()
         self.win.clear_audiobooks_tree()
         self._track_by_iid.clear()
         self._iid_by_path.clear()
@@ -998,8 +1072,11 @@ class AppController:
             self.win.set_tracks_usable(self._library_root_reachable())
             return
 
-        music_tracks, audiobook_tracks = partition_music_and_audiobooks(all_tracks)
-        # Always rebuild audiobooks (fixed Author → Year order).
+        music_tracks, video_tracks, audiobook_tracks = partition_library_media(
+            all_tracks
+        )
+        # Fixed hierarchies for secondary tabs (independent of Music sort).
+        self._rebuild_videos_tree(video_tracks)
         self._rebuild_audiobooks_tree(audiobook_tracks)
 
         tracks = music_tracks
@@ -1188,8 +1265,68 @@ class AppController:
 
         run_chunk(0)
 
+    def _rebuild_videos_tree(self, tracks: list[Track]) -> None:
+        """Rebuild Library → Video (video extensions; folder → files)."""
+        self._cancel_videos_populate()
+        self.win.clear_videos_tree()
+        if not tracks:
+            return
+
+        ops: list = []
+        groups = group_by_directory(tracks)
+        for g in groups:
+            folder_iid = f"vl:{g.key}"
+            seed = g.tracks[0] if g.tracks else None
+            ops.append(
+                (
+                    "group",
+                    "",
+                    folder_iid,
+                    g.label,
+                    ("group", "group_directory"),
+                    seed,
+                )
+            )
+            for t in g.tracks:
+                ops.append(("track", folder_iid, t))
+
+        chunks = fibonacci_chunk_bounds(len(ops))
+        if not chunks:
+            return
+
+        def run_chunk(chunk_i: int) -> None:
+            self._videos_populate_after_id = None
+            start, end = chunks[chunk_i]
+            tree = self.win.videos_tree
+            for i in range(start, end):
+                op = ops[i]
+                if op[0] == "group":
+                    _, parent, iid, label, tags, seed = op
+                    if not tree.exists(iid):
+                        tree.insert(
+                            parent,
+                            "end",
+                            iid=iid,
+                            text="",
+                            values=(label,),
+                            tags=tags,
+                            open=False,
+                        )
+                        if seed is not None:
+                            self._group_seed_by_iid[iid] = seed
+                else:
+                    _, parent, track = op
+                    self._insert_video_row(parent, track)
+            nxt = chunk_i + 1
+            if nxt < len(chunks):
+                self._videos_populate_after_id = self.win.root.after(
+                    1, lambda i=nxt: run_chunk(i)
+                )
+
+        run_chunk(0)
+
     def _rebuild_audiobooks_tree(self, tracks: list[Track]) -> None:
-        """Rebuild Library → Audiobooks (genre Audiobook; Author → Year)."""
+        """Rebuild Library → Audiobooks (genre Audiobook; Author → Album - Year)."""
         self._cancel_audiobooks_populate()
         self.win.clear_audiobooks_tree()
         if not tracks:
@@ -2431,6 +2568,15 @@ class AppController:
             self._manage_library_dlg = None
             return
         dlg.refresh()
+        ex = self._exclusions_dlg
+        if ex is not None:
+            if not ex.is_open():
+                self._exclusions_dlg = None
+            else:
+                try:
+                    ex.refresh()
+                except Exception:
+                    pass
 
     @staticmethod
     def _warm_art_for_library(library: Library) -> None:
@@ -2484,21 +2630,44 @@ class AppController:
     def _scan_and_save_worker(
         roots: list[str],
         report: Callable[..., None] | None = None,
+        *,
+        merge_from: Library | None = None,
+        final_roots: list[str] | None = None,
     ) -> tuple[Library, str | None]:
-        """Worker: full tree scan of all roots + persist index (no Tk).
+        """Worker: scan *roots* + persist index (no Tk).
+
+        When *merge_from* is set, only *roots* are scanned and merged into the
+        existing library (other roots' tracks kept). *final_roots* is the
+        post-scan root list (defaults to scanned *roots*).
 
         Returns (library, save_error_message). Scan failures raise; save failures
         are returned so the UI can still show the scanned library.
-        Album art is warmed after the UI starts populating (not here).
 
-        *report* receives ``("dir", dir_path)`` for each folder whose music
+        *report* receives ``("dir", dir_path)`` for each folder whose media
         files are being tag-read (toolbar Scanning… indicator).
         """
         def on_dir(dir_path: str) -> None:
             if report is not None:
                 report("dir", dir_path)
 
-        library = scan_library_roots(roots, on_dir_progress=on_dir)
+        exclusions = load_exclusion_paths()
+        scanned = scan_library_roots(
+            roots, on_dir_progress=on_dir, exclusions=exclusions
+        )
+        if merge_from is not None:
+            library = merge_scanned_roots(
+                merge_from,
+                scanned,
+                scanned_roots=roots,
+                final_roots=final_roots if final_roots is not None else roots,
+            )
+        elif final_roots is not None:
+            library = Library(
+                tracks=list(scanned.tracks),
+                root_paths=final_roots,
+            )
+        else:
+            library = scanned
         try:
             save_library_index(library)
         except OSError as e:
@@ -2514,7 +2683,12 @@ class AppController:
         if not dir_path:
             return
         bottom = os.path.basename(dir_path.rstrip(os.sep + "/")) or dir_path
-        roots = list(getattr(self, "_scan_roots", None) or self.library.root_paths)
+        # Prefer full library root list (merge scans only scan a subset).
+        roots = list(
+            getattr(self, "_scan_display_roots", None)
+            or getattr(self, "_scan_roots", None)
+            or self.library.root_paths
+        )
         self.win.set_library_status(
             track_count=len(self.library),
             root_paths=roots,
@@ -2529,8 +2703,10 @@ class AppController:
             total = int(args[1] or 0) if len(args) > 1 else 0
             self._index_stream_total = total
             self._cancel_populate()
+            self._cancel_videos_populate()
             self._cancel_audiobooks_populate()
             self.win.clear_track_tree()
+            self.win.clear_videos_tree()
             self.win.clear_audiobooks_tree()
             self._track_by_iid.clear()
             self._iid_by_path.clear()
@@ -2586,8 +2762,10 @@ class AppController:
         if library is None:
             self.library = Library()
             self._cancel_populate()
+            self._cancel_videos_populate()
             self._cancel_audiobooks_populate()
             self.win.clear_track_tree()
+            self.win.clear_videos_tree()
             self.win.clear_audiobooks_tree()
             self._track_by_iid.clear()
             self._iid_by_path.clear()
@@ -2618,6 +2796,7 @@ class AppController:
     def _on_scan_done(self, result: tuple[Library, str | None]) -> None:
         library, save_err = result
         self._scan_roots = []
+        self._scan_display_roots = []
         self._on_library_job_done(library, kind="Scanned")
         if save_err:
             messagebox.showwarning(
@@ -2629,6 +2808,7 @@ class AppController:
         self._library_busy = False
         self._index_stream_active = False
         self._scan_roots = []
+        self._scan_display_roots = []
         self._sync_library_chrome()
         logger.exception("%s", title)
         messagebox.showerror(title, str(exc))
@@ -2654,25 +2834,54 @@ class AppController:
             name="library-restore",
         )
 
-    def _start_library_scan(self, roots: list[str]) -> None:
-        """Background full scan of all *roots*; previous library kept until done."""
+    def _start_library_scan(
+        self,
+        roots: list[str],
+        *,
+        merge_existing: bool = False,
+        final_roots: list[str] | None = None,
+    ) -> None:
+        """Background scan of *roots*; previous library kept until done.
+
+        *merge_existing*: scan only *roots* and merge into the current library
+        (used when adding a root). Full Update / remove still replace the set.
+        *final_roots*: root list after the job (defaults to *roots*).
+        """
         # Do not replace self.library until the worker succeeds (stale roots safe).
         roots = normalize_library_roots(roots)
+        display_roots = normalize_library_roots(
+            final_roots if final_roots is not None else roots
+        )
         self._scan_roots = list(roots)
+        self._scan_display_roots = list(display_roots)
         self._library_busy = True
         self.win.set_library_menu_state(manage_enabled=False)
         self.win.set_library_status(
             track_count=len(self.library),
-            root_paths=list(roots),
+            root_paths=list(display_roots),
             root_reachable=True,
             busy_message="Scanning…",
         )
         self._refresh_manage_library_dialog()
 
+        # Snapshot for the worker (main-thread library must not be mutated).
+        merge_from: Library | None = None
+        if merge_existing:
+            merge_from = Library(
+                tracks=list(self.library.tracks),
+                root_paths=list(self.library.root_paths),
+            )
+        snap_final = list(display_roots)
+
         def work() -> tuple[Library, str | None]:
             gen = self._bg.generation
             report = self._bg.progress_callback(gen)
-            return AppController._scan_and_save_worker(roots, report)
+            return AppController._scan_and_save_worker(
+                roots,
+                report,
+                merge_from=merge_from,
+                final_roots=snap_final,
+            )
 
         self._bg.submit(
             work,
@@ -2714,12 +2923,186 @@ class AppController:
             on_update=self.on_update_library,
             is_busy=lambda: self._library_busy or self._transfer_busy,
             can_update=self._library_root_reachable,
+            on_exclusions=self.on_exclusions_manager,
             on_close=_clear_ref,
         )
         self._manage_library_dlg = dlg
 
+    def on_exclusions_manager(self) -> None:
+        """Open Exclusions Manager (from Manage Library)."""
+        existing = self._exclusions_dlg
+        if existing is not None and existing.is_open():
+            existing.focus()
+            existing.refresh()
+            return
+
+        def _clear_ref() -> None:
+            if self._exclusions_dlg is dlg:
+                self._exclusions_dlg = None
+
+        dlg = ExclusionsManagerDialog(
+            self._manage_dialog_parent(),
+            get_exclusions=list_library_exclusions,
+            on_remove=self.on_remove_exclusions,
+            is_busy=lambda: self._library_busy or self._transfer_busy,
+            on_close=_clear_ref,
+        )
+        self._exclusions_dlg = dlg
+
+    def on_remove_exclusions(self, paths: list[str]) -> None:
+        """Drop exclusion rules and re-scan affected folders (merge)."""
+        if self._library_busy or self._transfer_busy:
+            messagebox.showinfo(
+                "Exclusions",
+                "A background job is already running. Wait for it to finish.",
+            )
+            return
+        cleaned = [os.path.normpath(p) for p in paths if (p or "").strip()]
+        if not cleaned:
+            return
+        remove_library_exclusions(cleaned)
+        # Re-scan only the affected areas so media can reappear without a
+        # full library update.
+        scan_targets: list[str] = []
+        for p in cleaned:
+            if os.path.isdir(p):
+                scan_targets.append(p)
+            elif os.path.isfile(p):
+                scan_targets.append(os.path.dirname(p) or p)
+            else:
+                # Path may be gone; still try parent if under a root.
+                parent = os.path.dirname(p)
+                if parent:
+                    scan_targets.append(parent)
+        scan_targets = normalize_library_roots(scan_targets)
+        # Only scan under active roots (ignore orphans).
+        active = list(self.library.root_paths)
+        under_roots = [
+            t
+            for t in scan_targets
+            if any(
+                t == r or t.startswith(r + os.sep)
+                for r in active
+            )
+        ]
+        if self._exclusions_dlg is not None and self._exclusions_dlg.is_open():
+            self._exclusions_dlg.refresh()
+        if under_roots and active:
+            logger.info(
+                "De-exclude → merge scan %s (roots=%s)", under_roots, active
+            )
+            self._start_library_scan(
+                under_roots,
+                merge_existing=True,
+                final_roots=active,
+            )
+        else:
+            self._sync_library_chrome()
+
+    def action_exclude_file(self) -> None:
+        """Context menu: exclude the selected track file(s)."""
+        tracks = self._tracks_from_selected_iids(quiet=True)
+        if not tracks:
+            track = self._selected_track()
+            if track is None:
+                return
+            tracks = [track]
+        # Prefer single focused track when multi-select expands a group.
+        iid = self.win.selected_tree_iid()
+        if iid and iid in self._track_by_iid:
+            tracks = [self._track_by_iid[iid]]
+        paths = sorted({t.path for t in tracks if t.path})
+        if not paths:
+            return
+        if len(paths) == 1:
+            msg = f"Exclude this file from the library?\n\n{paths[0]}"
+        else:
+            msg = f"Exclude {len(paths)} files from the library?"
+        if not messagebox.askyesno("Exclude File", msg):
+            return
+        self._apply_exclusions([(p, "file") for p in paths])
+
+    def action_exclude_folder(self) -> None:
+        """Context menu (track row): exclude the parent folder of the track."""
+        track = None
+        iid = self.win.selected_tree_iid()
+        if iid and iid in self._track_by_iid:
+            track = self._track_by_iid[iid]
+        if track is None:
+            tracks = self._tracks_from_selected_iids(quiet=True)
+            track = tracks[0] if tracks else None
+        if track is None:
+            messagebox.showinfo("Exclude Folder", "Select a media file first.")
+            return
+        folder = os.path.dirname(track.path) or track.path
+        if not messagebox.askyesno(
+            "Exclude Folder",
+            f"Exclude this folder and everything under it?\n\n{folder}",
+        ):
+            return
+        self._apply_exclusions([(folder, "folder")])
+
+    def action_exclude_group_folder(self) -> None:
+        """Context menu on album/directory header: exclude that folder."""
+        seed = self._context_group_seed
+        iid = self.win.selected_tree_iid()
+        if seed is None and iid:
+            seed = self._group_seed_by_iid.get(iid)
+        if seed is None:
+            messagebox.showinfo(
+                "Exclude Folder",
+                "Select a folder or album group first.",
+            )
+            return
+        folder = os.path.dirname(seed.path) or seed.path
+        if not messagebox.askyesno(
+            "Exclude Folder",
+            f"Exclude this folder and everything under it?\n\n{folder}",
+        ):
+            return
+        self._apply_exclusions([(folder, "folder")])
+
+    def _apply_exclusions(self, entries: list[tuple[str, str]]) -> None:
+        """Persist exclusions, untrack matching media, refresh trees."""
+        if self._library_busy or self._transfer_busy:
+            messagebox.showinfo(
+                "Exclude",
+                "A background job is already running. Wait for it to finish.",
+            )
+            return
+        if not entries:
+            return
+
+        def work() -> Library:
+            return exclude_library_paths(entries)
+
+        self._library_busy = True
+        self.win.set_library_menu_state(manage_enabled=False)
+        self.win.set_library_status(
+            track_count=len(self.library),
+            root_paths=list(self.library.root_paths),
+            root_reachable=self._library_root_reachable(),
+            busy_message="Updating exclusions…",
+        )
+
+        def on_done(lib: Library) -> None:
+            self._on_library_job_done(lib, kind="Updated")
+            if self._exclusions_dlg is not None and self._exclusions_dlg.is_open():
+                self._exclusions_dlg.refresh()
+            if self._manage_library_dlg is not None and self._manage_library_dlg.is_open():
+                self._manage_library_dlg.refresh()
+
+        self._bg.submit(
+            work,
+            on_done=on_done,
+            on_error=lambda e: self._on_library_job_error(
+                e, title="Exclude failed"
+            ),
+            name="library-exclude",
+        )
+
     def on_add_library_root(self) -> None:
-        """Folder picker → add root (if new) → scan all roots."""
+        """Folder picker → add root (if new) → scan only that root and merge."""
         if self._library_busy or self._transfer_busy:
             messagebox.showinfo(
                 "Library",
@@ -2729,35 +3112,74 @@ class AppController:
         path = self._pick_library_directory()
         if not path:
             return
-        roots = normalize_library_roots([*self.library.root_paths, path])
-        if roots == normalize_library_roots(self.library.root_paths):
+        prior = normalize_library_roots(self.library.root_paths)
+        roots = normalize_library_roots([*prior, path])
+        if roots == prior:
             messagebox.showinfo(
                 "Manage Library",
                 "That folder is already a library root.",
                 parent=self._manage_dialog_parent(),
             )
             return
-        logger.info("Add Library Root → %s (roots=%s)", path, roots)
-        self._start_library_scan(roots)
+        # Only scan roots that were not already present (normally one folder).
+        new_roots = [r for r in roots if r not in set(prior)]
+        if not new_roots:
+            new_roots = [roots[-1]]
+        logger.info(
+            "Add Library Root → scan=%s final_roots=%s (merge existing)",
+            new_roots,
+            roots,
+        )
+        self._start_library_scan(
+            new_roots,
+            merge_existing=True,
+            final_roots=roots,
+        )
 
     def on_remove_library_roots(self, paths: list[str]) -> None:
-        """Drop one or more roots and rescan (or clear) the library index."""
+        """Drop roots without rescanning: mark their files untracked in the index.
+
+        GUIDs and tags stay in SQLite (tracked=0) so device inventory can still
+        resolve them and a later re-add of the same path reuses the GUID.
+        """
         if self._library_busy or self._transfer_busy:
             messagebox.showinfo(
                 "Library",
                 "A background job is already running. Wait for it to finish.",
             )
             return
-        drop = set(normalize_library_roots(paths))
+        drop = normalize_library_roots(paths)
         if not drop:
             return
-        remaining = [r for r in self.library.root_paths if r not in drop]
+        drop_set = set(drop)
+        remaining = [r for r in self.library.root_paths if r not in drop_set]
         logger.info(
-            "Remove Library Root(s) → drop=%s remaining=%s",
-            sorted(drop),
+            "Remove Library Root(s) → untrack under %s; remaining roots=%s",
+            drop,
             remaining,
         )
-        self._start_library_scan(remaining)
+        self._library_busy = True
+        self.win.set_library_menu_state(manage_enabled=False)
+        self.win.set_library_status(
+            track_count=len(self.library),
+            root_paths=list(remaining),
+            root_reachable=bool(remaining)
+            and any(os.path.isdir(r) for r in remaining),
+            busy_message="Updating library…",
+        )
+        self._refresh_manage_library_dialog()
+
+        def work() -> Library:
+            return untrack_library_roots(drop, final_roots=remaining)
+
+        self._bg.submit(
+            work,
+            on_done=lambda lib: self._on_library_job_done(lib, kind="Updated"),
+            on_error=lambda e: self._on_library_job_error(
+                e, title="Remove library root failed"
+            ),
+            name="library-untrack",
+        )
 
     def on_update_library(self) -> None:
         """Rescan every stored root and rewrite the index."""
@@ -2772,8 +3194,8 @@ class AppController:
             )
             return
         roots = list(self.library.root_paths)
-        logger.info("Update Library → %s", roots)
-        self._start_library_scan(roots)
+        logger.info("Update Library → full rescan %s", roots)
+        self._start_library_scan(roots, merge_existing=False)
 
     def _manage_dialog_parent(self):
         dlg = self._manage_library_dlg
@@ -3045,6 +3467,10 @@ class AppController:
         )
 
     def _transfer_one(self, track: Track, fmt: str) -> None:
+        if is_video_track(track):
+            # Library Video tab / video files use the Send Video pipeline.
+            self._start_send_video([track.path])
+            return
         # Prefer appending to an active batch queue over a separate one-shot job.
         if self._transfer_queue is not None and self._transfer_busy:
             self._enqueue_tracks([track], kind="track", label="Selected track")
@@ -3369,8 +3795,25 @@ class AppController:
         label: str = "",
         resume_job: SyncJobState | None = None,
     ) -> None:
+        if resume_job is None:
+            videos = [t for t in tracks if is_video_track(t)]
+            audio = self._audio_tracks_only(list(tracks))
+            # Pure video batch (folder sync, multi-select on Video tab, etc.).
+            if videos and not audio:
+                self._start_send_video([t.path for t in videos])
+                return
+            if videos:
+                logger.info(
+                    "Excluding %d video file(s) from audio transfer batch "
+                    "(use Sync on Video tab or Send Video)",
+                    len(videos),
+                )
+            tracks = audio
         if not tracks:
-            messagebox.showinfo("Transfer", "No tracks to transfer.")
+            messagebox.showinfo(
+                "Transfer",
+                "No audio tracks to transfer.",
+            )
             return
 
         # Mid-job: append to the live queue instead of refusing.
@@ -3491,14 +3934,17 @@ class AppController:
         track = self._selected_track()
         if track is None:
             return
+        if is_video_track(track):
+            self._start_send_video([track.path])
+            return
         self._transfer_one(track, self._target_format())
 
     def action_sync_selected(self) -> None:
         """Sync multi-selected tracks (Shift/Ctrl/Cmd selection) as one job."""
-        if not self._require_sync_ready():
-            return
         tracks = self._tracks_from_selected_iids(quiet=True)
         if not tracks:
+            if not self._require_sync_ready():
+                return
             messagebox.showinfo(
                 "Sync Selected",
                 "Select one or more tracks first.\n\n"
@@ -3508,24 +3954,41 @@ class AppController:
                 "• Group headers include all tracks under that group",
             )
             return
-        if len(tracks) == 1:
-            self._transfer_one(tracks[0], self._target_format())
+        videos = [t for t in tracks if is_video_track(t)]
+        audio = self._audio_tracks_only(tracks)
+        # Video selection → Send Video (same dialog as Device → Send Video…).
+        if videos and not audio:
+            self._start_send_video([t.path for t in videos])
             return
-        n = len(tracks)
+        if not self._require_sync_ready():
+            return
+        if len(audio) == 1 and not videos:
+            self._transfer_one(audio[0], self._target_format())
+            return
+        if not audio:
+            return
+        n = len(audio)
         fmt = self._target_format().upper()
         mode = (
             "Stable (mtp-sendtr)"
             if self.win.active_mode() == "stable"
             else "PyMTP"
         )
+        note = ""
+        if videos:
+            note = (
+                f"\n\n({len(videos)} video file(s) skipped — "
+                "select them alone to use Send Video.)"
+            )
         if not messagebox.askyesno(
             "Sync Selected Tracks",
             f"Send {n} selected track(s) as {fmt} using {mode}?\n\n"
-            "Progress is saved; use Transfer → Resume Sync after a failure.",
+            "Progress is saved; use Transfer → Resume Sync after a failure."
+            f"{note}",
         ):
             return
         self._transfer_many(
-            tracks,
+            audio,
             self._target_format(),
             kind="selection",
             label=f"Selection ({n} tracks)",
@@ -3573,18 +4036,26 @@ class AppController:
         if not self.library.tracks:
             messagebox.showinfo("Library", "Load a library first.")
             return
-        n = len(self.library.tracks)
+        tracks = self._audio_tracks_only(list(self.library.tracks))
+        tracks.sort(key=lambda t: t.path)
+        n = len(tracks)
+        if n == 0:
+            messagebox.showinfo(
+                "Library",
+                "No audio tracks to sync.\n\n"
+                "Video files use Device → Send Video….",
+            )
+            return
         fmt = self._target_format().upper()
         if not messagebox.askyesno(
             "Sync Entire Library",
-            f"Send all {n} track(s) as {fmt} using "
+            f"Send all {n} audio track(s) as {fmt} using "
             f"{'Stable (mtp-sendtr)' if self.win.active_mode() == 'stable' else 'PyMTP'}?\n\n"
+            "Video files are not included (use Device → Send Video…).\n"
             "This may take a long time.\n"
             "Progress is saved; use Transfer → Resume Sync after a failure.",
         ):
             return
-        tracks = list(self.library.tracks)
-        tracks.sort(key=lambda t: t.path)
         self._transfer_many(
             tracks,
             self._target_format(),
@@ -3714,7 +4185,7 @@ class AppController:
             messagebox.showerror("Create Folder", str(e))
 
     def action_send_video(self) -> None:
-        """Device → Send Video… — pick file, folder + encode profile, send."""
+        """Device → Send Video… — pick file, then shared send pipeline."""
         if not self._require_device_ready():
             return
         if self._transfer_busy:
@@ -3736,17 +4207,81 @@ class AppController:
         )
         if not path:
             return
-        if not os.path.isfile(path):
-            messagebox.showerror("Send Video", f"File not found:\n{path}")
+        self._start_send_video([path])
+
+    def _start_send_video(self, paths: list[str]) -> None:
+        """Send Video dialog + encode/send for one or more host video paths.
+
+        Used by Device → Send Video… and by library Video tab sync actions.
+        """
+        if not self._require_device_ready():
             return
+        if self._transfer_busy:
+            messagebox.showinfo(
+                "Send Video",
+                "A transfer or device job is already in progress.",
+            )
+            return
+        files = [
+            os.path.normpath(p)
+            for p in paths
+            if p and os.path.isfile(p)
+        ]
+        # Dedupe while preserving order.
+        seen: set[str] = set()
+        unique: list[str] = []
+        for p in files:
+            if p in seen:
+                continue
+            seen.add(p)
+            unique.append(p)
+        files = unique
+        if not files:
+            messagebox.showerror(
+                "Send Video",
+                "No video files found to send.",
+            )
+            return
+
+        # Library tracks → GUID ObjectFileNames under Video/TV; picker paths stay
+        # on host basenames (no GUID).
+        by_path = {
+            os.path.normpath(t.path): t for t in self.library.tracks if t.path
+        }
+        guid_by_path: dict[str, str] = {}
+        for p in files:
+            track = by_path.get(p)
+            if track is None:
+                continue
+            g = track.guid if is_track_guid(track.guid) else ""
+            if not g:
+                g = new_track_guid()
+                # Keep in-memory library identity stable for this session.
+                idx = next(
+                    (i for i, t in enumerate(self.library.tracks) if t.path == track.path),
+                    None,
+                )
+                if idx is not None:
+                    old = self.library.tracks[idx]
+                    self.library.tracks[idx] = Track(
+                        path=old.path, meta=old.meta, guid=g
+                    )
+            guid_by_path[p] = g
+        library_named = len(guid_by_path) == len(files) and bool(files)
+        mixed_naming = bool(guid_by_path) and not library_named
 
         video_options = None
         if self._active_profile is not None:
             video_options = self._active_profile.video_options
 
+        if len(files) == 1:
+            dlg_name = os.path.basename(files[0])
+        else:
+            dlg_name = f"{len(files)} video files"
+
         opts = ask_video_destination(
             self.win.root,
-            filename=os.path.basename(path),
+            filename=dlg_name,
             video_options=video_options,
             encode_default=True,
             include_broken_presets=bool(
@@ -3774,37 +4309,93 @@ class AppController:
                 encode_note += f"Max fps cap: {preset.max_fps:g}\n"
         else:
             encode_note = "Encode: off (send as-is)\n"
-        if not messagebox.askyesno(
-            "Send Video",
-            f"Send this file to the device {folder_label} folder?\n\n"
-            f"{path}\n\n"
-            f"Parent folder id: {parent}\n"
-            f"{encode_note}"
-            "Object name: sanitized host basename (not a library GUID).",
-        ):
+
+        if library_named:
+            name_note = "Object name: library GUID (+ extension) under Video/TV."
+        elif mixed_naming:
+            name_note = (
+                "Object names: library GUID when known, else host basename."
+            )
+        else:
+            name_note = (
+                "Object name: sanitized host basename (not a library GUID)."
+            )
+
+        if len(files) == 1:
+            confirm = (
+                f"Send this file to the device {folder_label} folder?\n\n"
+                f"{files[0]}\n\n"
+                f"Parent folder id: {parent}\n"
+                f"{encode_note}"
+                f"{name_note}"
+            )
+        else:
+            listing = "\n".join(os.path.basename(p) for p in files[:12])
+            if len(files) > 12:
+                listing += f"\n… and {len(files) - 12} more"
+            confirm = (
+                f"Send {len(files)} files to the device {folder_label} folder?\n\n"
+                f"{listing}\n\n"
+                f"Parent folder id: {parent}\n"
+                f"{encode_note}"
+                f"{name_note}"
+            )
+        if not messagebox.askyesno("Send Video", confirm):
             return
 
         transport = self._transport()
         serial = self._device_serial or device_serial_key()
+        batch = list(files)
+        guid_map = dict(guid_by_path)
+        do_encode = encode and preset is not None
 
         def work(device):
             _ = device
             gen = self._bg.generation
             report = self._bg.progress_callback(gen)
+            results = []
+            total = len(batch)
+            for i, path in enumerate(batch):
+                if self._should_cancel_job():
+                    from mtpmanager.app.cancellation import JobCancelled
 
-            def on_progress(kind: str, *args) -> None:
-                # Forward worker events to main-thread UI handler.
-                report(kind, *args)
+                    raise JobCancelled("Send Video cancelled")
 
-            return device_ops.prepare_and_send_video(
-                transport,
-                path,
-                parent_id=parent,
-                encode_profile=preset,
-                encode_for_device=encode and preset is not None,
-                ignore_max_fps=ignore_max_fps,
-                on_progress=on_progress,
-            )
+                def on_progress(kind: str, *args, _i=i, _t=total) -> None:
+                    # Prefix multi-file index on status lines.
+                    if kind == "status" and args and _t > 1:
+                        report(
+                            "status",
+                            f"({_i + 1}/{_t}) {args[0]}",
+                        )
+                        return
+                    if kind == "phase" and _t > 1:
+                        report(kind, *args)
+                        report(
+                            "status",
+                            f"Video {_i + 1}/{_t}: {os.path.basename(batch[_i])}",
+                        )
+                        return
+                    report(kind, *args)
+
+                if total > 1:
+                    report(
+                        "status",
+                        f"Video {i + 1}/{total}: {os.path.basename(path)}",
+                    )
+                results.append(
+                    device_ops.prepare_and_send_video(
+                        transport,
+                        path,
+                        parent_id=parent,
+                        encode_profile=preset,
+                        encode_for_device=do_encode,
+                        ignore_max_fps=ignore_max_fps,
+                        on_progress=on_progress,
+                        guid=guid_map.get(path),
+                    )
+                )
+            return results
 
         def on_ui_event(kind: str, *rest) -> None:
             if kind == "phase":
@@ -3837,49 +4428,66 @@ class AppController:
                 if rest:
                     self.win.set_progress_status(str(rest[0]))
                 return
-            # Fall through to shared transfer progress shapes if any.
             self._on_transfer_ui_event(kind, *rest)
 
-        def on_success(result) -> None:
-            try:
-                record_send(
-                    serial,
-                    remote_name=result.remote_basename,
-                    guid=None,
-                    item_id=result.object_id,
-                    parent_id=result.parent_id,
-                    storage_id=DEFAULT_STORAGE_ID,
+        def on_success(results) -> None:
+            if not isinstance(results, list):
+                results = [results]
+            for result in results:
+                src = os.path.normpath(result.source_path or result.path or "")
+                g = guid_map.get(src)
+                try:
+                    record_send(
+                        serial,
+                        remote_name=result.remote_basename,
+                        guid=g,
+                        item_id=result.object_id,
+                        parent_id=result.parent_id,
+                        storage_id=DEFAULT_STORAGE_ID,
+                    )
+                except Exception:
+                    logger.debug(
+                        "device_index record_send after video failed",
+                        exc_info=True,
+                    )
+                logger.info(
+                    "Send Video ok path=%s parent=%s object_id=%s remote=%s "
+                    "guid=%s encoded=%s skipped_ok=%s",
+                    result.path,
+                    result.parent_id,
+                    result.object_id,
+                    result.remote_basename,
+                    g or "",
+                    result.encoded,
+                    result.encode_skipped_compatible,
                 )
+            try:
                 self._schedule_device_music_tree_refresh(enrich_missing_tags=False)
             except Exception:
-                logger.debug(
-                    "device_index record_send after video failed",
-                    exc_info=True,
+                pass
+
+            if len(results) == 1:
+                result = results[0]
+                oid_s = (
+                    f" object id={result.object_id}" if result.object_id else ""
                 )
-            oid_s = (
-                f" object id={result.object_id}" if result.object_id else ""
-            )
-            if result.encoded:
-                how = "encoded for device, then sent"
-            elif result.encode_skipped_compatible:
-                how = "already device-compatible (encode skipped)"
+                if result.encoded:
+                    how = "encoded for device, then sent"
+                elif result.encode_skipped_compatible:
+                    how = "already device-compatible (encode skipped)"
+                else:
+                    how = "sent as-is"
+                messagebox.showinfo(
+                    "Send Video",
+                    f"Sent to {folder_label} (folder {result.parent_id})."
+                    f"{oid_s}\n\n{result.remote_basename}\n\n({how})",
+                )
             else:
-                how = "sent as-is"
-            messagebox.showinfo(
-                "Send Video",
-                f"Sent to {folder_label} (folder {result.parent_id})."
-                f"{oid_s}\n\n{result.remote_basename}\n\n({how})",
-            )
-            logger.info(
-                "Send Video ok path=%s parent=%s object_id=%s remote=%s "
-                "encoded=%s skipped_ok=%s",
-                path,
-                result.parent_id,
-                result.object_id,
-                result.remote_basename,
-                result.encoded,
-                result.encode_skipped_compatible,
-            )
+                messagebox.showinfo(
+                    "Send Video",
+                    f"Sent {len(results)} file(s) to {folder_label} "
+                    f"(folder {parent}).",
+                )
 
         self._run_device_bg(
             title="Send Video",
@@ -3888,7 +4496,7 @@ class AppController:
             on_success=on_success,
             busy_message=(
                 f"preparing/sending video to {folder_label}…"
-                if encode
+                if do_encode
                 else f"sending video to {folder_label}…"
             ),
             on_progress=on_ui_event,

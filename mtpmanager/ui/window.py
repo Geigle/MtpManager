@@ -113,10 +113,13 @@ CTX_SYNC_SELECTED = "Sync selected tracks"
 CTX_SYNC_TRACK = "Sync this track"
 CTX_SYNC_ALBUM = "Sync Album"
 CTX_SYNC_ARTIST = "Sync all from Artist"
+CTX_EXCLUDE_FILE = "Exclude this file…"
+CTX_EXCLUDE_FOLDER = "Exclude this folder…"
 
 # Group header context menus (labels updated dynamically before popup)
 CTX_SYNC_ARTIST_GROUP = "Sync all from Artist"
 CTX_SYNC_ALBUM_GROUP = "Sync album"
+CTX_EXCLUDE_GROUP_FOLDER = "Exclude this folder…"
 
 _DEVICE_MENU_LABELS = (
     MENU_CONNECT,
@@ -372,12 +375,17 @@ class MainWindow:
         self.menu_track_ctx.add_command(label=CTX_SYNC_TRACK)
         self.menu_track_ctx.add_command(label=CTX_SYNC_ALBUM)
         self.menu_track_ctx.add_command(label=CTX_SYNC_ARTIST)
+        self.menu_track_ctx.add_separator()
+        self.menu_track_ctx.add_command(label=CTX_EXCLUDE_FILE)
+        self.menu_track_ctx.add_command(label=CTX_EXCLUDE_FOLDER)
 
         self.menu_artist_ctx = Menu(self.root, tearoff=0)
         self.menu_artist_ctx.add_command(label=CTX_SYNC_ARTIST_GROUP)
 
         self.menu_album_ctx = Menu(self.root, tearoff=0)
         self.menu_album_ctx.add_command(label=CTX_SYNC_ALBUM_GROUP)
+        self.menu_album_ctx.add_separator()
+        self.menu_album_ctx.add_command(label=CTX_EXCLUDE_GROUP_FOLDER)
 
         # Status toolbar: path + track count only (no duplicate title header).
         library_toolbar = Frame(self.root, borderwidth=1, relief="sunken")
@@ -490,13 +498,23 @@ class MainWindow:
 
         self._startup_hint_active = True
         self._context_detail = ""
+        self._context_path = ""
         self.lbl_context_detail = Label(
             self.context_panel,
             text=EXPERIMENTAL_HINT,
             wraplength=_LEFT_TEXT_WRAP,
             justify=LEFT,
         )
-        self.lbl_context_detail.pack(padx=6, pady=(4, 6), anchor="nw")
+        self.lbl_context_detail.pack(padx=6, pady=(4, 0), anchor="nw")
+        # Full host path for single-track selection (italic, secondary).
+        self.lbl_context_path = Label(
+            self.context_panel,
+            text="",
+            wraplength=_LEFT_TEXT_WRAP,
+            justify=LEFT,
+            font=("", 10, "italic"),
+        )
+        self.lbl_context_path.pack(padx=6, pady=(2, 6), anchor="nw")
 
         self.media_notebook = ttk.Notebook(rightframe)
         self.media_notebook.pack(side=TOP, fill=BOTH, expand=True, padx=2, pady=2)
@@ -664,7 +682,35 @@ class MainWindow:
         self.device_video_tree.column("album", width=140, minwidth=60)
         self.device_video_tree.column("year", width=56, minwidth=40, stretch=False)
 
-        # Library audiobooks tree (same columns; Author → Year grouping).
+        # Library video tree: folder → files; title column only (filename).
+        vl_yscroll = Scrollbar(vl_tree_frame)
+        vl_yscroll.pack(side=RIGHT, fill=Y)
+        vl_xscroll = Scrollbar(vl_tree_frame, orient="horizontal")
+        vl_xscroll.pack(side=BOTTOM, fill=X)
+
+        self.videos_tree = ttk.Treeview(
+            vl_tree_frame,
+            columns=("title",),
+            show="tree headings",
+            selectmode="extended",
+            yscrollcommand=vl_yscroll.set,
+            xscrollcommand=vl_xscroll.set,
+        )
+        self.videos_tree.pack(side=LEFT, fill=BOTH, expand=True)
+        vl_yscroll.config(command=self.videos_tree.yview)
+        vl_xscroll.config(command=self.videos_tree.xview)
+
+        self.videos_tree.heading("#0", text="", anchor="w")
+        self.videos_tree.heading("title", text="Title", anchor="w")
+        self.videos_tree.column(
+            "#0",
+            width=28,
+            minwidth=24,
+            stretch=False,
+        )
+        self.videos_tree.column("title", width=420, minwidth=120, stretch=True)
+
+        # Library audiobooks tree (same columns; Author → Album - Year grouping).
         ab_yscroll = Scrollbar(ab_tree_frame)
         ab_yscroll.pack(side=RIGHT, fill=Y)
         ab_xscroll = Scrollbar(ab_tree_frame, orient="horizontal")
@@ -745,6 +791,16 @@ class MainWindow:
         self.tree.tag_configure(
             "xfer_transferring", background=BG_TRANSFER_TRANSFERRING
         )
+        self.videos_tree.tag_configure("group", font=("", 11, "bold"))
+        self.videos_tree.tag_configure("group_directory", font=("", 12, "bold"))
+        self.videos_tree.tag_configure("dead", foreground=_DEAD_TRACK_FG)
+        self.videos_tree.tag_configure("xfer_queued", background=BG_TRANSFER_QUEUED)
+        self.videos_tree.tag_configure(
+            "xfer_transcoding", background=BG_TRANSFER_TRANSCODING
+        )
+        self.videos_tree.tag_configure(
+            "xfer_transferring", background=BG_TRANSFER_TRANSFERRING
+        )
         self.audiobooks_tree.tag_configure("group", font=("", 11, "bold"))
         self.audiobooks_tree.tag_configure("group_artist", font=("", 12, "bold"))
         self.audiobooks_tree.tag_configure("dead", foreground=_DEAD_TRACK_FG)
@@ -807,16 +863,24 @@ class MainWindow:
         """True while the context subframe still shows the first-run blurb."""
         return bool(self._startup_hint_active)
 
-    def set_context_detail(self, text: str) -> None:
+    def set_context_detail(
+        self, text: str, *, path: str | None = None
+    ) -> None:
         """Update the context subframe (selection metadata).
 
         Replaces the first-run experimental hint. Always updates the visible
         label (including under Stable Mode) so selection still has a home.
+        *path* is the full host path for a single track (shown italic below).
         """
         self._startup_hint_active = False
         self._context_detail = text or ""
+        self._context_path = (path or "").strip()
         try:
             self.lbl_context_detail.configure(text=self._context_detail)
+        except Exception:
+            pass
+        try:
+            self.lbl_context_path.configure(text=self._context_path)
         except Exception:
             pass
 
@@ -975,6 +1039,9 @@ class MainWindow:
         on_sync_artist_group,
         on_sync_album_group,
         on_sync_selected=None,
+        on_exclude_file=None,
+        on_exclude_folder=None,
+        on_exclude_group_folder=None,
     ) -> None:
         if on_sync_selected is not None:
             self.menu_track_ctx.entryconfig(
@@ -983,8 +1050,20 @@ class MainWindow:
         self.menu_track_ctx.entryconfig(CTX_SYNC_TRACK, command=on_sync_track)
         self.menu_track_ctx.entryconfig(CTX_SYNC_ALBUM, command=on_sync_album)
         self.menu_track_ctx.entryconfig(CTX_SYNC_ARTIST, command=on_sync_artist)
+        if on_exclude_file is not None:
+            self.menu_track_ctx.entryconfig(
+                CTX_EXCLUDE_FILE, command=on_exclude_file
+            )
+        if on_exclude_folder is not None:
+            self.menu_track_ctx.entryconfig(
+                CTX_EXCLUDE_FOLDER, command=on_exclude_folder
+            )
         self.menu_artist_ctx.entryconfig(0, command=on_sync_artist_group)
         self.menu_album_ctx.entryconfig(0, command=on_sync_album_group)
+        if on_exclude_group_folder is not None:
+            self.menu_album_ctx.entryconfig(
+                CTX_EXCLUDE_GROUP_FOLDER, command=on_exclude_group_folder
+            )
 
     def set_library_menu_state(
         self,
@@ -1077,6 +1156,13 @@ class MainWindow:
         # Drop in-memory PhotoImage refs; on-disk thumbs remain.
         self._album_art_cache.clear()
 
+    def clear_videos_tree(self) -> None:
+        """Clear Library → Video tree."""
+        try:
+            self.videos_tree.delete(*self.videos_tree.get_children())
+        except Exception:
+            pass
+
     def clear_audiobooks_tree(self) -> None:
         """Clear Library → Audiobooks tree."""
         try:
@@ -1162,7 +1248,7 @@ class MainWindow:
     def set_tracks_usable(self, usable: bool) -> None:
         """Allow interaction, or mark the tree as dead/unreachable."""
         self._tracks_interactive = usable
-        trees = (self.tree, self.audiobooks_tree)
+        trees = (self.tree, self.videos_tree, self.audiobooks_tree)
         if usable:
             for tree in trees:
                 tree.configure(selectmode="extended")
@@ -1180,17 +1266,23 @@ class MainWindow:
                 tree.item(iid, tags=tags)
 
     def active_library_tree(self):
-        """Treeview for the currently selected library media tab (Music / Audiobooks)."""
+        """Treeview for the selected library media tab (Music / Video / Audiobooks)."""
         try:
             current = self.media_notebook.select()
         except Exception:
             return self.tree
         try:
+            if current == str(self.videoLibrary_tab):
+                return self.videos_tree
             if current == str(self.audiobooksLibrary_tab):
                 return self.audiobooks_tree
         except Exception:
             pass
         return self.tree
+
+    def library_media_trees(self):
+        """All host library Treeviews (Music, Video, Audiobooks)."""
+        return (self.tree, self.videos_tree, self.audiobooks_tree)
 
     def _all_iids(self, tree=None) -> list[str]:
         tree = tree if tree is not None else self.tree
@@ -1207,10 +1299,10 @@ class MainWindow:
     def set_track_transfer_style(self, iid: str, status: str | None) -> None:
         """Tint a track row for transfer state via tags."""
         tree = None
-        if self.tree.exists(iid):
-            tree = self.tree
-        elif self.audiobooks_tree.exists(iid):
-            tree = self.audiobooks_tree
+        for candidate in self.library_media_trees():
+            if candidate.exists(iid):
+                tree = candidate
+                break
         if tree is None:
             return
         tags = [
@@ -1231,7 +1323,7 @@ class MainWindow:
 
     def clear_transfer_styles(self) -> None:
         """Clear all transfer tint tags from library trees."""
-        for tree in (self.tree, self.audiobooks_tree):
+        for tree in self.library_media_trees():
             for iid in self._all_iids(tree):
                 tags = [
                     t
@@ -1253,9 +1345,9 @@ class MainWindow:
         try:
             if not self._tracks_interactive:
                 return "break"
-            # Prefer the widget that received the click (Music or Audiobooks).
+            # Prefer the widget that received the click (Music / Video / Audiobooks).
             tree = event.widget if event is not None else self.tree
-            if tree not in (self.tree, self.audiobooks_tree):
+            if tree not in self.library_media_trees():
                 tree = self.active_library_tree()
             row = tree.identify_row(event.y)
             if not row:
