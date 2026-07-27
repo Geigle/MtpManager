@@ -9,7 +9,12 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Sequence
 
-from mtpmanager.domain.library import primary_artist, year_from_date
+from mtpmanager.domain.library import (
+    primary_artist,
+    tv_episode_sort_key,
+    tv_series_title_for_path,
+    year_from_date,
+)
 from mtpmanager.domain.models import Track
 
 UNKNOWN_YEAR = "Unknown year"
@@ -430,6 +435,49 @@ def group_by_directory(tracks: Sequence[Track]) -> list[GroupNode]:
                 tracks=tuple(dir_tracks),
             )
         )
+    return groups
+
+
+def group_videos_for_library(tracks: Sequence[Track]) -> list[GroupNode]:
+    """Library → Video grouping: TV series by show title, else by folder.
+
+    Files whose paths look like TV (``S01E01``, ``1x02``, ``Season N``
+    folders, etc.) share a parent row whose label is the series title
+    (usually the parent or grandparent folder). Other videos stay under
+    ordinary directory groups.
+    """
+    series_buckets: dict[str, list[Track]] = defaultdict(list)
+    series_labels: dict[str, str] = {}
+    residual: list[Track] = []
+
+    for t in tracks:
+        title = tv_series_title_for_path(t.path)
+        if title:
+            key = _casefold(title)
+            series_buckets[key].append(t)
+            series_labels.setdefault(key, title)
+        else:
+            residual.append(t)
+
+    groups: list[GroupNode] = []
+    for key in sorted(series_buckets.keys()):
+        ep_tracks = sorted(
+            series_buckets[key],
+            key=lambda t: tv_episode_sort_key(t.path),
+        )
+        groups.append(
+            GroupNode(
+                key=f"tv:{key}",
+                label=series_labels[key],
+                tracks=tuple(ep_tracks),
+            )
+        )
+
+    # Movies / misc: keep filesystem folder grouping.
+    groups.extend(group_by_directory(residual))
+
+    # Stable top-level order: series and folders together A–Z by label.
+    groups.sort(key=lambda g: _casefold(g.label))
     return groups
 
 

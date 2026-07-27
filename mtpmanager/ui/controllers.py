@@ -37,6 +37,7 @@ from mtpmanager.domain.library_sort import (
     group_by_artist_album_year,
     group_by_directory,
     group_by_year,
+    group_videos_for_library,
     iter_track_cells,
     next_artist_column_sort,
     sort_tracks_flat,
@@ -1266,24 +1267,29 @@ class AppController:
         run_chunk(0)
 
     def _rebuild_videos_tree(self, tracks: list[Track]) -> None:
-        """Rebuild Library → Video (video extensions; folder → files)."""
+        """Rebuild Library → Video (TV series by show title; else folder)."""
         self._cancel_videos_populate()
         self.win.clear_videos_tree()
         if not tracks:
             return
 
         ops: list = []
-        groups = group_by_directory(tracks)
+        groups = group_videos_for_library(tracks)
         for g in groups:
             folder_iid = f"vl:{g.key}"
             seed = g.tracks[0] if g.tracks else None
+            # TV series and plain folders both use group_directory so exclude
+            # / sync-folder actions keep working on the parent row.
+            tags = ("group", "group_directory")
+            if g.key.startswith("tv:"):
+                tags = ("group", "group_directory", "group_tv_series")
             ops.append(
                 (
                     "group",
                     "",
                     folder_iid,
                     g.label,
-                    ("group", "group_directory"),
+                    tags,
                     seed,
                 )
             )

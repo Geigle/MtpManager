@@ -205,6 +205,182 @@ def video_display_title(track: Track) -> str:
     return base or "Unknown Title"
 
 
+# --- TV-series path heuristics (Library → Video grouping) ---
+
+# S01E02, s1e2, S01.E02, S01_E02
+_TV_EPISODE_RE = re.compile(
+    r"(?i)(?:^|[^a-z0-9])s(\d{1,2})\s*[._\-\s]*e(\d{1,3})(?:[^a-z0-9]|$)"
+)
+# 1x02, 01x02
+_TV_X_EPISODE_RE = re.compile(
+    r"(?i)(?:^|[^a-z0-9])(\d{1,2})\s*x\s*(\d{1,3})(?:[^a-z0-9]|$)"
+)
+# Folder names like "Season 1", "Season 01", "S01", "Series 2"
+_TV_SEASON_FOLDER_RE = re.compile(
+    r"(?i)^(?:season|series)\s*0*(\d{1,2})$|^s0*(\d{1,2})$"
+)
+# Parent contains "Season 1" as a token (not "Season of the Witch")
+_TV_SEASON_IN_NAME_RE = re.compile(r"(?i)\bseason\s*0*\d{1,2}\b")
+
+# Shelf / dump folders — prefer series title from filename when parent is one of these.
+_TV_GENERIC_PARENTS = frozenset(
+    {
+        "downloads",
+        "download",
+        "tv",
+        "television",
+        "series",
+        "shows",
+        "show",
+        "video",
+        "videos",
+        "movies",
+        "movie",
+        "media",
+        "tmp",
+        "temp",
+        "incoming",
+        "complete",
+        "completed",
+    }
+)
+
+
+def _path_parts(path: str) -> tuple[str, str, str, str]:
+    """Return (file_stem, file_base, parent_name, grandparent_name)."""
+    base = os.path.basename(path or "")
+    stem = os.path.splitext(base)[0] if base else ""
+    parent_path = os.path.dirname(path or "")
+    parent = os.path.basename(parent_path.rstrip(os.sep + "/")) if parent_path else ""
+    grand_path = os.path.dirname(parent_path) if parent_path else ""
+    grand = os.path.basename(grand_path.rstrip(os.sep + "/")) if grand_path else ""
+    return stem, base, parent, grand
+
+
+def is_season_folder_name(name: str) -> bool:
+    """True when *name* is a pure season folder (e.g. ``Season 1``, ``S02``)."""
+    n = (name or "").strip()
+    if not n:
+        return False
+    return bool(_TV_SEASON_FOLDER_RE.fullmatch(n))
+
+
+def parse_tv_episode_codes(text: str) -> tuple[int, int] | None:
+    """Return ``(season, episode)`` if *text* looks like S01E02 / 1x02."""
+    if not text:
+        return None
+    m = _TV_EPISODE_RE.search(text)
+    if m:
+        return int(m.group(1)), int(m.group(2))
+    m = _TV_X_EPISODE_RE.search(text)
+    if m:
+        return int(m.group(1)), int(m.group(2))
+    return None
+
+
+def path_looks_like_tv_series(path: str) -> bool:
+    """True when a video path looks like a TV episode / season layout."""
+    stem, base, parent, _grand = _path_parts(path)
+    if parse_tv_episode_codes(stem) or parse_tv_episode_codes(base):
+        return True
+    if parse_tv_episode_codes(parent):
+        return True
+    if is_season_folder_name(parent):
+        return True
+    if _TV_SEASON_IN_NAME_RE.search(parent):
+        return True
+    # Bare word "season" only when paired with episode-like siblings is
+    # handled by folder structure; avoid movie titles like "Season of X".
+    return False
+
+
+def _series_title_from_filename_stem(stem: str) -> str | None:
+    """Strip S01E02 / 1x02 tails from a filename stem → show title."""
+    raw = (stem or "").strip()
+    if not raw:
+        return None
+    m = _TV_EPISODE_RE.search(raw)
+    if not m:
+        m = _TV_X_EPISODE_RE.search(raw)
+    if not m:
+        return None
+    head = raw[: m.start()].strip(" ._-")
+    # Drop trailing junk like " - " left after the episode token.
+    head = re.sub(r"[\s._\-]+$", "", head)
+    # Common "Show.Name.S01E01" → "Show Name"
+    if head and "." in head and " " not in head:
+        head = head.replace(".", " ")
+    head = re.sub(r"\s{2,}", " ", head).strip(" ._-")
+    return head or None
+
+
+def tv_series_title_for_path(path: str) -> str | None:
+    """Series display title when *path* looks like TV content, else None.
+
+    Preference order:
+      1. Grandparent when parent is a season folder (``Show/Season 1/ep.avi``)
+      2. Parent folder when the file (or parent name) has episode codes
+      3. Filename stem with SxxEyy stripped
+    """
+    if not path_looks_like_tv_series(path):
+        return None
+    stem, base, parent, grand = _path_parts(path)
+
+    if is_season_folder_name(parent) and grand:
+        return grand
+    if _TV_SEASON_IN_NAME_RE.search(parent) and grand and not is_season_folder_name(parent):
+        # e.g. parent "Show Name Season 1" — prefer grandparent when present
+        # and parent is not already the show; if grand looks like a shelf
+        # ("TV", "Series") use the parent cleaned of "Season N".
+        if grand.casefold() not in {"tv", "television", "series", "shows", "video", "videos"}:
+            return grand
+        cleaned = _TV_SEASON_IN_NAME_RE.sub("", parent).strip(" ._-")
+        return cleaned or parent
+
+    ep_in_file = parse_tv_episode_codes(stem) or parse_tv_episode_codes(base)
+    if ep_in_file:
+        from_name = _series_title_from_filename_stem(stem)
+        parent_key = parent.casefold() if parent else ""
+        if (
+            parent
+            and not is_season_folder_name(parent)
+            and parent_key not in _TV_GENERIC_PARENTS
+        ):
+            # Parent is the show folder (not a download/TV shelf).
+            if not _TV_SEASON_IN_NAME_RE.search(parent):
+                return parent
+            cleaned = _TV_SEASON_IN_NAME_RE.sub("", parent).strip(" ._-")
+            return cleaned or parent
+        if from_name:
+            return from_name
+        if grand and grand.casefold() not in _TV_GENERIC_PARENTS:
+            return grand
+        return parent or from_name
+
+    if parent:
+        return parent
+    return _series_title_from_filename_stem(stem)
+
+
+def tv_episode_sort_key(path: str) -> tuple:
+    """Sort key for episode files: season, episode, then path."""
+    stem, base, parent, _g = _path_parts(path)
+    codes = (
+        parse_tv_episode_codes(stem)
+        or parse_tv_episode_codes(base)
+        or parse_tv_episode_codes(parent)
+    )
+    if codes:
+        return (0, codes[0], codes[1], (path or "").casefold())
+    # Season folder without episode codes → sort by season folder number.
+    if is_season_folder_name(parent):
+        m = _TV_SEASON_FOLDER_RE.fullmatch(parent.strip())
+        if m:
+            s = int(m.group(1) or m.group(2) or 0)
+            return (0, s, 0, (path or "").casefold())
+    return (1, 0, 0, (path or "").casefold())
+
+
 def _albumartist_meaningful(albumartist: str) -> bool:
     return bool(albumartist) and albumartist != _UNKNOWN_ARTIST
 

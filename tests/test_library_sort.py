@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import unittest
 
 from mtpmanager.domain.library import (
@@ -14,8 +15,10 @@ from mtpmanager.domain.library import (
     partition_library_media,
     partition_music_and_audiobooks,
     path_is_excluded,
+    path_looks_like_tv_series,
     path_under_root,
     primary_artist,
+    tv_series_title_for_path,
     video_display_title,
 )
 from mtpmanager.domain.library_sort import (
@@ -28,6 +31,7 @@ from mtpmanager.domain.library_sort import (
     group_by_artist_album_year,
     group_by_directory,
     group_by_year,
+    group_videos_for_library,
     is_various_artists_name,
     next_artist_column_sort,
     sort_tracks_flat,
@@ -120,6 +124,44 @@ class AudiobookGenreTests(unittest.TestCase):
     def test_video_display_title_is_filename(self) -> None:
         t = _t("/Media/Shows/S01E01.avi", title="Ignored Tag Title")
         self.assertEqual(video_display_title(t), "S01E01.avi")
+
+    def test_tv_series_title_from_season_folder(self) -> None:
+        path = "/Media/TV/Babylon 5/Season 1/S01E01.avi"
+        self.assertTrue(path_looks_like_tv_series(path))
+        self.assertEqual(tv_series_title_for_path(path), "Babylon 5")
+
+    def test_tv_series_title_from_parent_when_sxxexx_in_file(self) -> None:
+        path = "/Media/TV/Firefly/S01E03.mkv"
+        self.assertEqual(tv_series_title_for_path(path), "Firefly")
+
+    def test_tv_series_title_from_filename_when_no_show_folder(self) -> None:
+        path = "/Downloads/Firefly.S01E01.avi"
+        self.assertEqual(tv_series_title_for_path(path), "Firefly")
+
+    def test_movie_not_treated_as_tv(self) -> None:
+        path = "/Media/Movies/Inception (2010).mp4"
+        self.assertFalse(path_looks_like_tv_series(path))
+        self.assertIsNone(tv_series_title_for_path(path))
+
+    def test_group_videos_for_library_series_and_movies(self) -> None:
+        tracks = [
+            _t("/Media/TV/Show A/Season 1/S01E02.avi"),
+            _t("/Media/TV/Show A/Season 1/S01E01.avi"),
+            _t("/Media/TV/Show A/Season 2/S02E01.avi"),
+            _t("/Media/Movies/Cool Film/Cool Film.mp4"),
+        ]
+        groups = group_videos_for_library(tracks)
+        labels = [g.label for g in groups]
+        self.assertIn("Show A", labels)
+        show = next(g for g in groups if g.label == "Show A")
+        self.assertEqual(len(show.tracks), 3)
+        # Episodes ordered by season/episode, not path alone.
+        self.assertEqual(
+            [os.path.basename(t.path) for t in show.tracks],
+            ["S01E01.avi", "S01E02.avi", "S02E01.avi"],
+        )
+        # Movie stays under its folder name.
+        self.assertTrue(any(g.label == "Cool Film" for g in groups))
 
     def test_merge_scanned_roots_keeps_other_roots(self) -> None:
         existing = Library(
