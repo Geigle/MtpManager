@@ -22,7 +22,62 @@ VIDEO_EXTENSIONS = frozenset(
     {"wmv", "avi", "mpg", "mpeg", "mov", "asf", "mp4", "m4v", "qt", "mkv"}
 )
 
+# Audio format preference for duplicate tracks (lower rank = preferred).
+# Uncompressed PCM first, then lossless compressed, then lossy by typical
+# transparency at common bitrates (AAC > MP3 > Vorbis > WMA). Opus ranks
+# above AAC when present; m4a is treated as AAC-tier (container, usually lossy).
+FORMAT_QUALITY_RANK: dict[str, int] = {
+    # Uncompressed PCM
+    "wav": 0,
+    "pcm": 0,
+    "aiff": 0,
+    "aif": 0,
+    # Lossless compressed (bit-identical to source PCM)
+    "flac": 10,
+    "alac": 10,
+    "ape": 10,
+    "wv": 10,
+    "wavpack": 10,
+    # Lossy — higher fidelity first
+    "opus": 20,
+    "aac": 30,
+    "m4a": 30,
+    "mp3": 40,
+    "ogg": 50,
+    "vorbis": 50,
+    "wma": 60,
+}
+_UNKNOWN_FORMAT_RANK = 100
+
+# Path components treated as format/quality folders when building a path-based
+# identity (e.g. Music/FLAC/Artist/Album vs Music/MP3/Artist/Album).
+_FORMAT_PATH_COMPONENTS = frozenset(
+    {
+        "wav",
+        "pcm",
+        "aiff",
+        "aif",
+        "flac",
+        "alac",
+        "ape",
+        "wv",
+        "wavpack",
+        "opus",
+        "aac",
+        "m4a",
+        "mp3",
+        "ogg",
+        "vorbis",
+        "wma",
+        "lossy",
+        "lossless",
+        "uncompressed",
+    }
+)
+
 _UNKNOWN_ARTIST = "Unknown Artist"
+_UNKNOWN_ALBUM = "Unknown Album"
+_UNKNOWN_TITLE = "Unknown Title"
 _YEAR_RE = re.compile(r"\b((?:19|20)\d{2})\b")
 
 
@@ -62,6 +117,128 @@ def is_library_media_file(
     if is_video_file(path):
         return True
     return is_music_file(path, exclude_formats=exclude_formats)
+
+
+def format_quality_rank(path_or_ext: str) -> int:
+    """Return preference rank for an audio format (lower = higher fidelity).
+
+    Accepts a file path or bare extension (with or without a leading dot).
+    Unknown formats rank last so they lose to known higher-quality encodings.
+    """
+    raw = (path_or_ext or "").strip().lower()
+    if not raw:
+        return _UNKNOWN_FORMAT_RANK
+    if "/" in raw or "\\" in raw or "." in raw[1:]:
+        ext = extension_of(raw)
+    else:
+        ext = raw.lstrip(".")
+    return FORMAT_QUALITY_RANK.get(ext, _UNKNOWN_FORMAT_RANK)
+
+
+def _meaningful_tag(value: str, *unknowns: str) -> bool:
+    text = (value or "").strip()
+    if not text:
+        return False
+    key = text.casefold()
+    for u in unknowns:
+        if key == u.casefold():
+            return False
+    return True
+
+
+def _path_identity_key(path: str) -> tuple[str, ...]:
+    """Stable path-based identity with format-folder components stripped.
+
+    ``Music/FLAC/Artist/Album/01 Song.flac`` and
+    ``Music/MP3/Artist/Album/01 Song.mp3`` share the same key.
+    """
+    parts = [p for p in path.replace("\\", "/").split("/") if p]
+    if not parts:
+        return ()
+    stem = parts[-1].rsplit(".", 1)[0] if "." in parts[-1] else parts[-1]
+    dirs = parts[:-1]
+    filtered = [p for p in dirs if p.casefold() not in _FORMAT_PATH_COMPONENTS]
+    return tuple(p.casefold() for p in filtered + [stem])
+
+
+def track_content_identity(track: Track) -> tuple:
+    """Identity key for “same song, different encoding” collapse.
+
+    Prefer tag identity when artist + title are meaningful; otherwise fall
+    back to a path key that ignores common format folder names.
+    """
+    if not track:
+        return ("empty",)
+    meta = track.meta or TrackMetadata()
+    artist = primary_artist(track).strip()
+    album = (meta.album or "").strip()
+    title = (meta.title or "").strip()
+    if _meaningful_tag(artist, _UNKNOWN_ARTIST) and _meaningful_tag(
+        title, _UNKNOWN_TITLE
+    ):
+        album_key = (
+            album.casefold()
+            if _meaningful_tag(album, _UNKNOWN_ALBUM)
+            else ""
+        )
+        return (
+            "meta",
+            artist.casefold(),
+            album_key,
+            meta.tracknumber_int(),
+            title.casefold(),
+        )
+    return ("path",) + _path_identity_key(track.path or "")
+
+
+def _format_preference_sort_key(track: Track) -> tuple:
+    """Sort key: best quality first, then technical stream info, then path."""
+    meta = track.meta or TrackMetadata()
+    return (
+        format_quality_rank(track.path or ""),
+        # Prefer richer stream info when ranks tie (negated → higher first).
+        -int(meta.sample_rate or 0),
+        -int(meta.bitrate or 0),
+        -float(meta.length_sec or 0.0),
+        (track.path or "").casefold(),
+    )
+
+
+def prefer_higher_fidelity_tracks(tracks: Iterable[Track]) -> list[Track]:
+    """Keep one track per content identity, preferring higher-fidelity encodings.
+
+    When the library contains the same song as both FLAC and MP3 (parallel
+    rip folders, or same basename with different extensions), only the better
+    source is listed and used for sync/transcode. Videos are never collapsed.
+    Order of the result is stable by path.
+    """
+    audio: list[Track] = []
+    videos: list[Track] = []
+    for t in tracks:
+        if is_video_track(t):
+            videos.append(t)
+        else:
+            audio.append(t)
+
+    winners: dict[tuple, Track] = {}
+    for t in audio:
+        key = track_content_identity(t)
+        prev = winners.get(key)
+        if prev is None or _format_preference_sort_key(t) < _format_preference_sort_key(
+            prev
+        ):
+            winners[key] = t
+
+    kept = list(winners.values()) + videos
+    kept.sort(key=lambda t: (t.path or "").casefold())
+    dropped = len(audio) - len(winners)
+    if dropped > 0:
+        logger.info(
+            "Format preference: kept %d audio track(s), dropped %d lower-fidelity duplicate(s)",
+            len(winners),
+            dropped,
+        )
+    return kept
 
 
 def year_from_date(date: str) -> str | None:
@@ -189,8 +366,7 @@ def merge_scanned_roots(
         for t in existing.tracks
         if not any(path_under_root(t.path, r) for r in roots_scanned)
     ]
-    merged = list(keep) + list(scanned.tracks)
-    merged.sort(key=lambda t: t.path)
+    merged = prefer_higher_fidelity_tracks(list(keep) + list(scanned.tracks))
     return Library(
         tracks=merged,
         root_paths=normalize_library_roots(final_roots),

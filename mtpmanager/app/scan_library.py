@@ -11,6 +11,7 @@ from mtpmanager.domain.library import (
     is_library_media_file,
     normalize_library_roots,
     path_is_excluded,
+    prefer_higher_fidelity_tracks,
 )
 from mtpmanager.domain.models import Track
 from mtpmanager.infra.mutagen_tags import read_metadata
@@ -85,10 +86,11 @@ def scan_library(
     if not roots or not os.path.isdir(roots[0]):
         return Library(tracks=[], root_paths=roots)
     excl = list(exclusions or ())
-    found = _scan_dir(
-        roots[0], on_dir_progress=on_dir_progress, exclusions=excl
+    found = prefer_higher_fidelity_tracks(
+        _scan_dir(
+            roots[0], on_dir_progress=on_dir_progress, exclusions=excl
+        )
     )
-    found.sort(key=lambda t: t.path)
     return Library(tracks=found, root_paths=roots)
 
 
@@ -132,7 +134,7 @@ def scan_library_roots(
             seen_paths.add(track.path)
             found.append(track)
 
-    found.sort(key=lambda t: t.path)
+    found = prefer_higher_fidelity_tracks(found)
     logger.info(
         "Scanned %d library root(s) → %d track(s) (exclusions=%d)",
         len(roots),

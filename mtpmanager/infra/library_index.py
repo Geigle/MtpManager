@@ -32,6 +32,7 @@ from mtpmanager.domain.library import (
     normalize_library_roots,
     path_is_excluded,
     path_under_root,
+    prefer_higher_fidelity_tracks,
 )
 from mtpmanager.domain.models import Track, TrackMetadata
 from mtpmanager.domain.track_id import is_track_guid, new_track_guid
@@ -806,6 +807,8 @@ def load_library_index(
                 dropped,
                 len(tracks),
             )
+
+        tracks = prefer_higher_fidelity_tracks(tracks)
 
         logger.info(
             "Loaded library index: %d tracks under %d root(s) %s from %s",
