@@ -1,0 +1,555 @@
+"""Host podcast subscriptions + episodes in the library index SQLite DB.
+
+# TODO(follow-up): OPML import/export
+# TODO(follow-up): auto-refresh on a timer
+# TODO(follow-up): Device → Podcasts inventory browser
+# TODO(follow-up): video podcasts
+# TODO(follow-up): per-show auto-download rules beyond “latest”
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import sqlite3
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Iterable
+from urllib.parse import urlparse, urlunparse
+
+from mtpmanager.domain.track_id import is_track_guid, new_track_guid
+from mtpmanager.infra.library_index import _connect, _init_schema, index_path
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class Podcast:
+    id: int
+    feed_url: str
+    title: str = ""
+    author: str = ""
+    description: str = ""
+    image_url: str = ""
+    site_url: str = ""
+    last_fetched_at: str = ""
+    created_at: str = ""
+    updated_at: str = ""
+    episode_count: int = 0
+
+
+@dataclass(frozen=True)
+class PodcastEpisode:
+    id: int
+    podcast_id: int
+    guid: str  # host 32-hex identity for device ObjectFileName
+    feed_guid: str
+    title: str = ""
+    description: str = ""
+    pub_date: str = ""  # ISO-ish sortable when possible
+    duration_sec: float = 0.0
+    enclosure_url: str = ""
+    enclosure_type: str = ""
+    enclosure_bytes: int = 0
+    local_path: str = ""
+    episode_index: int = 0
+    season: int = 0
+    created_at: str = ""
+    updated_at: str = ""
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def normalize_feed_url(url: str) -> str:
+    """Normalize a feed URL for uniqueness (scheme/host lower, strip junk)."""
+    raw = (url or "").strip()
+    if not raw:
+        return ""
+    parsed = urlparse(raw)
+    if not parsed.scheme:
+        parsed = urlparse("https://" + raw)
+    scheme = (parsed.scheme or "https").lower()
+    netloc = (parsed.netloc or "").lower()
+    path = parsed.path or ""
+    if path != "/" and path.endswith("/"):
+        path = path.rstrip("/")
+    # Drop fragments; keep query (some hosts need it).
+    return urlunparse((scheme, netloc, path, "", parsed.query, ""))
+
+
+def ensure_podcasts_schema(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS podcasts (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          feed_url TEXT NOT NULL,
+          title TEXT NOT NULL DEFAULT '',
+          author TEXT NOT NULL DEFAULT '',
+          description TEXT NOT NULL DEFAULT '',
+          image_url TEXT NOT NULL DEFAULT '',
+          site_url TEXT NOT NULL DEFAULT '',
+          last_fetched_at TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_podcasts_feed_url
+          ON podcasts(feed_url);
+
+        CREATE TABLE IF NOT EXISTS podcast_episodes (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          podcast_id INTEGER NOT NULL,
+          guid TEXT NOT NULL,
+          feed_guid TEXT NOT NULL,
+          title TEXT NOT NULL DEFAULT '',
+          description TEXT NOT NULL DEFAULT '',
+          pub_date TEXT NOT NULL DEFAULT '',
+          duration_sec REAL NOT NULL DEFAULT 0,
+          enclosure_url TEXT NOT NULL DEFAULT '',
+          enclosure_type TEXT NOT NULL DEFAULT '',
+          enclosure_bytes INTEGER NOT NULL DEFAULT 0,
+          local_path TEXT NOT NULL DEFAULT '',
+          episode_index INTEGER NOT NULL DEFAULT 0,
+          season INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          FOREIGN KEY (podcast_id) REFERENCES podcasts(id) ON DELETE CASCADE,
+          UNIQUE (podcast_id, feed_guid)
+        );
+        CREATE INDEX IF NOT EXISTS idx_podcast_episodes_podcast_pub
+          ON podcast_episodes(podcast_id, pub_date DESC);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_podcast_episodes_guid
+          ON podcast_episodes(guid);
+        """
+    )
+
+
+def _open(path: Path | None = None) -> tuple[sqlite3.Connection, Path]:
+    dest = path if path is not None else index_path()
+    conn = _connect(dest)
+    _init_schema(conn)
+    ensure_podcasts_schema(conn)
+    return conn, dest
+
+
+def _podcast_from_row(row: sqlite3.Row, *, episode_count: int = 0) -> Podcast:
+    return Podcast(
+        id=int(row["id"]),
+        feed_url=str(row["feed_url"] or ""),
+        title=str(row["title"] or ""),
+        author=str(row["author"] or ""),
+        description=str(row["description"] or ""),
+        image_url=str(row["image_url"] or ""),
+        site_url=str(row["site_url"] or ""),
+        last_fetched_at=str(row["last_fetched_at"] or ""),
+        created_at=str(row["created_at"] or ""),
+        updated_at=str(row["updated_at"] or ""),
+        episode_count=int(episode_count),
+    )
+
+
+def _episode_from_row(row: sqlite3.Row) -> PodcastEpisode:
+    return PodcastEpisode(
+        id=int(row["id"]),
+        podcast_id=int(row["podcast_id"]),
+        guid=str(row["guid"] or ""),
+        feed_guid=str(row["feed_guid"] or ""),
+        title=str(row["title"] or ""),
+        description=str(row["description"] or ""),
+        pub_date=str(row["pub_date"] or ""),
+        duration_sec=float(row["duration_sec"] or 0),
+        enclosure_url=str(row["enclosure_url"] or ""),
+        enclosure_type=str(row["enclosure_type"] or ""),
+        enclosure_bytes=int(row["enclosure_bytes"] or 0),
+        local_path=str(row["local_path"] or ""),
+        episode_index=int(row["episode_index"] or 0),
+        season=int(row["season"] or 0),
+        created_at=str(row["created_at"] or ""),
+        updated_at=str(row["updated_at"] or ""),
+    )
+
+
+def list_podcasts(*, path: Path | None = None) -> list[Podcast]:
+    conn: sqlite3.Connection | None = None
+    try:
+        conn, _ = _open(path)
+        rows = conn.execute(
+            """
+            SELECT p.*,
+              (SELECT COUNT(*) FROM podcast_episodes e WHERE e.podcast_id = p.id)
+                AS episode_count
+            FROM podcasts p
+            ORDER BY p.title COLLATE NOCASE, p.id
+            """
+        ).fetchall()
+        return [
+            _podcast_from_row(r, episode_count=int(r["episode_count"] or 0))
+            for r in rows
+        ]
+    except sqlite3.Error as e:
+        logger.warning("list_podcasts failed: %s", e)
+        return []
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def get_podcast(podcast_id: int, *, path: Path | None = None) -> Podcast | None:
+    conn: sqlite3.Connection | None = None
+    try:
+        conn, _ = _open(path)
+        row = conn.execute(
+            """
+            SELECT p.*,
+              (SELECT COUNT(*) FROM podcast_episodes e WHERE e.podcast_id = p.id)
+                AS episode_count
+            FROM podcasts p WHERE p.id = ?
+            """,
+            (int(podcast_id),),
+        ).fetchone()
+        if row is None:
+            return None
+        return _podcast_from_row(row, episode_count=int(row["episode_count"] or 0))
+    except sqlite3.Error as e:
+        logger.warning("get_podcast failed: %s", e)
+        return None
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def get_podcast_by_feed_url(
+    feed_url: str, *, path: Path | None = None
+) -> Podcast | None:
+    key = normalize_feed_url(feed_url)
+    if not key:
+        return None
+    conn: sqlite3.Connection | None = None
+    try:
+        conn, _ = _open(path)
+        row = conn.execute(
+            """
+            SELECT p.*,
+              (SELECT COUNT(*) FROM podcast_episodes e WHERE e.podcast_id = p.id)
+                AS episode_count
+            FROM podcasts p WHERE p.feed_url = ?
+            """,
+            (key,),
+        ).fetchone()
+        if row is None:
+            return None
+        return _podcast_from_row(row, episode_count=int(row["episode_count"] or 0))
+    except sqlite3.Error as e:
+        logger.warning("get_podcast_by_feed_url failed: %s", e)
+        return None
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def create_or_update_podcast(
+    *,
+    feed_url: str,
+    title: str = "",
+    author: str = "",
+    description: str = "",
+    image_url: str = "",
+    site_url: str = "",
+    path: Path | None = None,
+) -> Podcast:
+    key = normalize_feed_url(feed_url)
+    if not key:
+        raise ValueError("Feed URL is required")
+    now = _utc_now()
+    conn: sqlite3.Connection | None = None
+    try:
+        conn, _ = _open(path)
+        with conn:
+            existing = conn.execute(
+                "SELECT id FROM podcasts WHERE feed_url = ?", (key,)
+            ).fetchone()
+            if existing is None:
+                cur = conn.execute(
+                    """
+                    INSERT INTO podcasts (
+                      feed_url, title, author, description, image_url, site_url,
+                      last_fetched_at, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        key,
+                        title or "",
+                        author or "",
+                        description or "",
+                        image_url or "",
+                        site_url or "",
+                        now,
+                        now,
+                        now,
+                    ),
+                )
+                pid = int(cur.lastrowid)
+            else:
+                pid = int(existing["id"])
+                conn.execute(
+                    """
+                    UPDATE podcasts SET
+                      title = CASE WHEN ? != '' THEN ? ELSE title END,
+                      author = CASE WHEN ? != '' THEN ? ELSE author END,
+                      description = CASE WHEN ? != '' THEN ? ELSE description END,
+                      image_url = CASE WHEN ? != '' THEN ? ELSE image_url END,
+                      site_url = CASE WHEN ? != '' THEN ? ELSE site_url END,
+                      last_fetched_at = ?,
+                      updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        title,
+                        title,
+                        author,
+                        author,
+                        description,
+                        description,
+                        image_url,
+                        image_url,
+                        site_url,
+                        site_url,
+                        now,
+                        now,
+                        pid,
+                    ),
+                )
+        pl = get_podcast(pid, path=path)
+        if pl is None:
+            raise RuntimeError("podcast row missing after upsert")
+        return pl
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def delete_podcast(podcast_id: int, *, path: Path | None = None) -> bool:
+    conn: sqlite3.Connection | None = None
+    try:
+        conn, _ = _open(path)
+        with conn:
+            cur = conn.execute(
+                "DELETE FROM podcasts WHERE id = ?", (int(podcast_id),)
+            )
+            return int(cur.rowcount or 0) > 0
+    except sqlite3.Error as e:
+        logger.warning("delete_podcast failed: %s", e)
+        return False
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def list_episodes(
+    podcast_id: int,
+    *,
+    limit: int | None = None,
+    path: Path | None = None,
+) -> list[PodcastEpisode]:
+    """Episodes newest-first (pub_date DESC, then id DESC)."""
+    conn: sqlite3.Connection | None = None
+    try:
+        conn, _ = _open(path)
+        sql = (
+            "SELECT * FROM podcast_episodes WHERE podcast_id = ? "
+            "ORDER BY pub_date DESC, id DESC"
+        )
+        params: list = [int(podcast_id)]
+        if limit is not None and int(limit) > 0:
+            sql += " LIMIT ?"
+            params.append(int(limit))
+        rows = conn.execute(sql, params).fetchall()
+        return [_episode_from_row(r) for r in rows]
+    except sqlite3.Error as e:
+        logger.warning("list_episodes failed: %s", e)
+        return []
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def get_episode(episode_id: int, *, path: Path | None = None) -> PodcastEpisode | None:
+    conn: sqlite3.Connection | None = None
+    try:
+        conn, _ = _open(path)
+        row = conn.execute(
+            "SELECT * FROM podcast_episodes WHERE id = ?", (int(episode_id),)
+        ).fetchone()
+        return _episode_from_row(row) if row is not None else None
+    except sqlite3.Error as e:
+        logger.warning("get_episode failed: %s", e)
+        return None
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def known_feed_guids(
+    podcast_id: int, *, path: Path | None = None
+) -> set[str]:
+    conn: sqlite3.Connection | None = None
+    try:
+        conn, _ = _open(path)
+        rows = conn.execute(
+            "SELECT feed_guid FROM podcast_episodes WHERE podcast_id = ?",
+            (int(podcast_id),),
+        ).fetchall()
+        return {str(r["feed_guid"] or "") for r in rows if r["feed_guid"]}
+    except sqlite3.Error as e:
+        logger.warning("known_feed_guids failed: %s", e)
+        return set()
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def upsert_episodes(
+    podcast_id: int,
+    episodes: Iterable[dict],
+    *,
+    path: Path | None = None,
+) -> int:
+    """Insert new episodes (by feed_guid); do not overwrite existing local_path.
+
+    Each dict may include: feed_guid, title, description, pub_date, duration_sec,
+    enclosure_url, enclosure_type, enclosure_bytes, episode_index, season.
+    Returns number of newly inserted rows.
+    """
+    pid = int(podcast_id)
+    now = _utc_now()
+    inserted = 0
+    conn: sqlite3.Connection | None = None
+    try:
+        conn, _ = _open(path)
+        with conn:
+            for raw in episodes:
+                feed_guid = str(raw.get("feed_guid") or "").strip()
+                if not feed_guid:
+                    continue
+                existing = conn.execute(
+                    "SELECT id, guid FROM podcast_episodes "
+                    "WHERE podcast_id = ? AND feed_guid = ?",
+                    (pid, feed_guid),
+                ).fetchone()
+                if existing is not None:
+                    # Refresh metadata only; keep guid + local_path.
+                    conn.execute(
+                        """
+                        UPDATE podcast_episodes SET
+                          title = CASE WHEN ? != '' THEN ? ELSE title END,
+                          description = CASE WHEN ? != '' THEN ? ELSE description END,
+                          pub_date = CASE WHEN ? != '' THEN ? ELSE pub_date END,
+                          duration_sec = CASE WHEN ? > 0 THEN ? ELSE duration_sec END,
+                          enclosure_url = CASE WHEN ? != '' THEN ? ELSE enclosure_url END,
+                          enclosure_type = CASE WHEN ? != '' THEN ? ELSE enclosure_type END,
+                          enclosure_bytes = CASE WHEN ? > 0 THEN ? ELSE enclosure_bytes END,
+                          episode_index = CASE WHEN ? > 0 THEN ? ELSE episode_index END,
+                          season = CASE WHEN ? > 0 THEN ? ELSE season END,
+                          updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (
+                            raw.get("title") or "",
+                            raw.get("title") or "",
+                            raw.get("description") or "",
+                            raw.get("description") or "",
+                            raw.get("pub_date") or "",
+                            raw.get("pub_date") or "",
+                            float(raw.get("duration_sec") or 0),
+                            float(raw.get("duration_sec") or 0),
+                            raw.get("enclosure_url") or "",
+                            raw.get("enclosure_url") or "",
+                            raw.get("enclosure_type") or "",
+                            raw.get("enclosure_type") or "",
+                            int(raw.get("enclosure_bytes") or 0),
+                            int(raw.get("enclosure_bytes") or 0),
+                            int(raw.get("episode_index") or 0),
+                            int(raw.get("episode_index") or 0),
+                            int(raw.get("season") or 0),
+                            int(raw.get("season") or 0),
+                            now,
+                            int(existing["id"]),
+                        ),
+                    )
+                    continue
+                host_guid = new_track_guid()
+                conn.execute(
+                    """
+                    INSERT INTO podcast_episodes (
+                      podcast_id, guid, feed_guid, title, description, pub_date,
+                      duration_sec, enclosure_url, enclosure_type, enclosure_bytes,
+                      local_path, episode_index, season, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?)
+                    """,
+                    (
+                        pid,
+                        host_guid,
+                        feed_guid,
+                        str(raw.get("title") or ""),
+                        str(raw.get("description") or ""),
+                        str(raw.get("pub_date") or ""),
+                        float(raw.get("duration_sec") or 0),
+                        str(raw.get("enclosure_url") or ""),
+                        str(raw.get("enclosure_type") or ""),
+                        int(raw.get("enclosure_bytes") or 0),
+                        int(raw.get("episode_index") or 0),
+                        int(raw.get("season") or 0),
+                        now,
+                        now,
+                    ),
+                )
+                inserted += 1
+            conn.execute(
+                "UPDATE podcasts SET last_fetched_at = ?, updated_at = ? WHERE id = ?",
+                (now, now, pid),
+            )
+        return inserted
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def set_episode_local_path(
+    episode_id: int,
+    local_path: str,
+    *,
+    path: Path | None = None,
+) -> None:
+    now = _utc_now()
+    conn: sqlite3.Connection | None = None
+    try:
+        conn, _ = _open(path)
+        with conn:
+            conn.execute(
+                "UPDATE podcast_episodes SET local_path = ?, updated_at = ? WHERE id = ?",
+                (local_path or "", now, int(episode_id)),
+            )
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def latest_episode(
+    podcast_id: int, *, path: Path | None = None
+) -> PodcastEpisode | None:
+    eps = list_episodes(podcast_id, limit=1, path=path)
+    return eps[0] if eps else None
+
+
+def episode_cache_dir(
+    podcast_id: int, *, data_dir: Path | None = None
+) -> Path:
+    """Directory for downloaded enclosures for one show."""
+    from mtpmanager.infra.app_paths import default_data_dir
+
+    base = data_dir if data_dir is not None else default_data_dir()
+    dest = base / "podcasts" / str(int(podcast_id))
+    dest.mkdir(parents=True, exist_ok=True)
+    return dest

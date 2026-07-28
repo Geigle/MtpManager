@@ -123,6 +123,10 @@ class DeviceTrackRef:
     name: str = ""
     title: str = ""
     artist: str = ""
+    album: str = ""
+    date: str = ""
+    tracknumber: str = ""
+    genre: str = ""
     parent_id: int = 0
     storage_id: int = 0
     filetype: int = 0
@@ -139,3 +143,14 @@ class DeleteAllResult:
     cancelled: bool = False
     # Object ids successfully removed (in order); for device_index cache.
     deleted_ids: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True)
+class DevicePlaylist:
+    """On-device MTP playlist snapshot (ids only; no host paths)."""
+
+    playlist_id: int
+    name: str = ""
+    parent_id: int = 0
+    storage_id: int = 0
+    track_ids: tuple[int, ...] = ()

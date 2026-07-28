@@ -31,6 +31,10 @@ class AppConfig:
     store_tracks_in_album_folder: bool = False
     # When True, Send Video shows broken device presets (e.g. ZEN WMV·WMA).
     show_broken_video_presets: bool = False
+    # When True, the bottom playback bar stays visible even when idle.
+    always_show_playback_controls: bool = False
+    # When True, create ZENcast/<show>/ folders for podcast sends (PyMTP; experimental).
+    store_podcasts_in_show_folders: bool = False
     version: int = CONFIG_VERSION
 
     def normalized_send_format(self) -> str:
@@ -87,6 +91,12 @@ def load_app_config(*, path: Path | None = None) -> AppConfig:
         show_broken_video_presets=_as_bool(
             raw.get("show_broken_video_presets"), False
         ),
+        always_show_playback_controls=_as_bool(
+            raw.get("always_show_playback_controls"), False
+        ),
+        store_podcasts_in_show_folders=_as_bool(
+            raw.get("store_podcasts_in_show_folders"), False
+        ),
         version=int(raw.get("version", CONFIG_VERSION) or CONFIG_VERSION),
     )
     cfg.send_format = cfg.normalized_send_format()
@@ -106,6 +116,12 @@ def save_app_config(config: AppConfig, *, path: Path | None = None) -> Path:
         "store_tracks_in_artist_folder": artist,
         "store_tracks_in_album_folder": album,
         "show_broken_video_presets": bool(config.show_broken_video_presets),
+        "always_show_playback_controls": bool(
+            config.always_show_playback_controls
+        ),
+        "store_podcasts_in_show_folders": bool(
+            config.store_podcasts_in_show_folders
+        ),
     }
     text = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
     tmp = dest.with_suffix(dest.suffix + ".tmp")

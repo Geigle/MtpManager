@@ -9,7 +9,13 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
 from mtpmanager.app.cancellation import CancelCheck
-from mtpmanager.domain.device_media import apply_track_info
+from mtpmanager.domain.device_media import (
+    apply_host_meta,
+    apply_track_info,
+    track_info_looks_placeholder,
+    track_meta_is_usable,
+    track_meta_looks_placeholder,
+)
 from mtpmanager.domain.models import (
     DeleteAllResult,
     DeviceInfo,
@@ -19,7 +25,7 @@ from mtpmanager.domain.models import (
     FolderEntry,
     TrackMetadata,
 )
-from mtpmanager.infra.mutagen_tags import write_metadata
+from mtpmanager.infra.mutagen_tags import read_metadata, write_metadata
 from mtpmanager.infra.remote_naming import (
     DEFAULT_MUSIC_FOLDER_ID,
     DEFAULT_TV_FOLDER_ID,
@@ -87,6 +93,18 @@ def create_folder(
 
 def list_folders(device: DevicePort) -> list[FolderEntry]:
     return device.list_folders()
+
+
+def resolve_folder_layout(device: DevicePort):
+    """List folders and map names → Music / Video / TV / … object ids.
+
+    Firmware and models do not share a stable Music=100 map. Prefer this over
+    hard-coded :data:`~mtpmanager.infra.remote_naming.DEFAULT_MUSIC_FOLDER_ID`.
+    """
+    from mtpmanager.domain.device_folders import resolve_device_folder_layout
+
+    folders = list_folders(device)
+    return resolve_device_folder_layout(folders)
 
 
 def list_files(device: DevicePort) -> list[FileEntry]:
@@ -258,6 +276,218 @@ def track_info_to_metadata(info: DeviceTrackInfo) -> TrackMetadata:
     )
 
 
+def metadata_to_track_info(
+    meta: TrackMetadata,
+    *,
+    item_id: int = 0,
+    name: str = "",
+    parent_id: int = 0,
+    storage_id: int = 0,
+    filetype: int = 0,
+) -> DeviceTrackInfo:
+    """Host tags → DeviceTrackInfo shape (for path helpers that take *info*)."""
+    tn = 0
+    try:
+        raw = str(meta.tracknumber or "").split("/")[0].strip()
+        tn = int(raw) if raw else 0
+    except (TypeError, ValueError):
+        tn = 0
+    duration_ms = 0
+    if meta.length_sec and float(meta.length_sec) > 0:
+        duration_ms = int(float(meta.length_sec) * 1000)
+    return DeviceTrackInfo(
+        item_id=int(item_id or 0),
+        name=name or "",
+        parent_id=int(parent_id or 0),
+        storage_id=int(storage_id or 0),
+        filetype=int(filetype or 0),
+        title=(meta.title or "").strip(),
+        artist=(meta.artist or "").strip(),
+        album=(meta.album or "").strip(),
+        genre=(meta.genre or "").strip(),
+        composer=(meta.composer or "").strip(),
+        date=(meta.date or "").strip(),
+        tracknumber=tn,
+        duration_ms=duration_ms,
+        sample_rate=int(meta.sample_rate or 0),
+        channels=int(meta.channels or 0),
+        bitrate=int(meta.bitrate or 0),
+        bitrate_type=int(meta.bitrate_mode or 0),
+    )
+
+
+@dataclass(frozen=True)
+class EmbeddedMetaProbeResult:
+    """Outcome of downloading a device object to read embedded file tags."""
+
+    meta: TrackMetadata | None = None
+    path: str | None = None  # temp (or kept) download path
+    usable: bool = False
+    error: str = ""
+
+
+def _temp_download_path_for_ref(ref: DeviceTrackRef) -> str:
+    """Build a unique temp path preserving the remote extension."""
+    import tempfile
+
+    raw_name = (ref.name or "").strip() or f"track_{ref.item_id}"
+    _, ext = os.path.splitext(raw_name)
+    if not ext:
+        ext = ".mp3"
+    if len(ext) > 8:
+        ext = ".bin"
+    fd, path = tempfile.mkstemp(
+        prefix=f"mtpmanager_meta_{int(ref.item_id or 0)}_",
+        suffix=ext.lower(),
+    )
+    os.close(fd)
+    return path
+
+
+def probe_embedded_metadata(
+    device: DevicePort,
+    ref: DeviceTrackRef,
+    *,
+    keep_file: bool = False,
+) -> EmbeddedMetaProbeResult:
+    """Download *ref* to a temp file and read tags with mutagen.
+
+    Used when on-device LIBMTP track metadata is empty/placeholder (typical when
+    someone treated an MTP-only player like mass storage). The temp file is
+    deleted unless *keep_file* is True (caller owns cleanup / move).
+    """
+    oid = int(ref.item_id or 0)
+    if oid <= 0:
+        return EmbeddedMetaProbeResult(error="invalid object id")
+
+    getter = getattr(device, "get_file_to_file", None)
+    if getter is None:
+        return EmbeddedMetaProbeResult(
+            error="Device adapter does not support get_file_to_file"
+        )
+
+    dest = _temp_download_path_for_ref(ref)
+    try:
+        logger.info(
+            "probe_embedded_metadata download id=%s name=%r → %s",
+            oid,
+            ref.name,
+            dest,
+        )
+        getter(oid, dest)
+        meta = read_metadata(dest)
+        usable = track_meta_is_usable(meta) and not track_meta_looks_placeholder(
+            meta
+        )
+        # Stricter: reject if both title and artist are still placeholders.
+        if track_meta_looks_placeholder(meta):
+            usable = False
+        logger.info(
+            "probe_embedded_metadata id=%s usable=%s title=%r artist=%r",
+            oid,
+            usable,
+            (meta.title if meta else ""),
+            (meta.artist if meta else ""),
+        )
+        if keep_file:
+            return EmbeddedMetaProbeResult(
+                meta=meta if usable else None,
+                path=dest,
+                usable=usable,
+            )
+        # Always expose meta when usable; drop file.
+        try:
+            os.remove(dest)
+        except OSError:
+            pass
+        return EmbeddedMetaProbeResult(
+            meta=meta if usable else None,
+            path=None,
+            usable=usable,
+        )
+    except TransportError as exc:
+        try:
+            if os.path.isfile(dest) and not keep_file:
+                os.remove(dest)
+        except OSError:
+            pass
+        if keep_file and os.path.isfile(dest):
+            return EmbeddedMetaProbeResult(
+                path=dest, usable=False, error=str(exc)
+            )
+        return EmbeddedMetaProbeResult(error=str(exc))
+    except Exception as exc:
+        logger.exception("probe_embedded_metadata failed id=%s", oid)
+        try:
+            if os.path.isfile(dest) and not keep_file:
+                os.remove(dest)
+        except OSError:
+            pass
+        return EmbeddedMetaProbeResult(error=str(exc))
+
+
+def resolve_tags_with_embedded_fallback(
+    device: DevicePort,
+    ref: DeviceTrackRef,
+    *,
+    info: DeviceTrackInfo | None = None,
+    prefer_embedded_when_placeholder: bool = True,
+    keep_download: bool = False,
+) -> tuple[DeviceTrackInfo | None, TrackMetadata | None, str | None]:
+    """Pick the best tags for *ref*: device info, else embedded file tags.
+
+    Returns ``(info, file_meta, download_path)``:
+    - *info*: device Get_Trackmetadata (possibly None)
+    - *file_meta*: usable embedded tags when recovered (else None)
+    - *download_path*: temp path when *keep_download* and a download was done
+
+    When device tags look like placeholders and *prefer_embedded_when_placeholder*
+    is True, downloads once and reads the file with mutagen.
+    """
+    meta_info = info
+    if meta_info is None:
+        try:
+            meta_info = device.get_track_metadata(int(ref.item_id or 0))
+        except TransportError as exc:
+            if exc.fatal:
+                raise
+            logger.debug(
+                "resolve_tags: no track metadata id=%s (%s)",
+                ref.item_id,
+                exc,
+            )
+            meta_info = None
+        except Exception:
+            logger.debug(
+                "resolve_tags: track metadata failed id=%s",
+                ref.item_id,
+                exc_info=True,
+            )
+            meta_info = None
+
+    if not prefer_embedded_when_placeholder:
+        return meta_info, None, None
+    if meta_info is not None and not track_info_looks_placeholder(meta_info):
+        return meta_info, None, None
+
+    probe = probe_embedded_metadata(device, ref, keep_file=keep_download)
+    if not probe.usable or probe.meta is None:
+        if keep_download and probe.path:
+            return meta_info, None, probe.path
+        return meta_info, None, None
+
+    # Synthesize DeviceTrackInfo so path helpers see recovered tags.
+    recovered = metadata_to_track_info(
+        probe.meta,
+        item_id=int(ref.item_id or 0),
+        name=(ref.name or "").strip(),
+        parent_id=int(ref.parent_id or 0),
+        storage_id=int(ref.storage_id or 0),
+        filetype=int(ref.filetype or 0),
+    )
+    return recovered, probe.meta, probe.path if keep_download else None
+
+
 def suggested_retrieve_basename(
     ref: DeviceTrackRef,
     *,
@@ -308,6 +538,85 @@ def unique_dest_path(dest_dir: str, basename: str) -> str:
         n += 1
 
 
+def _host_safe_folder(value: str, *, fallback: str, max_len: int = 80) -> str:
+    """Sanitize a single path component for host filesystem use."""
+    body = _UNSAFE_HOST.sub(" ", (value or "").strip())
+    body = sanitize_component(body, max_len)
+    return body or fallback
+
+
+def suggested_library_relpath(
+    ref: DeviceTrackRef,
+    *,
+    info: DeviceTrackInfo | None = None,
+    file_meta: TrackMetadata | None = None,
+) -> str:
+    """Relative ``Artist/Album/Title.ext`` path under a library root.
+
+    Used when pulling an un-indexed (non-GUID ObjectFileName) object into the
+    host library. Tag priority: *file_meta* (embedded) → *info* (device) → ref.
+    """
+    raw_name = (ref.name or "").strip() or (info.name if info else "") or "track"
+    _, ext = os.path.splitext(raw_name)
+    if not ext:
+        ext = ".mp3"
+    ext = ext if ext.startswith(".") else f".{ext}"
+    if len(ext) > 8:
+        ext = ".bin"
+
+    title = ""
+    artist = ""
+    album = ""
+    if file_meta is not None and track_meta_is_usable(file_meta):
+        title = (file_meta.title or "").strip()
+        artist = (file_meta.artist or file_meta.albumartist or "").strip()
+        album = (file_meta.album or "").strip()
+    if info is not None:
+        if not title:
+            title = (info.title or "").strip()
+        if not artist:
+            artist = (info.artist or "").strip()
+        if not album:
+            album = (info.album or "").strip()
+    if not title:
+        title = (ref.title or "").strip()
+    if not artist:
+        artist = (ref.artist or "").strip()
+    if not album:
+        album = (ref.album or "").strip()
+
+    if not title or title.casefold() in ("unknown title",):
+        title = os.path.splitext(raw_name)[0] or f"track_{ref.item_id}"
+    if not artist or artist in ("—",):
+        artist = "Unknown Artist"
+    if not album or album in ("—",):
+        album = "Unknown Album"
+
+    artist_d = _host_safe_folder(artist, fallback="Unknown Artist")
+    album_d = _host_safe_folder(album, fallback="Unknown Album")
+    stem = _host_safe_folder(title, fallback=f"track_{ref.item_id}")
+    return os.path.join(artist_d, album_d, f"{stem}{ext.lower()}")
+
+
+def pick_library_root(root_paths: Sequence[str]) -> str | None:
+    """Choose a writable-looking library root for device pulls.
+
+    Prefers the first normalized absolute root that exists (or its parent
+    chain is creatable). Returns ``None`` when no roots are configured.
+    """
+    for raw in root_paths or ():
+        root = os.path.abspath(os.path.expanduser(str(raw or "").strip()))
+        if not root:
+            continue
+        if os.path.isdir(root):
+            return root
+        # Allow not-yet-created leaf when parent exists.
+        parent = os.path.dirname(root)
+        if parent and os.path.isdir(parent):
+            return root
+    return None
+
+
 def retrieve_track(
     device: DevicePort,
     ref: DeviceTrackRef,
@@ -315,11 +624,16 @@ def retrieve_track(
     *,
     info: DeviceTrackInfo | None = None,
     write_tags: bool = True,
+    dest_path: str | None = None,
 ) -> RetrievedItem:
     """Download one track/media object to *dest_dir*; optionally write tags.
 
     Uses ``get_file_to_file`` (works for audio and video). Tries track
     metadata when *info* is not provided. Returns a :class:`RetrievedItem`.
+
+    When *dest_path* is set, download directly to that absolute path (parents
+    created as needed); otherwise uses :func:`suggested_retrieve_basename`
+    under *dest_dir*.
     """
     oid = int(ref.item_id or 0)
     if oid <= 0:
@@ -342,8 +656,17 @@ def retrieve_track(
             )
             meta_info = None
 
-    basename = suggested_retrieve_basename(ref, info=meta_info)
-    dest = unique_dest_path(dest_dir, basename)
+    if dest_path:
+        dest = os.path.abspath(dest_path)
+        os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
+        if os.path.exists(dest):
+            # Preserve uniqueness under the same parent.
+            dest = unique_dest_path(
+                os.path.dirname(dest), os.path.basename(dest)
+            )
+    else:
+        basename = suggested_retrieve_basename(ref, info=meta_info)
+        dest = unique_dest_path(dest_dir, basename)
     logger.info(
         "retrieve_track id=%s name=%r → %s", oid, ref.name, dest
     )
@@ -674,6 +997,7 @@ def send_test_file(device: DevicePort, path: str) -> None:
 
 
 # Ad-hoc video send destinations (Device → Send Video…).
+# Legacy hard-coded pair — prefer :class:`~mtpmanager.domain.device_folders.DeviceFolderLayout.video_parent_ids`.
 VIDEO_PARENT_CHOICES: frozenset[int] = frozenset(
     {DEFAULT_VIDEO_FOLDER_ID, DEFAULT_TV_FOLDER_ID}
 )
@@ -705,19 +1029,33 @@ def send_video(
     parent_id: int,
     title: str | None = None,
     preferred_basename: str | None = None,
+    guid: str | None = None,
+    allowed_parents: frozenset[int] | None = None,
 ) -> SendVideoResult:
-    """Send a local video file under Video (120) or TV (124).
+    """Send a local video file under the device Video or TV folder.
 
     Uses the normal track-send path (``LIBMTP_Send_Track_From_File``) so
-    storage_id, filetype, and parent match the ZEN contract — same approach
-    as retail video restore. ObjectFileName is the sanitized host basename
-    (no library GUID).
+    storage_id, filetype, and parent match the device contract — same approach
+    as retail video restore.
+
+    *parent_id* must be a positive folder object id. When *allowed_parents* is
+    set (from a live :class:`~mtpmanager.domain.device_folders.DeviceFolderLayout`),
+    the parent must be in that set. Otherwise any positive id is accepted so
+    firmware-specific Video/TV ids (not only 120/124) work.
+
+    ObjectFileName is always title/basename style (sanitized host stem +
+    extension), never a library GUID. *guid* is accepted for API compatibility
+    and logging only — callers should still record it in the durable device
+    index after a successful send for skip-if-present / future joins.
     """
     parent = int(parent_id)
-    if parent not in VIDEO_PARENT_CHOICES:
+    if parent <= 0:
+        raise ValueError(f"parent_id must be a positive folder object id, got {parent}")
+    allowed = allowed_parents if allowed_parents is not None else None
+    if allowed is not None and parent not in allowed:
         raise ValueError(
-            f"parent_id must be Video ({DEFAULT_VIDEO_FOLDER_ID}) or "
-            f"TV ({DEFAULT_TV_FOLDER_ID}), got {parent}"
+            f"parent_id {parent} is not a known Video/TV folder "
+            f"(allowed: {sorted(allowed)})"
         )
     if not path or not os.path.isfile(path):
         raise FileNotFoundError(f"Video file not found: {path!r}")
@@ -737,18 +1075,22 @@ def send_video(
         album="Unknown Album",
         tracknumber="01",
     )
+    # Never wire GUID into ObjectFileName for video — title/basename only.
+    _ = guid  # retained for callers / record_send; not used on the wire
     remote = build_remote_path(
         meta,
         ext,
         music_folder_id=parent,
+        guid=None,
         preferred_basename=base,
     )
     _, remote_base = split_remote_path(remote)
     logger.info(
-        "send_video path=%s parent=%s remote=%s",
+        "send_video path=%s parent=%s remote=%s title=%s",
         path,
         parent,
         remote_base,
+        display_title,
     )
     object_id = transport.send_track(
         path,
@@ -777,6 +1119,9 @@ def prepare_and_send_video(
     ignore_max_fps: bool = False,
     on_progress: SendVideoProgress | None = None,
     title: str | None = None,
+    preferred_basename: str | None = None,
+    guid: str | None = None,
+    allowed_parents: frozenset[int] | None = None,
 ) -> SendVideoResult:
     """Optional device-profile encode, then :func:`send_video`.
 
@@ -786,6 +1131,11 @@ def prepare_and_send_video(
 
     *ignore_max_fps*: when encoding, skip the profile's max_fps cap (keep
     source rate above the device limit — experimental).
+
+    ObjectFileName is title/basename style. *guid* is not used for the wire
+    name (see :func:`send_video`); callers record it in the host device index.
+    *preferred_basename* overrides the host filename when set (extension may
+    still follow the encode container).
     """
     from mtpmanager.domain.device_profile import VideoEncodePreset
     from mtpmanager.infra.ffmpeg_video import (
@@ -853,11 +1203,23 @@ def prepare_and_send_video(
                 encoded = True
                 _emit("progress", 85, 100, "encode complete — sending…")
 
-        # ObjectFileName: keep host stem; use encoded extension when converted.
-        if encoded and profile is not None:
+        # ObjectFileName: title/host basename (never library GUID).
+        # Encoded sends keep the chosen stem but use the profile container.
+        if preferred_basename and preferred_basename.strip():
+            pref_stem, pref_ext = os.path.splitext(preferred_basename.strip())
+            stem = pref_stem or source_stem
+            if encoded and profile is not None:
+                pref = f"{stem}.{profile.container.lstrip('.')}"
+            elif pref_ext:
+                pref = f"{stem}{pref_ext}"
+            else:
+                pref = preferred_basename.strip()
+        elif encoded and profile is not None:
             pref = f"{source_stem}.{profile.container.lstrip('.')}"
         else:
             pref = os.path.basename(src)
+
+        display_title = (title or source_stem).strip() or source_stem
 
         _emit("phase", "send")
         _emit("status", "sending to device…")
@@ -867,8 +1229,10 @@ def prepare_and_send_video(
             transport,
             send_path,
             parent_id=parent_id,
-            title=title or source_stem,
+            title=display_title,
             preferred_basename=pref,
+            guid=guid,
+            allowed_parents=allowed_parents,
         )
         _emit("progress", 100, 100, "done")
         return SendVideoResult(

@@ -17,11 +17,15 @@ import hashlib
 import logging
 import re
 import sqlite3
-from collections.abc import Iterable, Sequence
+from collections.abc import Collection, Iterable, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 
-from mtpmanager.domain.device_media import track_refs_from_files
+from mtpmanager.domain.device_media import (
+    music_refs_from_files,
+    track_refs_from_files,
+    video_refs_from_files,
+)
 from mtpmanager.domain.models import DeviceInfo, DeviceTrackRef, FileEntry
 from mtpmanager.domain.track_id import guid_from_remote_name, is_track_guid
 from mtpmanager.infra.library_index import index_path
@@ -400,6 +404,32 @@ def replace_device_listing(
     conn, _ = _open(path)
     try:
         with conn:
+            # Keep host-assigned GUIDs for title-named objects (e.g. video)
+            # across a full list_files replace — wire names are not GUID stems.
+            prev_by_id: dict[int, str] = {}
+            prev_by_name: dict[str, str] = {}
+            try:
+                prev_rows = conn.execute(
+                    "SELECT item_id, name, guid FROM device_files "
+                    "WHERE serial = ? AND guid IS NOT NULL AND guid != ''",
+                    (key,),
+                ).fetchall()
+                for r in prev_rows:
+                    g = str(r["guid"] or "")
+                    if not is_track_guid(g):
+                        continue
+                    oid = int(r["item_id"] or 0)
+                    if oid > 0:
+                        prev_by_id[oid] = g
+                    n = (r["name"] or "").strip()
+                    if n:
+                        prev_by_name[n.casefold()] = g
+            except Exception:
+                logger.debug(
+                    "device_index: could not load prior guids for merge",
+                    exc_info=True,
+                )
+
             conn.execute(
                 """
                 INSERT INTO devices (serial, name, manufacturer, model, last_listed_at, list_complete)
@@ -420,6 +450,10 @@ def replace_device_listing(
                 if oid <= 0:
                     oid = synthetic_item_id(name, int(e.parent_id or 0))
                 guid = guid_from_remote_name(name)
+                if not guid:
+                    guid = prev_by_id.get(oid) or prev_by_name.get(
+                        name.casefold()
+                    )
                 conn.execute(
                     """
                     INSERT INTO device_files (
@@ -622,6 +656,69 @@ def guid_stems_on_device(
         conn.close()
 
 
+def item_ids_for_guids(
+    serial: str,
+    guids: Collection[str] | Iterable[str],
+    *,
+    path: Path | None = None,
+) -> dict[str, int]:
+    """Map host track GUIDs → real MTP object ids on *serial*.
+
+    Only returns positive ``item_id`` values (synthetic/negative send stubs are
+    omitted — those cannot be used as playlist members). When multiple rows
+    exist for one GUID, prefer ``source='list'`` over ``send``, then the
+    largest item_id.
+    """
+    clean = [g for g in guids if is_track_guid(g)]
+    if not clean:
+        return {}
+    key = device_serial_key(serial=serial)
+    conn, _ = _open(path)
+    try:
+        # Fetch all candidate rows for this serial with real handles + guids.
+        rows = conn.execute(
+            "SELECT guid, item_id, source FROM device_files "
+            "WHERE serial = ? AND item_id > 0 "
+            "AND guid IS NOT NULL AND guid != ''",
+            (key,),
+        ).fetchall()
+        want = set(clean)
+        best: dict[str, tuple[int, int]] = {}  # guid → (rank, item_id)
+        for r in rows:
+            g = str(r["guid"] or "")
+            if g not in want or not is_track_guid(g):
+                continue
+            oid = int(r["item_id"] or 0)
+            if oid <= 0:
+                continue
+            src = str(r["source"] or "")
+            # Higher rank wins: list > send > other; then larger item_id.
+            rank = 2 if src == "list" else (1 if src == "send" else 0)
+            prev = best.get(g)
+            if prev is None or (rank, oid) > prev:
+                best[g] = (rank, oid)
+        return {g: oid for g, (_rank, oid) in best.items()}
+    except sqlite3.Error as e:
+        logger.warning("item_ids_for_guids failed: %s", e)
+        return {}
+    finally:
+        conn.close()
+
+
+def item_id_for_guid(
+    serial: str,
+    guid: str,
+    *,
+    path: Path | None = None,
+) -> int | None:
+    """Return a real MTP object id for *guid*, or None."""
+    if not is_track_guid(guid):
+        return None
+    hit = item_ids_for_guids(serial, [guid], path=path)
+    oid = hit.get(guid)
+    return int(oid) if oid and int(oid) > 0 else None
+
+
 def list_cached_files(
     serial: str,
     *,
@@ -659,6 +756,24 @@ def list_cached_track_refs(
 ) -> list[DeviceTrackRef]:
     """Media-filtered track refs from cached files."""
     return track_refs_from_files(list_cached_files(serial, path=path))
+
+
+def list_cached_music_refs(
+    serial: str,
+    *,
+    path: Path | None = None,
+) -> list[DeviceTrackRef]:
+    """Audio-only track refs from cache (Device tab → Music)."""
+    return music_refs_from_files(list_cached_files(serial, path=path))
+
+
+def list_cached_video_refs(
+    serial: str,
+    *,
+    path: Path | None = None,
+) -> list[DeviceTrackRef]:
+    """Video-only track refs from cache (Device tab → Video)."""
+    return video_refs_from_files(list_cached_files(serial, path=path))
 
 
 def device_list_is_complete(

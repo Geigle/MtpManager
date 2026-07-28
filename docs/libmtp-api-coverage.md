@@ -72,10 +72,10 @@ Callable on `pymtp.MTP`; no finished MtpManager feature (or only stub):
 | `get_file_to_file` | `LIBMTP_Get_File_To_File` | Download file → host |
 | `get_filetype_description` | `LIBMTP_Get_Filetype_Description` | Debug labels |
 | `get_parent_folders` | Folder-list walk | Top-level folders only |
-| `get_playlists` | `LIBMTP_Get_Playlist_List` | Playlist UI |
-| `get_playlist` | `LIBMTP_Get_Playlist` | Playlist detail |
-| `create_new_playlist` | `LIBMTP_Create_New_Playlist` | Create playlist (high binding risk) |
-| `update_playlist` | `LIBMTP_Update_Playlist` | Edit playlist tracks |
+| ~~`get_playlists`~~ | `LIBMTP_Get_Playlist_List` | **Used + patched** — Playlists tab sync phase 2 |
+| ~~`get_playlist`~~ | `LIBMTP_Get_Playlist` | **Used + patched** (snapshot + destroy) |
+| ~~`create_new_playlist`~~ | `LIBMTP_Create_New_Playlist` | **Used + patched** — host → device playlist push |
+| ~~`update_playlist`~~ | `LIBMTP_Update_Playlist` | **Used + patched** — replace track id array |
 | `get_errorstack` | `LIBMTP_Get_Errorstack` | Stock method is wrong; app uses adapter ctypes path instead |
 
 **Hazard note:** Opening any of these requires a pass through [pymtp-binding-hazards.md](./pymtp-binding-hazards.md) (argtypes, UTF-8 `char*`, no `has_key`, real errorstack).
@@ -168,7 +168,7 @@ Not every libmtp symbol matters. For this app’s goals, the meaningful “not d
 1. ~~**Delete all / batch delete**~~ — **done:** Device → Delete All Tracks (track listing + confirmed batch `delete_object`, fatal abort); single Delete Track remains  
 2. **Download** track/file to host — `Get_*_To_File`  
 3. ~~**Full file listing**~~ — **partial:** Device → List Files (experimental) uses patched `get_filelisting`; hierarchical browser / `Get_Files_And_Folders` still open  
-4. **Playlists** — list / create / update (pymtp exists; unpatched; unused)  
+4. ~~**Playlists** — list / create / update~~ — **done:** patched bindings + Sync playlist → device publishes MTP playlist after track transfer (Experimental)
 5. **Device albums** — create / update / list (libmtp only; watch CMD album hang class)  
 6. **Rename** folder / file / track — `Set_*_Name` / `Set_Object_Filename`  
 7. **Move / copy** objects  
@@ -212,7 +212,7 @@ Not every libmtp symbol matters. For this app’s goals, the meaningful “not d
 | `create_folder` | Replaced |
 | `set_devicename` | Replaced |
 | `send_file_from_file` | Partial (argtypes only; method body stock) |
-| Playlist APIs | Untouched |
+| Playlist APIs | Replaced (`get_playlists` / `get_playlist` / `create_new_playlist` / `update_playlist`) |
 | Download to file | Untouched |
 | `delete_object` | Replaced (argtypes + device ptr); batch Delete All uses it |
 | `get_file_metadata` | Replaced (+ listing fallback in UI) |

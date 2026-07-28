@@ -30,14 +30,14 @@ from mtpmanager.domain.track_id import (
 MAX_REMOTE_BASENAME = 56
 
 # ---------------------------------------------------------------------------
-# Creative ZEN Vision:M top-level folder IDs
+# Creative ZEN Vision:M top-level folder IDs — LEGACY FALLBACK MAP ONLY
 # ---------------------------------------------------------------------------
-# Captured via Device → List Folders (PyMTP / LIBMTP_Get_Folder_List) on a
-# real Vision:M. Same layout as historical mtp-folders output. These are
-# *object IDs*, not path strings — never invent "Music/Artist/Album".
-#
-# Track send targets MUSIC (100). Video send (Device → Send Video) targets
-# VIDEO (120) or TV (124) via parent_id. Other IDs are reference only.
+# One historical capture (Music=100). Other firmware builds renumber the same
+# names (e.g. Music=88, Video=108, TV=112). Prefer
+# ``domain.device_folders.resolve_device_folder_layout`` from a live
+# List Folders result. These constants remain for offline/tests when no
+# listing is available. Object IDs are not path strings — never invent
+# "Music/Artist/Album".
 # ---------------------------------------------------------------------------
 ZEN_VISION_M_FOLDER_IDS: MappingProxyType[int, str] = MappingProxyType(
     {
@@ -53,24 +53,28 @@ ZEN_VISION_M_FOLDER_IDS: MappingProxyType[int, str] = MappingProxyType(
     }
 )
 
-# Reverse lookup by casefold name → id (for reference / future discovery).
+# Reverse lookup by casefold name → id (legacy map only).
 ZEN_VISION_M_FOLDER_NAMES: MappingProxyType[str, int] = MappingProxyType(
     {name.casefold(): folder_id for folder_id, name in ZEN_VISION_M_FOLDER_IDS.items()}
 )
 
-# Device layout: folder 100 == "Music".
+# Fallback Music parent when live folder discovery is unavailable.
 # mtp-sendtr accepts a numeric parent as the dirname of the remote path.
 DEFAULT_MUSIC_FOLDER_ID = 100
 assert DEFAULT_MUSIC_FOLDER_ID in ZEN_VISION_M_FOLDER_IDS
 assert ZEN_VISION_M_FOLDER_IDS[DEFAULT_MUSIC_FOLDER_ID] == "Music"
 
-# Device → Send Video… destination folders (ZEN Vision:M top-level IDs).
+# Fallback Send Video destinations (legacy map only).
 DEFAULT_VIDEO_FOLDER_ID = 120
 DEFAULT_TV_FOLDER_ID = 124
+# Legacy My Playlists parent (firmware may differ — prefer folder-name discovery).
+DEFAULT_PLAYLIST_FOLDER_ID = 104
 assert DEFAULT_VIDEO_FOLDER_ID in ZEN_VISION_M_FOLDER_IDS
 assert ZEN_VISION_M_FOLDER_IDS[DEFAULT_VIDEO_FOLDER_ID] == "Video"
 assert DEFAULT_TV_FOLDER_ID in ZEN_VISION_M_FOLDER_IDS
 assert ZEN_VISION_M_FOLDER_IDS[DEFAULT_TV_FOLDER_ID] == "TV"
+assert DEFAULT_PLAYLIST_FOLDER_ID in ZEN_VISION_M_FOLDER_IDS
+assert ZEN_VISION_M_FOLDER_IDS[DEFAULT_PLAYLIST_FOLDER_ID] == "My Playlists"
 
 # Storage Media on the ZEN Vision:M (mtp-detect: StorageID 0x00010001).
 # storage_id 0 makes get_suggested_storage_id fail after the bulk transfer.

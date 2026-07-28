@@ -238,6 +238,34 @@ def _configure_libmtp_ctypes() -> None:
         ]
         lib.LIBMTP_Get_Track_To_File.restype = ctypes.c_int
 
+    # Playlists — stock pymtp leaves these untyped (name char*, track array).
+    playlist_p = ctypes.POINTER(_pymtp.LIBMTP_Playlist)
+    if hasattr(lib, "LIBMTP_Get_Playlist_List"):
+        lib.LIBMTP_Get_Playlist_List.argtypes = [dev_p]
+        lib.LIBMTP_Get_Playlist_List.restype = playlist_p
+    if hasattr(lib, "LIBMTP_Get_Playlist"):
+        lib.LIBMTP_Get_Playlist.argtypes = [dev_p, ctypes.c_uint32]
+        lib.LIBMTP_Get_Playlist.restype = playlist_p
+    if hasattr(lib, "LIBMTP_Create_New_Playlist"):
+        lib.LIBMTP_Create_New_Playlist.argtypes = [dev_p, playlist_p]
+        lib.LIBMTP_Create_New_Playlist.restype = ctypes.c_int
+    if hasattr(lib, "LIBMTP_Update_Playlist"):
+        lib.LIBMTP_Update_Playlist.argtypes = [dev_p, playlist_p]
+        lib.LIBMTP_Update_Playlist.restype = ctypes.c_int
+    if hasattr(lib, "LIBMTP_Set_Playlist_Name"):
+        lib.LIBMTP_Set_Playlist_Name.argtypes = [
+            dev_p,
+            playlist_p,
+            ctypes.c_char_p,
+        ]
+        lib.LIBMTP_Set_Playlist_Name.restype = ctypes.c_int
+    if hasattr(lib, "LIBMTP_destroy_playlist_t"):
+        lib.LIBMTP_destroy_playlist_t.argtypes = [playlist_p]
+        lib.LIBMTP_destroy_playlist_t.restype = None
+    if hasattr(lib, "LIBMTP_new_playlist_t"):
+        lib.LIBMTP_new_playlist_t.argtypes = []
+        lib.LIBMTP_new_playlist_t.restype = playlist_p
+
 
 _configure_libmtp_ctypes()
 
@@ -773,6 +801,235 @@ def _get_track_to_file(self, track_id, target, callback=None):
     _get_object_to_file(self, "LIBMTP_Get_Track_To_File", track_id, target, callback)
 
 
+def _snapshot_playlist(node) -> types.SimpleNamespace:
+    """Copy playlist fields + track id array into a plain Python object."""
+    track_ids: list[int] = []
+    try:
+        n = int(getattr(node, "no_tracks", 0) or 0)
+        tracks_ptr = getattr(node, "tracks", None)
+        if n > 0 and tracks_ptr:
+            for i in range(n):
+                try:
+                    track_ids.append(int(tracks_ptr[i]))
+                except (ValueError, TypeError, IndexError):
+                    break
+    except Exception:
+        track_ids = []
+    return types.SimpleNamespace(
+        playlist_id=int(getattr(node, "playlist_id", 0) or 0),
+        parent_id=int(getattr(node, "parent_id", 0) or 0),
+        storage_id=int(getattr(node, "storage_id", 0) or 0),
+        name=_c_str_field(getattr(node, "name", None)),
+        tracks=tuple(track_ids),
+        no_tracks=len(track_ids),
+    )
+
+
+def _get_playlists(self):
+    """List device playlists as Python snapshots (NULL-safe walk + destroy).
+
+    Stock walks the list without freeing nodes and leaves ``tracks`` as a
+    live C pointer that is unsafe after destroy. We snapshot name + track ids.
+    """
+    if self.device is None:
+        raise NotConnected
+
+    dev = _device_ptr(self.device)
+    if not dev:
+        raise NotConnected
+
+    head = self.mtp.LIBMTP_Get_Playlist_List(dev)
+    if not _ptr_truthy(head):
+        return []
+
+    out: list[types.SimpleNamespace] = []
+    destroy = getattr(self.mtp, "LIBMTP_destroy_playlist_t", None)
+    cur = head
+    walked = 0
+    while _ptr_truthy(cur) and walked < 100_000:
+        walked += 1
+        try:
+            node = cur.contents
+        except (ValueError, TypeError):
+            break
+        try:
+            nxt = getattr(node, "next", None)
+        except Exception:
+            nxt = None
+        try:
+            out.append(_snapshot_playlist(node))
+        except Exception:
+            logging.getLogger(__name__).debug(
+                "playlist snapshot failed", exc_info=True
+            )
+        if destroy is not None:
+            try:
+                destroy(cur)
+            except Exception:
+                pass
+        if not _ptr_truthy(nxt):
+            break
+        cur = nxt
+    logging.getLogger(__name__).info(
+        "get_playlists walk complete count=%s", len(out)
+    )
+    return out
+
+
+def _get_playlist(self, playlist_id):
+    """Return one playlist snapshot by id (destroy C object after copy)."""
+    if self.device is None:
+        raise NotConnected
+
+    dev = _device_ptr(self.device)
+    if not dev:
+        raise NotConnected
+
+    ret = self.mtp.LIBMTP_Get_Playlist(dev, ctypes.c_uint32(int(playlist_id)))
+    if not _ptr_truthy(ret):
+        _debug_stack(self)
+        raise ObjectNotFound
+    destroy = getattr(self.mtp, "LIBMTP_destroy_playlist_t", None)
+    try:
+        try:
+            node = ret.contents
+        except (ValueError, TypeError) as exc:
+            _debug_stack(self)
+            raise ObjectNotFound from exc
+        return _snapshot_playlist(node)
+    finally:
+        if destroy is not None:
+            try:
+                destroy(ret)
+            except Exception:
+                pass
+
+
+def _fill_playlist_struct(
+    pl,
+    *,
+    name: str,
+    track_ids: list[int],
+    parent_id: int,
+    storage_id: int,
+    playlist_id: int = 0,
+) -> tuple[ctypes.Array | None, ctypes.Array]:
+    """Populate a LIBMTP_Playlist; return (tracks_array, name_buf) keep-alives."""
+    name_b = _as_c_char_p(name)
+    if not name_b:
+        raise ValueError("Playlist name must be non-empty")
+    name_buf = ctypes.create_string_buffer(name_b)
+    clean_ids = [int(x) for x in track_ids if int(x) > 0]
+    n = len(clean_ids)
+    tracks_arr = None
+    if n > 0:
+        tracks_arr = (ctypes.c_uint32 * n)(*clean_ids)
+        pl.tracks = ctypes.cast(tracks_arr, ctypes.POINTER(ctypes.c_uint32))
+        pl.no_tracks = ctypes.c_uint32(n)
+    else:
+        pl.tracks = None
+        pl.no_tracks = ctypes.c_uint32(0)
+    pl.playlist_id = ctypes.c_uint32(int(playlist_id))
+    pl.parent_id = ctypes.c_uint32(int(parent_id))
+    pl.storage_id = ctypes.c_uint32(int(storage_id))
+    pl.name = ctypes.cast(name_buf, ctypes.c_char_p)
+    pl.next = None
+    return tracks_arr, name_buf
+
+
+def _create_new_playlist(
+    self,
+    name,
+    track_ids=None,
+    parent_id=0,
+    storage_id=0,
+):
+    """Create a device playlist with UTF-8 name + typed track id array.
+
+    Stock passes the raw device struct and relies on broken list-like helpers
+    for the tracks pointer. Returns the new playlist object id.
+    """
+    if self.device is None:
+        raise NotConnected
+
+    dev = _device_ptr(self.device)
+    if not dev:
+        raise NotConnected
+
+    ids = list(track_ids or [])
+    pl = _pymtp.LIBMTP_Playlist()
+    tracks_arr, name_buf = _fill_playlist_struct(
+        pl,
+        name=name,
+        track_ids=ids,
+        parent_id=int(parent_id),
+        storage_id=int(storage_id),
+        playlist_id=0,
+    )
+    ret = self.mtp.LIBMTP_Create_New_Playlist(dev, ctypes.byref(pl))
+    # Keep buffers alive through the C call.
+    _ = (tracks_arr, name_buf)
+    if int(ret) != 0:
+        _debug_stack(self)
+        raise CommandFailed
+    new_id = int(getattr(pl, "playlist_id", 0) or 0)
+    if new_id <= 0:
+        _debug_stack(self)
+        raise CommandFailed
+    logging.getLogger(__name__).info(
+        "create_new_playlist id=%s name=%r tracks=%d parent=%s",
+        new_id,
+        name,
+        len([x for x in ids if int(x) > 0]),
+        parent_id,
+    )
+    return new_id
+
+
+def _update_playlist(
+    self,
+    playlist_id,
+    name,
+    track_ids=None,
+    parent_id=0,
+    storage_id=0,
+):
+    """Replace an existing playlist's name and track list (typed bindings)."""
+    if self.device is None:
+        raise NotConnected
+
+    dev = _device_ptr(self.device)
+    if not dev:
+        raise NotConnected
+
+    oid = int(playlist_id)
+    if oid <= 0:
+        raise ValueError(f"Invalid playlist id: {playlist_id}")
+
+    ids = list(track_ids or [])
+    pl = _pymtp.LIBMTP_Playlist()
+    tracks_arr, name_buf = _fill_playlist_struct(
+        pl,
+        name=name,
+        track_ids=ids,
+        parent_id=int(parent_id),
+        storage_id=int(storage_id),
+        playlist_id=oid,
+    )
+    ret = self.mtp.LIBMTP_Update_Playlist(dev, ctypes.byref(pl))
+    _ = (tracks_arr, name_buf)
+    if int(ret) != 0:
+        _debug_stack(self)
+        raise CommandFailed
+    logging.getLogger(__name__).info(
+        "update_playlist id=%s name=%r tracks=%d",
+        oid,
+        name,
+        len([x for x in ids if int(x) > 0]),
+    )
+    return oid
+
+
 # Monkey-patch stock methods so all callers get the fixed behavior.
 _MTP.debug_stack = _debug_stack
 _MTP.send_track_from_file = _send_track_from_file
@@ -787,3 +1044,7 @@ _MTP.get_file_metadata = _get_file_metadata
 _MTP.get_track_metadata = _get_track_metadata
 _MTP.get_file_to_file = _get_file_to_file
 _MTP.get_track_to_file = _get_track_to_file
+_MTP.get_playlists = _get_playlists
+_MTP.get_playlist = _get_playlist
+_MTP.create_new_playlist = _create_new_playlist
+_MTP.update_playlist = _update_playlist

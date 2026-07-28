@@ -254,7 +254,7 @@ Keep this table in sync when adding monkey-patches:
 | `create_folder` | Replaced | D, C |
 | `set_devicename` | Replaced (was already OK via bytes at adapter) | D, C |
 | `send_file_from_file` | **Not fully replaced** (argtypes partial via Send_File) | C, D residual |
-| Playlist APIs | **Untouched** | D, C predicted |
+| Playlist APIs | **Patched** (list snapshot+destroy; create/update UTF-8 name + typed `uint32` track array) | Was D/C; re-test on ZEN if titles corrupt or create fails |
 | Download to file | **Untouched** | D, C predicted |
 | `delete_object` | Replaced (argtypes + device ptr); batch Delete All aborts on fatal | C, G residual |
 | `get_file_metadata` | Replaced (argtypes + device ptr; NULL → dump + ObjectNotFound); UI listing fallback | C, J |

@@ -150,7 +150,7 @@ Debriefs remain the forensic narrative; this file is what we keep doing.
 
 **Context:** The JSON index (`library_index.json`) was a path+tags cache only. Device inventory could not be joined to the host library without relying on fragile bulk MTP track tags or inventing nested folders (which poisoned ZEN sessions).
 
-**Decision:** Persist the library as SQLite `{data_dir}/library_index.db` (stdlib `sqlite3`): `library_meta` (root, scanned_at), `tracks` (guid PK, path unique, full tag columns), optional `device_objects` (last-seen basename / item id). Assign a **32-char hex GUID** (UUID4 without hyphens) per track; preserve across rescans by absolute path. One-shot migrate from legacy JSON when the DB is missing. API remains `save_library_index` / `load_library_index` in `infra/library_index.py`.
+**Decision:** Persist the library as SQLite `{data_dir}/library_index.db` (stdlib `sqlite3`): `library_meta` (`root_path` first root, `root_paths` JSON list of all roots, `scanned_at`), `tracks` (guid PK, path unique, full tag columns), optional `device_objects` (last-seen basename / item id). Assign a **32-char hex GUID** (UUID4 without hyphens) per track; preserve across rescans by absolute path. One-shot migrate from legacy JSON when the DB is missing; pre-v3 DBs gain `root_paths` seeded from `root_path`. API remains `save_library_index` / `load_library_index` in `infra/library_index.py`. **Library → Manage Library…** adds/removes roots and **Update Library** rescans all roots.
 
 **Rationale:** Durable identity independent of MTP object ids; room for host↔device mapping without a general media-library product.
 

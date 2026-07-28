@@ -82,12 +82,12 @@ PyMTP is the default (aspirational) path. Stable Mode is an opt-in Config toggle
 ## Data flow (high level)
 
 ```text
-[index load | Library menu Select/Update] → scan_library → Library[Track]
+[index load | Library → Manage Library…] → scan_library → Library[Track]
      → user action → transfer_track(s)
      → (optional) FFmpegTranscoder → Transport.send_track
 ```
 
-Chrome: **Library** menubar (Select root / Update); full-width **status toolbar** (path + count); left panel is PyMTP device session (or Stable Mode help when that toggle is on). Details: [transfer-and-modes.md](./transfer-and-modes.md). Durable library index (`library_index.db` SQLite: root, paths, tags, per-track GUID) and `config.json` live under the app data dir (`infra/app_paths.py` + `infra/library_index.py` + `infra/app_config.py`). Sends use GUID ObjectFileNames under Music 100. Device inventory is SQLite (`device_index`: seed on connect, update on send/delete); List Tracks joins cached basenames to host track tags (see decisions D11–D13).
+Chrome: **Library** menubar (**Manage Library…** — add/remove roots + update); full-width **status toolbar** (path or **Multiple Library Roots** + count; hover lists every root); fixed-width left column with two subframes — **Selection** (startup PyMTP blurb, then track/album/artist context) and **Device** (profile graphic, or Stable Mode help when that toggle is on). Details: [transfer-and-modes.md](./transfer-and-modes.md). Durable library index (`library_index.db` SQLite: one or more roots, paths, tags, per-track GUID) and `config.json` live under the app data dir (`infra/app_paths.py` + `infra/library_index.py` + `infra/app_config.py`). Sends use GUID ObjectFileNames under Music 100. Device inventory is SQLite (`device_index`: seed on connect, update on send/delete); List Tracks joins cached basenames to host track tags (see decisions D11–D13).
 
 Remote object naming for **both** transports is centralized in `infra/remote_naming.py` ([device-contract.md](./device-contract.md)).
 

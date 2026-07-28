@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Literal
 
 from pathlib import Path
@@ -12,19 +13,25 @@ from tkinter import (
     BooleanVar,
     Button,
     DISABLED,
+    DoubleVar,
     END,
     LEFT,
     NORMAL,
     RIGHT,
     TOP,
+    WORD,
     X,
     Y,
     Frame,
     Label,
+    Listbox,
     Menu,
     PhotoImage,
     Scrollbar,
+    StringVar,
+    Text,
     Tk,
+    Toplevel,
     ttk,
 )
 
@@ -49,6 +56,15 @@ EXPERIMENTAL_HINT = (
     "If send fails, try Config → Stable Mode (mtp-sendtr)."
 )
 
+# Fixed left column (context + device). Text wrap stays slightly inside width.
+_LEFT_PANEL_WIDTH = 220
+_LEFT_TEXT_WRAP = 200
+# Device subframe: fixed height for title + caption + graphic / Stable help.
+_DEVICE_PANEL_HEIGHT = 240
+# Device profile art is scaled into this fixed slot (height-priority).
+_DEVICE_GRAPHIC_HEIGHT = 140
+_DEVICE_GRAPHIC_MAX_WIDTH = 180
+
 _PATH_DISPLAY_MAX = 72
 _DEAD_TRACK_FG = "gray50"
 
@@ -56,13 +72,24 @@ _DEAD_TRACK_FG = "gray50"
 BG_TRANSFER_QUEUED = "#b8cbb8"  # desaturated green — in batch, waiting
 BG_TRANSFER_TRANSCODING = "#8faf8f"  # desaturated green — converting
 BG_TRANSFER_TRANSFERRING = "#bf8f8f"  # desaturated red — sending to device
+# Currently playing track (deep dark purple; light text for contrast).
+BG_PLAYING = "#4a1f6b"
+FG_PLAYING = "#f0e6fa"
+# Playback title label (Tk character-cell width) + marquee speed.
+_PLAYBACK_TITLE_WIDTH = 28
+_PLAYBACK_MARQUEE_MS = 250
+# Gap between end and start when the title scrolls.
+_PLAYBACK_MARQUEE_GAP = "   "
 
 # Tree column ids (values order).
 TREE_COLS = ("title", "artist", "album", "year")
 
 # Library menu labels (used for entryconfig by label).
-MENU_SELECT_ROOT = "Select Library Root…"
-MENU_UPDATE_LIBRARY = "Update Library"
+MENU_MANAGE_LIBRARY = "Manage Library…"
+MENU_MANAGE_PLAYLISTS = "Manage Playlists…"
+# Back-compat aliases (older docs / call sites).
+MENU_SELECT_ROOT = MENU_MANAGE_LIBRARY
+MENU_UPDATE_LIBRARY = MENU_MANAGE_LIBRARY
 
 # Transfer menu
 MENU_SYNC_ENTIRE = "Sync Entire Library"
@@ -73,11 +100,21 @@ MENU_CANCEL_JOB = "Cancel Current Job"
 MENU_PACKAGE_RETAIL = "Package Retail Demos… (experimental)"
 MENU_RESTORE_RETAIL = "Restore Retail Package… (experimental)"
 
+# View menu
+MENU_ALWAYS_SHOW_PLAYBACK = "Always show playback controls"
+
 # Config menu
 MENU_STABLE_MODE = "Stable Mode"
 MENU_ARTIST_FOLDERS = "Store tracks in artist folder (experimental)"
 MENU_ALBUM_FOLDERS = "Store tracks in album folder (experimental)"
+MENU_PODCAST_FOLDERS = "Store Podcasts in Identifiable Folders (experimental)"
 MENU_CONFIG = "Config…"
+
+# Podcasts tab
+CTX_PODCAST_SYNC_LATEST = "Sync Latest"
+CTX_PODCAST_EPISODE_SYNC = "Sync Episodes Now"
+CTX_PODCAST_PLAY_EPISODE = "Play This Episode"
+CTX_PODCAST_PLAY_EPISODES = "Play These Episodes"
 
 # Device menu (PyMTP / default)
 MENU_CONNECT = "Connect"
@@ -100,10 +137,36 @@ CTX_SYNC_SELECTED = "Sync selected tracks"
 CTX_SYNC_TRACK = "Sync this track"
 CTX_SYNC_ALBUM = "Sync Album"
 CTX_SYNC_ARTIST = "Sync all from Artist"
+CTX_PLAY_TRACK = "Play This Track"
+CTX_PLAY_TRACKS = "Play These Tracks"
+CTX_ADD_TO_PLAYLIST = "Add This Track to Playlist…"
+CTX_ADD_TRACKS_TO_PLAYLIST = "Add These Tracks to Playlist…"
+CTX_EXCLUDE_FILE = "Exclude this file…"
+CTX_EXCLUDE_FOLDER = "Exclude this folder…"
 
 # Group header context menus (labels updated dynamically before popup)
 CTX_SYNC_ARTIST_GROUP = "Sync all from Artist"
 CTX_SYNC_ALBUM_GROUP = "Sync album"
+CTX_PLAY_ARTIST_GROUP = "Play All from Artist"
+CTX_PLAY_ALBUM_GROUP = "Play Album"
+CTX_ADD_ARTIST_TO_PLAYLIST = "Add All from Artist to Playlist…"
+CTX_ADD_ALBUM_TO_PLAYLIST = "Add Album to Playlist…"
+CTX_EXCLUDE_GROUP_FOLDER = "Exclude this folder…"
+
+# Playlists tab context menu
+CTX_PLAYLIST_REMOVE = "Remove from Playlist"
+CTX_PLAYLIST_PLAY_TRACK = "Play This Track"
+CTX_PLAYLIST_SYNC = "Sync playlist to device"
+
+# Device media context menus (on-device Music / Video / Audiobooks trees)
+CTX_DEVICE_DELETE = "Delete from device…"
+CTX_DEVICE_PULL = "Pull to library…"
+CTX_DEVICE_PULL_FOLDER = "Pull to folder…"
+CTX_DEVICE_DELETE_ARTIST = "Delete all from Artist…"
+CTX_DEVICE_DELETE_ALBUM = "Delete album from device…"
+CTX_DEVICE_DELETE_FOLDER = "Delete all in folder…"
+CTX_DEVICE_INFO = "Device Info"
+CTX_DEVICE_DELETE_ALL = "Delete All Tracks…"
 
 _DEVICE_MENU_LABELS = (
     MENU_CONNECT,
@@ -133,22 +196,181 @@ def _elide_path(path: str, max_len: int = _PATH_DISPLAY_MAX) -> str:
     return path[:head] + "…" + path[-tail:]
 
 
+class _HoverTip:
+    """Delayed hover tip for a widget (full path / multi-root list).
+
+    macOS Tk Labels default to ``systemTextColor``. In dark mode that is a
+    *light* color; pairing it with a cream tooltip background makes the text
+    look blank. Always set an explicit dark foreground on a light panel.
+    """
+
+    # Cool frosted panel — solid stand-in for Liquid Glass (Tk has no blur).
+    # Explicit colors only; never systemTextColor (invisible on light panels
+    # in dark mode).
+    _BG = "#e6eaef"  # cloud gray, slight cool bias
+    _FG = "#1d1d1f"  # near-black label text
+    _EDGE = "#b4bcc6"  # soft cool rim
+    _DELAY_MS = 400
+    _WRAP = 520
+
+    def __init__(self, widget) -> None:
+        self.widget = widget
+        self._text = ""
+        self._tip: Toplevel | None = None
+        self._label: Label | None = None
+        self._after_id = None
+        widget.bind("<Enter>", self._on_enter, add="+")
+        widget.bind("<Leave>", self._on_leave, add="+")
+        widget.bind("<ButtonPress>", self._on_leave, add="+")
+
+    def set_text(self, text: str) -> None:
+        self._text = (text or "").strip()
+        if not self._text:
+            self._hide()
+            return
+        # Keep an open tip in sync when library status refreshes under the cursor.
+        if self._label is not None:
+            try:
+                self._label.configure(text=self._text)
+            except Exception:
+                self._hide()
+
+    def _on_enter(self, _event=None) -> None:
+        self._schedule()
+
+    def _on_leave(self, _event=None) -> None:
+        self._cancel_schedule()
+        self._hide()
+
+    def _schedule(self) -> None:
+        self._cancel_schedule()
+        if not self._text:
+            return
+        try:
+            self._after_id = self.widget.after(self._DELAY_MS, self._show)
+        except Exception:
+            self._after_id = None
+
+    def _cancel_schedule(self) -> None:
+        if self._after_id is not None:
+            try:
+                self.widget.after_cancel(self._after_id)
+            except Exception:
+                pass
+            self._after_id = None
+
+    def _show(self) -> None:
+        self._after_id = None
+        text = self._text
+        if not text:
+            return
+        if self._tip is not None:
+            if self._label is not None:
+                try:
+                    self._label.configure(text=text)
+                except Exception:
+                    self._hide()
+                else:
+                    return
+            else:
+                self._hide()
+
+        try:
+            master = self.widget.winfo_toplevel()
+            x = int(self.widget.winfo_rootx()) + 12
+            y = int(self.widget.winfo_rooty()) + int(self.widget.winfo_height()) + 6
+        except Exception:
+            return
+
+        tip = Toplevel(master)
+        # Build off-screen, then map — avoids blank overrideredirect windows
+        # on some Tk/macOS builds.
+        try:
+            tip.withdraw()
+        except Exception:
+            pass
+        tip.wm_overrideredirect(True)
+        try:
+            # macOS: true tooltip chrome; does not activate the app.
+            tip.tk.call(
+                "::tk::unsupported::MacWindowStyle",
+                "style",
+                tip._w,
+                "help",
+                "noActivates",
+            )
+        except Exception:
+            pass
+        try:
+            tip.attributes("-topmost", True)
+        except Exception:
+            pass
+
+        # 1px cool rim (Frame) around the panel so it reads against light
+        # window chrome without the old warm “sticky note” look.
+        rim = Frame(tip, background=self._EDGE, borderwidth=0)
+        rim.pack(fill=BOTH, expand=True)
+        label = Label(
+            rim,
+            text=text,
+            justify=LEFT,
+            background=self._BG,
+            foreground=self._FG,
+            activebackground=self._BG,
+            activeforeground=self._FG,
+            disabledforeground=self._FG,
+            relief="flat",
+            borderwidth=0,
+            padx=9,
+            pady=6,
+            wraplength=self._WRAP,
+            # Explicit family avoids theme fonts that can render invisibly
+            # in borderless help windows on some Aqua builds.
+            font=("TkDefaultFont", 12),
+        )
+        label.pack(padx=1, pady=1)
+        try:
+            tip.update_idletasks()
+            tip.wm_geometry(f"+{x}+{y}")
+            tip.deiconify()
+            tip.lift()
+        except Exception:
+            try:
+                tip.destroy()
+            except Exception:
+                pass
+            return
+
+        self._tip = tip
+        self._label = label
+
+    def _hide(self) -> None:
+        tip = self._tip
+        self._tip = None
+        self._label = None
+        if tip is not None:
+            try:
+                tip.destroy()
+            except Exception:
+                pass
+
+
 class MainWindow:
     def __init__(self, root: Tk | None = None):
         self.root = root or Tk()
         self.root.title("MTP Manager")
         self.root.geometry("1000x600")
-        self.root["borderwidth"] = 3
+        self.root["borderwidth"] = 1
         self.root["relief"] = "sunken"
 
-        # Menubar: Library | Transfer | Device | Config
+        # Menubar: Library | Transfer | Device | View | Config
         self.menubar = Menu(self.root)
         self.root.config(menu=self.menubar)
 
         self.menu_library = Menu(self.menubar, tearoff=0)
         self.menubar.add_cascade(label="Library", menu=self.menu_library)
-        self.menu_library.add_command(label=MENU_SELECT_ROOT)
-        self.menu_library.add_command(label=MENU_UPDATE_LIBRARY, state=DISABLED)
+        self.menu_library.add_command(label=MENU_MANAGE_LIBRARY)
+        self.menu_library.add_command(label=MENU_MANAGE_PLAYLISTS)
 
         self.menu_transfer = Menu(self.menubar, tearoff=0)
         self.menubar.add_cascade(label="Transfer", menu=self.menu_transfer)
@@ -167,9 +389,20 @@ class MainWindow:
         for label in _DEVICE_MENU_LABELS:
             self.menu_device.add_command(label=label, state=DISABLED)
 
+        self.var_always_show_playback = BooleanVar(value=False)
+        self.menu_view = Menu(self.menubar, tearoff=0)
+        self.menubar.add_cascade(label="View", menu=self.menu_view)
+        self.menu_view.add_checkbutton(
+            label=MENU_ALWAYS_SHOW_PLAYBACK,
+            variable=self.var_always_show_playback,
+            onvalue=True,
+            offvalue=False,
+        )
+
         self.var_stable_mode = BooleanVar(value=False)
         self.var_artist_folders = BooleanVar(value=False)
         self.var_album_folders = BooleanVar(value=False)
+        self.var_podcast_folders = BooleanVar(value=False)
         self.menu_config = Menu(self.menubar, tearoff=0)
         self.menubar.add_cascade(label="Config", menu=self.menu_config)
         self.menu_config.add_checkbutton(
@@ -191,6 +424,12 @@ class MainWindow:
             offvalue=False,
             state=DISABLED,
         )
+        self.menu_config.add_checkbutton(
+            label=MENU_PODCAST_FOLDERS,
+            variable=self.var_podcast_folders,
+            onvalue=True,
+            offvalue=False,
+        )
         self.menu_config.add_separator()
         self.menu_config.add_command(label=MENU_CONFIG)
 
@@ -201,15 +440,66 @@ class MainWindow:
         self.menu_track_ctx.add_command(label=CTX_SYNC_TRACK)
         self.menu_track_ctx.add_command(label=CTX_SYNC_ALBUM)
         self.menu_track_ctx.add_command(label=CTX_SYNC_ARTIST)
+        self.menu_track_ctx.add_separator()
+        self.menu_track_ctx.add_command(label=CTX_PLAY_TRACK)
+        self.menu_track_ctx.add_command(label=CTX_ADD_TO_PLAYLIST)
+        self.menu_track_ctx.add_separator()
+        self.menu_track_ctx.add_command(label=CTX_EXCLUDE_FILE)
+        self.menu_track_ctx.add_command(label=CTX_EXCLUDE_FOLDER)
 
         self.menu_artist_ctx = Menu(self.root, tearoff=0)
         self.menu_artist_ctx.add_command(label=CTX_SYNC_ARTIST_GROUP)
+        self.menu_artist_ctx.add_separator()
+        self.menu_artist_ctx.add_command(label=CTX_PLAY_ARTIST_GROUP)
+        self.menu_artist_ctx.add_command(label=CTX_ADD_ARTIST_TO_PLAYLIST)
 
         self.menu_album_ctx = Menu(self.root, tearoff=0)
         self.menu_album_ctx.add_command(label=CTX_SYNC_ALBUM_GROUP)
+        self.menu_album_ctx.add_separator()
+        self.menu_album_ctx.add_command(label=CTX_PLAY_ALBUM_GROUP)
+        self.menu_album_ctx.add_command(label=CTX_ADD_ALBUM_TO_PLAYLIST)
+        self.menu_album_ctx.add_separator()
+        self.menu_album_ctx.add_command(label=CTX_EXCLUDE_GROUP_FOLDER)
+
+        self.menu_playlist_ctx = Menu(self.root, tearoff=0)
+        self.menu_playlist_ctx.add_command(label=CTX_PLAYLIST_PLAY_TRACK)
+        self.menu_playlist_ctx.add_command(label=CTX_PLAYLIST_REMOVE)
+        self.menu_playlist_ctx.add_separator()
+        self.menu_playlist_ctx.add_command(label=CTX_PLAYLIST_SYNC)
+
+        self.menu_podcast_show_ctx = Menu(self.root, tearoff=0)
+        self.menu_podcast_show_ctx.add_command(label=CTX_PODCAST_SYNC_LATEST)
+
+        self.menu_podcast_episode_ctx = Menu(self.root, tearoff=0)
+        self.menu_podcast_episode_ctx.add_command(label=CTX_PODCAST_PLAY_EPISODE)
+        self.menu_podcast_episode_ctx.add_command(label=CTX_PODCAST_EPISODE_SYNC)
+
+        # Device on-media context menus (delete / pull).
+        self.menu_device_track_ctx = Menu(self.root, tearoff=0)
+        self.menu_device_track_ctx.add_command(label=CTX_DEVICE_PULL)
+        self.menu_device_track_ctx.add_command(label=CTX_DEVICE_PULL_FOLDER)
+        self.menu_device_track_ctx.add_separator()
+        self.menu_device_track_ctx.add_command(label=CTX_DEVICE_DELETE)
+
+        self.menu_device_artist_ctx = Menu(self.root, tearoff=0)
+        self.menu_device_artist_ctx.add_command(label=CTX_DEVICE_DELETE_ARTIST)
+
+        self.menu_device_album_ctx = Menu(self.root, tearoff=0)
+        self.menu_device_album_ctx.add_command(label=CTX_DEVICE_DELETE_ALBUM)
+
+        self.menu_device_folder_ctx = Menu(self.root, tearoff=0)
+        self.menu_device_folder_ctx.add_command(label=CTX_DEVICE_DELETE_FOLDER)
+
+        # Device panel / graphic (same actions as Device menu).
+        self.menu_device_panel_ctx = Menu(self.root, tearoff=0)
+        self.menu_device_panel_ctx.add_command(label=CTX_DEVICE_INFO)
+        self.menu_device_panel_ctx.add_separator()
+        self.menu_device_panel_ctx.add_command(label=CTX_DEVICE_DELETE_ALL)
+
+        self._prepare_device_context_menu = None
 
         # Status toolbar: path + track count only (no duplicate title header).
-        library_toolbar = Frame(self.root, borderwidth=3, relief="sunken")
+        library_toolbar = Frame(self.root, borderwidth=1, relief="sunken")
         library_toolbar.pack(side=TOP, fill=X, padx=2, pady=2)
 
         Label(library_toolbar, text="Library:").pack(side=LEFT, padx=(6, 2), pady=4)
@@ -220,6 +510,7 @@ class MainWindow:
             anchor="w",
         )
         self.lbl_library_path.pack(side=LEFT, fill=X, expand=True, padx=2, pady=4)
+        self._library_path_tip = _HoverTip(self.lbl_library_path)
 
         self.lbl_library_count = Label(library_toolbar, text="0 tracks")
         self.lbl_library_count.pack(side=LEFT, padx=(6, 8), pady=4)
@@ -227,9 +518,74 @@ class MainWindow:
         # Pack bottom bar *before* the expanding body so it always keeps a
         # visible strip (Tk expand can otherwise starve a late BOTTOM pack).
         bottomframe = Frame(self.root)
-        bottomframe["borderwidth"] = 3
+        bottomframe["borderwidth"] = 1
         bottomframe["relief"] = "sunken"
         bottomframe.pack(side=BOTTOM, fill=X)
+        self.bottomframe = bottomframe
+
+        # Playback controls (hidden unless playing or View → always show).
+        self.playback_row = Frame(bottomframe)
+        self._playback_row_visible = False
+        self._playback_always_show = False
+        self._playback_session_active = False
+        self._playback_duration = 0.0
+        self._playback_show_nav = False
+        self._scrub_dragging = False
+        self._scrub_programmatic = False
+        self._on_playback_play_pause = None
+        self._on_playback_prev = None
+        self._on_playback_next = None
+        self._on_playback_close = None
+        self._on_playback_seek = None
+        self._playing_iid: str | None = None
+        self._playback_title_full = ""
+        self._playback_title_offset = 0
+        self._playback_marquee_after_id: str | None = None
+
+        self.btn_playback_prev = Button(
+            self.playback_row, text="Prev", width=5, state=DISABLED
+        )
+        self.btn_playback_play = Button(
+            self.playback_row, text="Play", width=6, state=DISABLED
+        )
+        self.btn_playback_next = Button(
+            self.playback_row, text="Next", width=5, state=DISABLED
+        )
+        self.var_playback_scrub = DoubleVar(value=0.0)
+        self.playback_scrub = ttk.Scale(
+            self.playback_row,
+            from_=0.0,
+            to=1000.0,
+            orient="horizontal",
+            variable=self.var_playback_scrub,
+            command=self._on_scrub_command,
+        )
+        self.lbl_playback_time = Label(
+            self.playback_row, text="0:00 / 0:00", width=12, anchor="e"
+        )
+        self.lbl_playback_title = Label(
+            self.playback_row,
+            text="",
+            anchor="w",
+            width=_PLAYBACK_TITLE_WIDTH,
+        )
+        self.btn_playback_close = Button(
+            self.playback_row, text="×", width=3
+        )
+        # Layout: [Prev] [Play] [Next] [title] [====scrub====] [time] [×]
+        self.btn_playback_prev.pack(side=LEFT, padx=(4, 2), pady=4)
+        self.btn_playback_play.pack(side=LEFT, padx=2, pady=4)
+        self.btn_playback_next.pack(side=LEFT, padx=2, pady=4)
+        self.lbl_playback_title.pack(side=LEFT, padx=(6, 4), pady=4)
+        self.btn_playback_close.pack(side=RIGHT, padx=(2, 4), pady=4)
+        self.lbl_playback_time.pack(side=RIGHT, padx=(4, 2), pady=4)
+        self.playback_scrub.pack(
+            side=LEFT, fill=X, expand=True, padx=(4, 4), pady=4
+        )
+        self.playback_scrub.bind("<ButtonPress-1>", self._on_scrub_press, add="+")
+        self.playback_scrub.bind(
+            "<ButtonRelease-1>", self._on_scrub_release, add="+"
+        )
 
         # Status line above progress (current track during sync / device jobs).
         self.lbl_progress_status = Label(
@@ -257,48 +613,280 @@ class MainWindow:
         body = Frame(self.root)
         body.pack(side=TOP, fill=BOTH, expand=True)
 
-        leftframe = Frame(body)
-        leftframe["borderwidth"] = 3
+        # Fixed-width left column: context (selection) + device subframes.
+        leftframe = Frame(body, width=_LEFT_PANEL_WIDTH)
+        leftframe["borderwidth"] = 1
         leftframe["relief"] = "sunken"
         leftframe.pack(side=LEFT, fill=Y)
+        leftframe.pack_propagate(False)
+        self.leftframe = leftframe
 
         rightframe = Frame(body)
-        rightframe["borderwidth"] = 3
+        rightframe["borderwidth"] = 1
         rightframe["relief"] = "sunken"
         rightframe.pack(side=RIGHT, fill=BOTH, expand=True)
 
-        # Left panel: PyMTP device session is front-and-center; Stable Mode
-        # replaces this with help text (toggle under Config).
-        self.lbl_mode_title = Label(
-            leftframe, text="Device", font=("", 11, "bold")
+        # --- Device subframe: fixed height, locked to bottom of leftframe ---
+        # Pack BOTTOM first so Selection fills the remaining space above.
+        self.device_panel = Frame(
+            leftframe, width=_LEFT_PANEL_WIDTH - 6, height=_DEVICE_PANEL_HEIGHT
         )
-        self.lbl_mode_title.pack(padx=6, pady=(8, 0), anchor="w")
+        self.device_panel.pack(side=BOTTOM, fill=X, padx=3, pady=(2, 6))
+        self.device_panel.pack_propagate(False)
 
-        self.lbl_mode_help = Label(
-            leftframe,
-            text=EXPERIMENTAL_HINT,
-            wraplength=200,
+        self.lbl_device_title = Label(
+            self.device_panel, text="Device", font=("", 11, "bold")
+        )
+        self.lbl_device_title.pack(padx=6, pady=(2, 0), anchor="w")
+
+        self._device_caption = ""
+        self.lbl_device_caption = Label(
+            self.device_panel,
+            text="",
+            wraplength=_LEFT_TEXT_WRAP,
             justify=LEFT,
         )
-        self.lbl_mode_help.pack(padx=6, pady=(6, 4), anchor="w")
-
-        self.device_panel = Frame(leftframe)
-        self.device_panel.pack(padx=3, pady=3, fill=X)
-
-        self.lbl_device_caption = Label(
-            self.device_panel, text="", wraplength=200, justify=LEFT
-        )
         self.lbl_device_caption.pack(padx=6, pady=(4, 0), anchor="w")
-        self.lbl_device_graphic = Label(self.device_panel)
-        self.lbl_device_graphic.pack(padx=6, pady=6)
+        # Fixed-height slot so profile art cannot grow the device panel.
+        self.device_graphic_slot = Frame(
+            self.device_panel, height=_DEVICE_GRAPHIC_HEIGHT
+        )
+        self.device_graphic_slot.pack(padx=6, pady=6, fill=X)
+        self.device_graphic_slot.pack_propagate(False)
+        self.lbl_device_graphic = Label(self.device_graphic_slot)
+        self.lbl_device_graphic.place(relx=0.5, rely=0.5, anchor="center")
         self._device_photo: PhotoImage | None = None
         self._device_photo_cache: dict[str, PhotoImage] = {}
         # Album art thumbs for group rows (must keep refs for Tk).
         self._album_art_cache: dict[str, PhotoImage] = {}
 
-        Label(rightframe, text="Tracks").pack()
-        tree_frame = Frame(rightframe)
+        # --- Context subframe: startup hint, then selection metadata ---
+        # Fills all space above the bottom-locked device panel.
+        self.context_panel = Frame(leftframe)
+        self.context_panel.pack(
+            side=TOP, fill=BOTH, expand=True, padx=3, pady=(6, 2)
+        )
+
+        self.lbl_context_title = Label(
+            self.context_panel, text="Selection", font=("", 11, "bold")
+        )
+        self.lbl_context_title.pack(padx=6, pady=(2, 0), anchor="w")
+
+        self._startup_hint_active = True
+        self._context_detail = ""
+        self._context_path = ""
+        # Scrollable body: long podcast descriptions / multi-line selection text.
+        self.context_body = Frame(self.context_panel)
+        self.context_body.pack(
+            side=TOP, fill=BOTH, expand=True, padx=4, pady=(4, 0)
+        )
+        self.context_scroll = Scrollbar(self.context_body)
+        self.context_scroll.pack(side=RIGHT, fill=Y)
+        self.txt_context_detail = Text(
+            self.context_body,
+            wrap=WORD,
+            height=8,
+            width=28,
+            relief="flat",
+            borderwidth=0,
+            highlightthickness=0,
+            yscrollcommand=self.context_scroll.set,
+            takefocus=0,
+        )
+        self.txt_context_detail.pack(side=LEFT, fill=BOTH, expand=True)
+        self.context_scroll.config(command=self.txt_context_detail.yview)
+        # Match panel background; keep a normal (non-bold) body font.
+        try:
+            bg = self.context_panel.cget("background")
+            self.txt_context_detail.configure(background=bg, font=("", 11))
+        except Exception:
+            pass
+        self.txt_context_detail.insert("1.0", EXPERIMENTAL_HINT)
+        self.txt_context_detail.configure(state=DISABLED)
+        # Mouse-wheel scroll when cursor is over the context body.
+        self.txt_context_detail.bind(
+            "<MouseWheel>", self._on_context_mousewheel, add="+"
+        )
+        self.txt_context_detail.bind(
+            "<Button-4>", self._on_context_mousewheel, add="+"
+        )
+        self.txt_context_detail.bind(
+            "<Button-5>", self._on_context_mousewheel, add="+"
+        )
+        # Back-compat aliases (some code may still reference label names).
+        self.lbl_context_detail = self.txt_context_detail
+        # Full host path / URL for single selection (italic, secondary).
+        self.lbl_context_path = Label(
+            self.context_panel,
+            text="",
+            wraplength=_LEFT_TEXT_WRAP,
+            justify=LEFT,
+            font=("", 10, "italic"),
+        )
+        self.lbl_context_path.pack(side=BOTTOM, fill=X, padx=6, pady=(2, 6), anchor="nw")
+
+        self.media_notebook = ttk.Notebook(rightframe)
+        self.media_notebook.pack(side=TOP, fill=BOTH, expand=True, padx=2, pady=2)
+        self.musicLibrary_tab = Frame(self.media_notebook)
+        self.videoLibrary_tab = Frame(self.media_notebook)
+        self.audiobooksLibrary_tab = Frame(self.media_notebook)
+        self.podcastsLibrary_tab = Frame(self.media_notebook)
+        self.playlists_tab = Frame(self.media_notebook)
+        self.device_tab = Frame(self.media_notebook)
+        self.media_notebook.add(self.musicLibrary_tab, text="Music")
+        self.media_notebook.add(self.videoLibrary_tab, text="Video")
+        self.media_notebook.add(self.audiobooksLibrary_tab, text="Audiobooks")
+        self.media_notebook.add(self.podcastsLibrary_tab, text="Podcasts")
+        self.media_notebook.add(self.playlists_tab, text="Playlists")
+        self.media_notebook.add(self.device_tab, text="Device")
+
+        tree_frame = Frame(self.musicLibrary_tab)
         tree_frame.pack(fill=BOTH, expand=True)
+
+        vl_tree_frame = Frame(self.videoLibrary_tab)
+        vl_tree_frame.pack(fill=BOTH, expand=True)
+
+        ab_tree_frame = Frame(self.audiobooksLibrary_tab)
+        ab_tree_frame.pack(fill=BOTH, expand=True)
+
+        # Podcasts tab: subscriptions + episodes + Sync Latest.
+        # TODO(follow-up): OPML import/export, auto-refresh timer, in-app playback
+        pod_outer = Frame(self.podcastsLibrary_tab)
+        pod_outer.pack(fill=BOTH, expand=True, padx=4, pady=4)
+
+        pod_top = Frame(pod_outer)
+        pod_top.pack(side=TOP, fill=BOTH, expand=True)
+        Label(pod_top, text="Subscriptions", font=("", 11, "bold")).pack(
+            anchor="w", pady=(0, 2)
+        )
+        pod_sub_row = Frame(pod_top)
+        pod_sub_row.pack(side=TOP, fill=BOTH, expand=True)
+        pod_sub_list_frame = Frame(pod_sub_row)
+        pod_sub_list_frame.pack(side=LEFT, fill=BOTH, expand=True)
+        pod_sub_scroll = Scrollbar(pod_sub_list_frame)
+        pod_sub_scroll.pack(side=RIGHT, fill=Y)
+        self.podcast_show_list = Listbox(
+            pod_sub_list_frame,
+            height=8,
+            selectmode="extended",
+            exportselection=False,
+            yscrollcommand=pod_sub_scroll.set,
+        )
+        self.podcast_show_list.pack(side=LEFT, fill=BOTH, expand=True)
+        pod_sub_scroll.config(command=self.podcast_show_list.yview)
+        pod_sub_btns = Frame(pod_sub_row)
+        pod_sub_btns.pack(side=LEFT, fill=Y, padx=(6, 0))
+        self.btn_podcast_add = Button(pod_sub_btns, text="+", width=3)
+        self.btn_podcast_add.pack(side=TOP, pady=(0, 4))
+        self.btn_podcast_remove = Button(
+            pod_sub_btns, text="−", width=3, state=DISABLED
+        )
+        self.btn_podcast_remove.pack(side=TOP)
+
+        pod_ep_header = Frame(pod_outer)
+        pod_ep_header.pack(side=TOP, fill=X, pady=(8, 2))
+        self.lbl_podcast_episodes = Label(
+            pod_ep_header, text="Episodes", font=("", 11, "bold"), anchor="w"
+        )
+        self.lbl_podcast_episodes.pack(side=LEFT, fill=X, expand=True)
+        self.btn_podcast_more = Button(
+            pod_ep_header, text="More Episodes", state=DISABLED
+        )
+        self.btn_podcast_more.pack(side=RIGHT)
+
+        pod_ep_frame = Frame(pod_outer)
+        pod_ep_frame.pack(side=TOP, fill=BOTH, expand=True)
+        pod_ep_yscroll = Scrollbar(pod_ep_frame)
+        pod_ep_yscroll.pack(side=RIGHT, fill=Y)
+        pod_ep_xscroll = Scrollbar(pod_ep_frame, orient="horizontal")
+        pod_ep_xscroll.pack(side=BOTTOM, fill=X)
+        self.podcast_episode_tree = ttk.Treeview(
+            pod_ep_frame,
+            columns=("date", "title", "duration", "status"),
+            show="headings",
+            selectmode="extended",
+            yscrollcommand=pod_ep_yscroll.set,
+            xscrollcommand=pod_ep_xscroll.set,
+        )
+        self.podcast_episode_tree.pack(side=LEFT, fill=BOTH, expand=True)
+        pod_ep_yscroll.config(command=self.podcast_episode_tree.yview)
+        pod_ep_xscroll.config(command=self.podcast_episode_tree.xview)
+        self.podcast_episode_tree.heading("date", text="Date", anchor="w")
+        self.podcast_episode_tree.heading("title", text="Title", anchor="w")
+        self.podcast_episode_tree.heading("duration", text="Duration", anchor="w")
+        self.podcast_episode_tree.heading("status", text="Status", anchor="w")
+        self.podcast_episode_tree.column("date", width=100, minwidth=80, stretch=False)
+        self.podcast_episode_tree.column("title", width=320, minwidth=120, stretch=True)
+        self.podcast_episode_tree.column(
+            "duration", width=72, minwidth=56, stretch=False
+        )
+        self.podcast_episode_tree.column(
+            "status", width=90, minwidth=70, stretch=False
+        )
+
+        pod_bottom = Frame(pod_outer)
+        pod_bottom.pack(side=TOP, fill=X, pady=(8, 0))
+        self.btn_podcast_sync_latest = Button(
+            pod_bottom, text="Sync Latest", state=DISABLED
+        )
+        self.btn_podcast_sync_latest.pack(side=LEFT)
+        self.lbl_podcast_status = Label(pod_bottom, text="", anchor="w")
+        self.lbl_podcast_status.pack(side=LEFT, fill=X, expand=True, padx=8)
+
+        # Playlists tab: combobox + toolbar + flat track list.
+        pl_toolbar = Frame(self.playlists_tab)
+        pl_toolbar.pack(side=TOP, fill=X, padx=4, pady=(4, 2))
+        Label(pl_toolbar, text="Playlist:").pack(side=LEFT, padx=(2, 4))
+        self.var_playlist_choice = StringVar(value="")
+        self.playlist_combo = ttk.Combobox(
+            pl_toolbar,
+            textvariable=self.var_playlist_choice,
+            state="disabled",
+            width=36,
+        )
+        self.playlist_combo.pack(side=LEFT, padx=2)
+        self.btn_playlist_rename = Button(
+            pl_toolbar, text="Rename…", width=9, state=DISABLED
+        )
+        self.btn_playlist_rename.pack(side=LEFT, padx=2)
+        self.btn_playlist_new = Button(pl_toolbar, text="+", width=3)
+        self.btn_playlist_new.pack(side=LEFT, padx=2)
+        self.btn_playlist_delete = Button(
+            pl_toolbar, text="−", width=3, state=DISABLED
+        )
+        self.btn_playlist_delete.pack(side=LEFT, padx=2)
+        self.btn_playlist_sync = Button(
+            pl_toolbar, text="Sync playlist to device", state=DISABLED
+        )
+        self.btn_playlist_sync.pack(side=LEFT, padx=(8, 2))
+        self.lbl_playlist_status = Label(pl_toolbar, text="", anchor="w")
+        self.lbl_playlist_status.pack(side=LEFT, fill=X, expand=True, padx=6)
+
+        pl_tree_frame = Frame(self.playlists_tab)
+        pl_tree_frame.pack(side=TOP, fill=BOTH, expand=True)
+
+        # Device tab: nested notebook by media category.
+        # Music + Video + Audiobooks; Podcasts deferred.
+        self.device_notebook = ttk.Notebook(self.device_tab)
+        self.device_notebook.pack(side=TOP, fill=BOTH, expand=True)
+
+        self.device_music_tab = Frame(self.device_notebook)
+        self.device_video_tab = Frame(self.device_notebook)
+        self.device_audiobooks_tab = Frame(self.device_notebook)
+        self.device_podcasts_tab = Frame(self.device_notebook)
+        self.device_notebook.add(self.device_music_tab, text="Music")
+        self.device_notebook.add(self.device_video_tab, text="Video")
+        self.device_notebook.add(self.device_audiobooks_tab, text="Audiobooks")
+        self.device_notebook.add(self.device_podcasts_tab, text="Podcasts")
+
+        d_tree_frame = Frame(self.device_music_tab)
+        d_tree_frame.pack(fill=BOTH, expand=True)
+
+        dv_tree_frame = Frame(self.device_video_tab)
+        dv_tree_frame.pack(fill=BOTH, expand=True)
+
+        dab_tree_frame = Frame(self.device_audiobooks_tab)
+        dab_tree_frame.pack(fill=BOTH, expand=True)
 
         yscroll = Scrollbar(tree_frame)
         yscroll.pack(side=RIGHT, fill=Y)
@@ -350,6 +938,216 @@ class MainWindow:
         self.tree.column("album", width=140, minwidth=60)
         self.tree.column("year", width=56, minwidth=40, stretch=False)
 
+        # Device music tree (same columns/grouping as the library tree).
+        d_yscroll = Scrollbar(d_tree_frame)
+        d_yscroll.pack(side=RIGHT, fill=Y)
+        d_xscroll = Scrollbar(d_tree_frame, orient="horizontal")
+        d_xscroll.pack(side=BOTTOM, fill=X)
+
+        self.device_tree = ttk.Treeview(
+            d_tree_frame,
+            columns=TREE_COLS,
+            show="tree headings",
+            selectmode="extended",
+            yscrollcommand=d_yscroll.set,
+            xscrollcommand=d_xscroll.set,
+        )
+        self.device_tree.pack(side=LEFT, fill=BOTH, expand=True)
+        d_yscroll.config(command=self.device_tree.yview)
+        d_xscroll.config(command=self.device_tree.xview)
+
+        self.device_tree.heading("#0", text="#", anchor="w")
+        self.device_tree.heading("title", text="Title", anchor="w")
+        self.device_tree.heading("artist", text="Artist", anchor="w")
+        self.device_tree.heading("album", text="Album", anchor="w")
+        self.device_tree.heading("year", text="Year", anchor="w")
+        self.device_tree.column(
+            "#0",
+            width=self._thumb_size + 28,
+            minwidth=self._thumb_size + 20,
+            stretch=False,
+        )
+        self.device_tree.column("title", width=280, minwidth=120, stretch=True)
+        self.device_tree.column("artist", width=140, minwidth=60)
+        self.device_tree.column("album", width=140, minwidth=60)
+        self.device_tree.column("year", width=56, minwidth=40, stretch=False)
+
+        # Device video tree (same columns; grouped by Video / TV folder).
+        dv_yscroll = Scrollbar(dv_tree_frame)
+        dv_yscroll.pack(side=RIGHT, fill=Y)
+        dv_xscroll = Scrollbar(dv_tree_frame, orient="horizontal")
+        dv_xscroll.pack(side=BOTTOM, fill=X)
+
+        self.device_video_tree = ttk.Treeview(
+            dv_tree_frame,
+            columns=TREE_COLS,
+            show="tree headings",
+            selectmode="extended",
+            yscrollcommand=dv_yscroll.set,
+            xscrollcommand=dv_xscroll.set,
+        )
+        self.device_video_tree.pack(side=LEFT, fill=BOTH, expand=True)
+        dv_yscroll.config(command=self.device_video_tree.yview)
+        dv_xscroll.config(command=self.device_video_tree.xview)
+
+        self.device_video_tree.heading("#0", text="#", anchor="w")
+        self.device_video_tree.heading("title", text="Title", anchor="w")
+        self.device_video_tree.heading("artist", text="Artist", anchor="w")
+        self.device_video_tree.heading("album", text="Album", anchor="w")
+        self.device_video_tree.heading("year", text="Year", anchor="w")
+        self.device_video_tree.column(
+            "#0",
+            width=self._thumb_size + 28,
+            minwidth=self._thumb_size + 20,
+            stretch=False,
+        )
+        self.device_video_tree.column("title", width=280, minwidth=120, stretch=True)
+        self.device_video_tree.column("artist", width=140, minwidth=60)
+        self.device_video_tree.column("album", width=140, minwidth=60)
+        self.device_video_tree.column("year", width=56, minwidth=40, stretch=False)
+
+        # Library video tree: folder → files; title column only (filename).
+        vl_yscroll = Scrollbar(vl_tree_frame)
+        vl_yscroll.pack(side=RIGHT, fill=Y)
+        vl_xscroll = Scrollbar(vl_tree_frame, orient="horizontal")
+        vl_xscroll.pack(side=BOTTOM, fill=X)
+
+        self.videos_tree = ttk.Treeview(
+            vl_tree_frame,
+            columns=("title",),
+            show="tree headings",
+            selectmode="extended",
+            yscrollcommand=vl_yscroll.set,
+            xscrollcommand=vl_xscroll.set,
+        )
+        self.videos_tree.pack(side=LEFT, fill=BOTH, expand=True)
+        vl_yscroll.config(command=self.videos_tree.yview)
+        vl_xscroll.config(command=self.videos_tree.xview)
+
+        self.videos_tree.heading("#0", text="", anchor="w")
+        self.videos_tree.heading("title", text="Title", anchor="w")
+        self.videos_tree.column(
+            "#0",
+            width=28,
+            minwidth=24,
+            stretch=False,
+        )
+        self.videos_tree.column("title", width=420, minwidth=120, stretch=True)
+
+        # Library audiobooks tree (same columns; Author → Album - Year grouping).
+        ab_yscroll = Scrollbar(ab_tree_frame)
+        ab_yscroll.pack(side=RIGHT, fill=Y)
+        ab_xscroll = Scrollbar(ab_tree_frame, orient="horizontal")
+        ab_xscroll.pack(side=BOTTOM, fill=X)
+
+        self.audiobooks_tree = ttk.Treeview(
+            ab_tree_frame,
+            columns=TREE_COLS,
+            show="tree headings",
+            selectmode="extended",
+            yscrollcommand=ab_yscroll.set,
+            xscrollcommand=ab_xscroll.set,
+        )
+        self.audiobooks_tree.pack(side=LEFT, fill=BOTH, expand=True)
+        ab_yscroll.config(command=self.audiobooks_tree.yview)
+        ab_xscroll.config(command=self.audiobooks_tree.xview)
+
+        self.audiobooks_tree.heading("#0", text="#", anchor="w")
+        self.audiobooks_tree.heading("title", text="Title", anchor="w")
+        self.audiobooks_tree.heading("artist", text="Author", anchor="w")
+        self.audiobooks_tree.heading("album", text="Album", anchor="w")
+        self.audiobooks_tree.heading("year", text="Year", anchor="w")
+        self.audiobooks_tree.column(
+            "#0",
+            width=self._thumb_size + 28,
+            minwidth=self._thumb_size + 20,
+            stretch=False,
+        )
+        self.audiobooks_tree.column("title", width=280, minwidth=120, stretch=True)
+        self.audiobooks_tree.column("artist", width=140, minwidth=60)
+        self.audiobooks_tree.column("album", width=140, minwidth=60)
+        self.audiobooks_tree.column("year", width=56, minwidth=40, stretch=False)
+
+        # Playlists tab tree (flat ordered list; same columns as Music).
+        pl_yscroll = Scrollbar(pl_tree_frame)
+        pl_yscroll.pack(side=RIGHT, fill=Y)
+        pl_xscroll = Scrollbar(pl_tree_frame, orient="horizontal")
+        pl_xscroll.pack(side=BOTTOM, fill=X)
+
+        self.playlist_tree = ttk.Treeview(
+            pl_tree_frame,
+            columns=TREE_COLS,
+            show="tree headings",
+            selectmode="extended",
+            yscrollcommand=pl_yscroll.set,
+            xscrollcommand=pl_xscroll.set,
+        )
+        self.playlist_tree.pack(side=LEFT, fill=BOTH, expand=True)
+        pl_yscroll.config(command=self.playlist_tree.yview)
+        pl_xscroll.config(command=self.playlist_tree.xview)
+
+        self.playlist_tree.heading("#0", text="#", anchor="w")
+        self.playlist_tree.heading("title", text="Title", anchor="w")
+        self.playlist_tree.heading("artist", text="Artist", anchor="w")
+        self.playlist_tree.heading("album", text="Album", anchor="w")
+        self.playlist_tree.heading("year", text="Year", anchor="w")
+        self.playlist_tree.column(
+            "#0", width=48, minwidth=40, stretch=False
+        )
+        self.playlist_tree.column("title", width=280, minwidth=120, stretch=True)
+        self.playlist_tree.column("artist", width=140, minwidth=60)
+        self.playlist_tree.column("album", width=140, minwidth=60)
+        self.playlist_tree.column("year", width=56, minwidth=40, stretch=False)
+        self.playlist_tree.tag_configure("dead", foreground=_DEAD_TRACK_FG)
+        self.playlist_tree.tag_configure(
+            "playing", background=BG_PLAYING, foreground=FG_PLAYING
+        )
+        self.playlist_tree.tag_configure("xfer_queued", background=BG_TRANSFER_QUEUED)
+        self.playlist_tree.tag_configure(
+            "xfer_transcoding", background=BG_TRANSFER_TRANSCODING
+        )
+        self.playlist_tree.tag_configure(
+            "xfer_transferring", background=BG_TRANSFER_TRANSFERRING
+        )
+
+        # Device audiobooks tree (same columns/grouping as library audiobooks).
+        dab_yscroll = Scrollbar(dab_tree_frame)
+        dab_yscroll.pack(side=RIGHT, fill=Y)
+        dab_xscroll = Scrollbar(dab_tree_frame, orient="horizontal")
+        dab_xscroll.pack(side=BOTTOM, fill=X)
+
+        self.device_audiobooks_tree = ttk.Treeview(
+            dab_tree_frame,
+            columns=TREE_COLS,
+            show="tree headings",
+            selectmode="extended",
+            yscrollcommand=dab_yscroll.set,
+            xscrollcommand=dab_xscroll.set,
+        )
+        self.device_audiobooks_tree.pack(side=LEFT, fill=BOTH, expand=True)
+        dab_yscroll.config(command=self.device_audiobooks_tree.yview)
+        dab_xscroll.config(command=self.device_audiobooks_tree.xview)
+
+        self.device_audiobooks_tree.heading("#0", text="#", anchor="w")
+        self.device_audiobooks_tree.heading("title", text="Title", anchor="w")
+        self.device_audiobooks_tree.heading("artist", text="Author", anchor="w")
+        self.device_audiobooks_tree.heading("album", text="Album", anchor="w")
+        self.device_audiobooks_tree.heading("year", text="Year", anchor="w")
+        self.device_audiobooks_tree.column(
+            "#0",
+            width=self._thumb_size + 28,
+            minwidth=self._thumb_size + 20,
+            stretch=False,
+        )
+        self.device_audiobooks_tree.column(
+            "title", width=280, minwidth=120, stretch=True
+        )
+        self.device_audiobooks_tree.column("artist", width=140, minwidth=60)
+        self.device_audiobooks_tree.column("album", width=140, minwidth=60)
+        self.device_audiobooks_tree.column(
+            "year", width=56, minwidth=40, stretch=False
+        )
+
         # Group headers bold (label lives in Title values[0]); transfer tags tint rows.
         self.tree.tag_configure("group", font=("", 11, "bold"))
         self.tree.tag_configure("group_artist", font=("", 12, "bold"))
@@ -359,6 +1157,46 @@ class MainWindow:
         self.tree.tag_configure(
             "xfer_transferring", background=BG_TRANSFER_TRANSFERRING
         )
+        self.tree.tag_configure(
+            "playing", background=BG_PLAYING, foreground=FG_PLAYING
+        )
+        self.videos_tree.tag_configure("group", font=("", 11, "bold"))
+        self.videos_tree.tag_configure("group_directory", font=("", 12, "bold"))
+        self.videos_tree.tag_configure("dead", foreground=_DEAD_TRACK_FG)
+        self.videos_tree.tag_configure("xfer_queued", background=BG_TRANSFER_QUEUED)
+        self.videos_tree.tag_configure(
+            "xfer_transcoding", background=BG_TRANSFER_TRANSCODING
+        )
+        self.videos_tree.tag_configure(
+            "xfer_transferring", background=BG_TRANSFER_TRANSFERRING
+        )
+        self.videos_tree.tag_configure(
+            "playing", background=BG_PLAYING, foreground=FG_PLAYING
+        )
+        self.audiobooks_tree.tag_configure("group", font=("", 11, "bold"))
+        self.audiobooks_tree.tag_configure("group_artist", font=("", 12, "bold"))
+        self.audiobooks_tree.tag_configure("dead", foreground=_DEAD_TRACK_FG)
+        self.audiobooks_tree.tag_configure("xfer_queued", background=BG_TRANSFER_QUEUED)
+        self.audiobooks_tree.tag_configure(
+            "xfer_transcoding", background=BG_TRANSFER_TRANSCODING
+        )
+        self.audiobooks_tree.tag_configure(
+            "xfer_transferring", background=BG_TRANSFER_TRANSFERRING
+        )
+        self.audiobooks_tree.tag_configure(
+            "playing", background=BG_PLAYING, foreground=FG_PLAYING
+        )
+        self.device_tree.tag_configure("group", font=("", 11, "bold"))
+        self.device_tree.tag_configure("group_artist", font=("", 12, "bold"))
+        self.device_tree.tag_configure("dead", foreground=_DEAD_TRACK_FG)
+        self.device_video_tree.tag_configure("group", font=("", 11, "bold"))
+        self.device_video_tree.tag_configure("group_folder", font=("", 12, "bold"))
+        self.device_video_tree.tag_configure("dead", foreground=_DEAD_TRACK_FG)
+        self.device_audiobooks_tree.tag_configure("group", font=("", 11, "bold"))
+        self.device_audiobooks_tree.tag_configure(
+            "group_artist", font=("", 12, "bold")
+        )
+        self.device_audiobooks_tree.tag_configure("dead", foreground=_DEAD_TRACK_FG)
 
         # Callbacks set by controller for column-header sort / context menus.
         self._on_sort_heading = None
@@ -373,30 +1211,97 @@ class MainWindow:
         return self._mode
 
     def apply_mode_ui(self, mode: Mode) -> None:
-        """Refresh left-panel copy and Device menu for the active transfer mode."""
+        """Refresh device subframe + Device menu for the active transfer mode.
+
+        Context subframe (selection detail) is independent of mode: it keeps
+        the startup hint or last selection text either way.
+        """
         self._mode = mode
         stable = mode == "stable"
         self.var_stable_mode.set(stable)
         if stable:
-            self.lbl_mode_title.configure(text="Stable Mode")
-            self.lbl_mode_help.configure(text=STABLE_MODE_HELP)
-            self.device_panel.pack_forget()
+            self.lbl_device_title.configure(text="Stable Mode")
+            self.lbl_device_caption.configure(text=STABLE_MODE_HELP)
+            self.lbl_device_graphic.configure(image="")
+            if self.device_graphic_slot.winfo_ismapped():
+                self.device_graphic_slot.pack_forget()
         else:
-            self.lbl_mode_title.configure(text="Device")
-            self.lbl_mode_help.configure(text=EXPERIMENTAL_HINT)
-            if not self.device_panel.winfo_ismapped():
-                self.device_panel.pack(padx=3, pady=3, fill=X)
+            self.lbl_device_title.configure(text="Device")
+            self.lbl_device_caption.configure(text=self._device_caption)
+            if self._device_photo is not None:
+                self.lbl_device_graphic.configure(image=self._device_photo)
+            if not self.device_graphic_slot.winfo_ismapped():
+                self.device_graphic_slot.pack(padx=6, pady=6, fill=X)
         self.apply_mode_actions()
+
+    def is_startup_hint_active(self) -> bool:
+        """True while the context subframe still shows the first-run blurb."""
+        return bool(self._startup_hint_active)
+
+    def _on_context_mousewheel(self, event) -> str | None:
+        """Scroll the selection detail Text on wheel / trackpad."""
+        try:
+            if getattr(event, "num", None) == 4 or (
+                getattr(event, "delta", 0) > 0
+            ):
+                self.txt_context_detail.yview_scroll(-1, "units")
+            elif getattr(event, "num", None) == 5 or (
+                getattr(event, "delta", 0) < 0
+            ):
+                self.txt_context_detail.yview_scroll(1, "units")
+        except Exception:
+            pass
+        return "break"
+
+    def set_context_detail(
+        self, text: str, *, path: str | None = None
+    ) -> None:
+        """Update the context subframe (selection metadata).
+
+        Replaces the first-run experimental hint. Always updates the visible
+        body (including under Stable Mode) so selection still has a home.
+        Long text scrolls inside the left panel. *path* is the full host path
+        or URL for a single item (shown italic below the scroll area).
+        """
+        self._startup_hint_active = False
+        self._context_detail = text or ""
+        self._context_path = (path or "").strip()
+        try:
+            self.txt_context_detail.configure(state=NORMAL)
+            self.txt_context_detail.delete("1.0", END)
+            if self._context_detail:
+                self.txt_context_detail.insert("1.0", self._context_detail)
+            self.txt_context_detail.configure(state=DISABLED)
+            self.txt_context_detail.yview_moveto(0)
+        except Exception:
+            pass
+        try:
+            self.lbl_context_path.configure(text=self._context_path)
+        except Exception:
+            pass
 
     def set_library_menu_commands(
         self,
         *,
-        on_select_root,
-        on_update,
+        on_manage_library,
+        on_manage_playlists=None,
+        on_select_root=None,
+        on_update=None,
     ) -> None:
-        """Wire Library menu entries (called once from the controller)."""
-        self.menu_library.entryconfig(MENU_SELECT_ROOT, command=on_select_root)
-        self.menu_library.entryconfig(MENU_UPDATE_LIBRARY, command=on_update)
+        """Wire Library menu entries (called once from the controller).
+
+        *on_manage_library* opens the roots manager (add/remove/update).
+        *on_manage_playlists* focuses the Playlists notebook tab.
+        *on_select_root* / *on_update* are ignored legacy kwargs.
+        """
+        del on_select_root, on_update
+        self.menu_library.entryconfig(
+            MENU_MANAGE_LIBRARY, command=on_manage_library
+        )
+        if on_manage_playlists is not None:
+            self.menu_library.entryconfig(
+                MENU_MANAGE_PLAYLISTS, command=on_manage_playlists
+            )
 
     def set_transfer_menu_commands(
         self,
@@ -459,6 +1364,7 @@ class MainWindow:
         on_stable_mode_toggle=None,
         on_artist_folders_toggle=None,
         on_album_folders_toggle=None,
+        on_podcast_folders_toggle=None,
     ) -> None:
         self.menu_config.entryconfig(MENU_CONFIG, command=on_config)
         if on_stable_mode_toggle is not None:
@@ -472,6 +1378,93 @@ class MainWindow:
         if on_album_folders_toggle is not None:
             self.menu_config.entryconfig(
                 MENU_ALBUM_FOLDERS, command=on_album_folders_toggle
+            )
+        if on_podcast_folders_toggle is not None:
+            self.menu_config.entryconfig(
+                MENU_PODCAST_FOLDERS, command=on_podcast_folders_toggle
+            )
+
+    def set_podcast_tab_commands(
+        self,
+        *,
+        on_add=None,
+        on_remove=None,
+        on_more=None,
+        on_sync_latest=None,
+        on_show_select=None,
+        on_episode_select=None,
+        on_show_sync=None,
+        on_episode_sync=None,
+        on_episode_play=None,
+    ) -> None:
+        if on_add is not None:
+            self.btn_podcast_add.configure(command=on_add)
+        if on_remove is not None:
+            self.btn_podcast_remove.configure(command=on_remove)
+        if on_more is not None:
+            self.btn_podcast_more.configure(command=on_more)
+        if on_sync_latest is not None:
+            self.btn_podcast_sync_latest.configure(command=on_sync_latest)
+        if on_show_select is not None:
+            self.podcast_show_list.bind(
+                "<<ListboxSelect>>", lambda _e: on_show_select()
+            )
+        if on_episode_select is not None:
+            self.podcast_episode_tree.bind(
+                "<<TreeviewSelect>>", lambda _e: on_episode_select()
+            )
+        if on_show_sync is not None:
+            self.menu_podcast_show_ctx.entryconfig(
+                CTX_PODCAST_SYNC_LATEST, command=on_show_sync
+            )
+        if on_episode_play is not None:
+            # Index 0: Play (label toggles This/These).
+            self.menu_podcast_episode_ctx.entryconfig(0, command=on_episode_play)
+        if on_episode_sync is not None:
+            # Index 1: Sync N Episodes Now.
+            self.menu_podcast_episode_ctx.entryconfig(
+                1, command=on_episode_sync
+            )
+
+    def popup_podcast_show_context(self, event) -> str | None:
+        try:
+            idx = self.podcast_show_list.nearest(event.y)
+            if idx >= 0:
+                if idx not in self.podcast_show_list.curselection():
+                    self.podcast_show_list.selection_clear(0, END)
+                    self.podcast_show_list.selection_set(idx)
+            self.menu_podcast_show_ctx.tk_popup(event.x_root, event.y_root)
+        finally:
+            try:
+                self.menu_podcast_show_ctx.grab_release()
+            except Exception:
+                pass
+        return "break"
+
+    def popup_podcast_episode_context(self, event) -> str | None:
+        try:
+            row = self.podcast_episode_tree.identify_row(event.y)
+            if row:
+                if row not in self.podcast_episode_tree.selection():
+                    self.podcast_episode_tree.selection_set(row)
+            # Controller may refresh Play/Sync labels for multi-select.
+            try:
+                self.podcast_episode_tree.event_generate("<<TreeviewSelect>>")
+            except Exception:
+                pass
+            self.menu_podcast_episode_ctx.tk_popup(event.x_root, event.y_root)
+        finally:
+            try:
+                self.menu_podcast_episode_ctx.grab_release()
+            except Exception:
+                pass
+        return "break"
+
+    def set_view_menu_commands(self, *, on_always_show_playback_toggle=None) -> None:
+        if on_always_show_playback_toggle is not None:
+            self.menu_view.entryconfig(
+                MENU_ALWAYS_SHOW_PLAYBACK,
+                command=on_always_show_playback_toggle,
             )
 
     def set_album_folders_menu_enabled(self, enabled: bool) -> None:
@@ -536,6 +1529,15 @@ class MainWindow:
         on_sync_artist_group,
         on_sync_album_group,
         on_sync_selected=None,
+        on_play_track=None,
+        on_play_artist_group=None,
+        on_play_album_group=None,
+        on_add_to_playlist=None,
+        on_add_artist_to_playlist=None,
+        on_add_album_to_playlist=None,
+        on_exclude_file=None,
+        on_exclude_folder=None,
+        on_exclude_group_folder=None,
     ) -> None:
         if on_sync_selected is not None:
             self.menu_track_ctx.entryconfig(
@@ -544,45 +1546,503 @@ class MainWindow:
         self.menu_track_ctx.entryconfig(CTX_SYNC_TRACK, command=on_sync_track)
         self.menu_track_ctx.entryconfig(CTX_SYNC_ALBUM, command=on_sync_album)
         self.menu_track_ctx.entryconfig(CTX_SYNC_ARTIST, command=on_sync_artist)
+        if on_play_track is not None:
+            # Index (not label): label toggles Play This / These Tracks.
+            self.menu_track_ctx.entryconfig(6, command=on_play_track)
+        if on_add_to_playlist is not None:
+            # Index 7: Add to playlist (label toggles This/These).
+            self.menu_track_ctx.entryconfig(7, command=on_add_to_playlist)
+        if on_exclude_file is not None:
+            self.menu_track_ctx.entryconfig(
+                CTX_EXCLUDE_FILE, command=on_exclude_file
+            )
+        if on_exclude_folder is not None:
+            self.menu_track_ctx.entryconfig(
+                CTX_EXCLUDE_FOLDER, command=on_exclude_folder
+            )
         self.menu_artist_ctx.entryconfig(0, command=on_sync_artist_group)
+        if on_play_artist_group is not None:
+            # Index 2 (label changes with artist name).
+            self.menu_artist_ctx.entryconfig(2, command=on_play_artist_group)
+        if on_add_artist_to_playlist is not None:
+            self.menu_artist_ctx.entryconfig(3, command=on_add_artist_to_playlist)
         self.menu_album_ctx.entryconfig(0, command=on_sync_album_group)
+        if on_play_album_group is not None:
+            # Index 2 (label changes with album/folder name).
+            self.menu_album_ctx.entryconfig(2, command=on_play_album_group)
+        if on_add_album_to_playlist is not None:
+            self.menu_album_ctx.entryconfig(3, command=on_add_album_to_playlist)
+        if on_exclude_group_folder is not None:
+            # Index 5 after Play + Add + separator.
+            self.menu_album_ctx.entryconfig(5, command=on_exclude_group_folder)
+
+    def set_playlist_tab_commands(
+        self,
+        *,
+        on_combo_selected=None,
+        on_new=None,
+        on_delete=None,
+        on_rename=None,
+        on_sync=None,
+        on_remove_tracks=None,
+        on_play_track=None,
+    ) -> None:
+        """Wire Playlists tab toolbar + context menu."""
+        if on_combo_selected is not None:
+            self.playlist_combo.bind(
+                "<<ComboboxSelected>>", lambda _e: on_combo_selected()
+            )
+        if on_new is not None:
+            self.btn_playlist_new.configure(command=on_new)
+        if on_delete is not None:
+            self.btn_playlist_delete.configure(command=on_delete)
+        if on_rename is not None:
+            self.btn_playlist_rename.configure(command=on_rename)
+        if on_sync is not None:
+            self.btn_playlist_sync.configure(command=on_sync)
+            self.menu_playlist_ctx.entryconfig(
+                CTX_PLAYLIST_SYNC, command=on_sync
+            )
+        if on_remove_tracks is not None:
+            self.menu_playlist_ctx.entryconfig(
+                CTX_PLAYLIST_REMOVE, command=on_remove_tracks
+            )
+        if on_play_track is not None:
+            self.menu_playlist_ctx.entryconfig(
+                CTX_PLAYLIST_PLAY_TRACK, command=on_play_track
+            )
+
+    def show_playlists_tab(self) -> None:
+        """Select the Playlists notebook tab."""
+        try:
+            self.media_notebook.select(self.playlists_tab)
+        except Exception:
+            pass
+
+    def set_playlist_combo_values(
+        self,
+        names: list[str],
+        *,
+        selected: str = "",
+    ) -> None:
+        """Refresh playlist dropdown options and selection."""
+        values = list(names or [])
+        if not values:
+            self.playlist_combo.configure(values=[], state="disabled")
+            self.var_playlist_choice.set("")
+            self.btn_playlist_rename.configure(state=DISABLED)
+            self.btn_playlist_delete.configure(state=DISABLED)
+            self.btn_playlist_sync.configure(state=DISABLED)
+            return
+        self.playlist_combo.configure(values=values, state="readonly")
+        pick = selected if selected in values else values[0]
+        self.var_playlist_choice.set(pick)
+        self.btn_playlist_rename.configure(state=NORMAL)
+        self.btn_playlist_delete.configure(state=NORMAL)
+        self.btn_playlist_sync.configure(state=NORMAL)
+
+    def clear_playlist_tree(self) -> None:
+        tree = self.playlist_tree
+        for iid in tree.get_children(""):
+            tree.delete(iid)
+
+    def popup_playlist_context(self, event) -> str | None:
+        """Context menu for the Playlists tab tree."""
+        menu = self.menu_playlist_ctx
+        try:
+            tree = self.playlist_tree
+            row = tree.identify_row(event.y)
+            if row:
+                current = tree.selection()
+                if row not in current:
+                    tree.selection_set(row)
+                tree.focus(row)
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            try:
+                menu.grab_release()
+            except Exception:
+                pass
+        return "break"
+
+    def set_playback_commands(
+        self,
+        *,
+        on_play_pause=None,
+        on_prev=None,
+        on_next=None,
+        on_close=None,
+        on_seek=None,
+    ) -> None:
+        """Wire bottom-frame playback control callbacks."""
+        self._on_playback_play_pause = on_play_pause
+        self._on_playback_prev = on_prev
+        self._on_playback_next = on_next
+        self._on_playback_close = on_close
+        self._on_playback_seek = on_seek
+        if on_play_pause is not None:
+            self.btn_playback_play.configure(command=on_play_pause)
+        if on_prev is not None:
+            self.btn_playback_prev.configure(command=on_prev)
+        if on_next is not None:
+            self.btn_playback_next.configure(command=on_next)
+        if on_close is not None:
+            self.btn_playback_close.configure(command=on_close)
+
+    @staticmethod
+    def _format_playback_time(seconds: float) -> str:
+        sec = max(0, int(seconds or 0))
+        m, s = divmod(sec, 60)
+        h, m = divmod(m, 60)
+        if h:
+            return f"{h}:{m:02d}:{s:02d}"
+        return f"{m}:{s:02d}"
+
+    def _on_scrub_press(self, _event=None) -> None:
+        self._scrub_dragging = True
+
+    def _on_scrub_command(self, _value=None) -> None:
+        # Live time label while dragging; commit seek on release.
+        if self._scrub_programmatic or not self._scrub_dragging:
+            return
+        # Duration is stored on the scale's last update via update_playback_state.
+        duration = float(getattr(self, "_playback_duration", 0.0) or 0.0)
+        if duration <= 0:
+            return
+        frac = float(self.var_playback_scrub.get()) / 1000.0
+        pos = max(0.0, min(duration, frac * duration))
+        self.lbl_playback_time.configure(
+            text=(
+                f"{self._format_playback_time(pos)} / "
+                f"{self._format_playback_time(duration)}"
+            )
+        )
+
+    def _on_scrub_release(self, _event=None) -> None:
+        if not self._scrub_dragging:
+            return
+        self._scrub_dragging = False
+        duration = float(getattr(self, "_playback_duration", 0.0) or 0.0)
+        if duration <= 0 or self._on_playback_seek is None:
+            return
+        frac = float(self.var_playback_scrub.get()) / 1000.0
+        pos = max(0.0, min(duration, frac * duration))
+        try:
+            self._on_playback_seek(pos)
+        except Exception:
+            pass
+
+    def set_playback_always_show(self, always: bool) -> None:
+        """Persist View → Always show playback controls into the bar layout."""
+        self._playback_always_show = bool(always)
+        # Close is only useful when the bar can auto-hide.
+        if self._playback_always_show:
+            try:
+                self.btn_playback_close.pack_forget()
+            except Exception:
+                pass
+        else:
+            try:
+                self.btn_playback_close.pack(side=RIGHT, padx=(2, 4), pady=4)
+            except Exception:
+                pass
+        self._refresh_playback_row_visibility(force=True)
+
+    def set_playback_active(self, active: bool) -> None:
+        """Show/hide the playback bar based on activity + always-show pref."""
+        self._playback_session_active = bool(active)
+        self._refresh_playback_row_visibility()
+
+    def _refresh_playback_row_visibility(self, *, force: bool = False) -> None:
+        show = bool(
+            getattr(self, "_playback_always_show", False)
+            or getattr(self, "_playback_session_active", False)
+        )
+        if show == self._playback_row_visible and not force:
+            return
+        if show:
+            # Above status/progress so controls stay readable during jobs.
+            self.playback_row.pack(
+                side=TOP, fill=X, padx=2, pady=(4, 0), before=self.lbl_progress_status
+            )
+            self._playback_row_visible = True
+            # Resume marquee if a long title is already set.
+            if (
+                len(self._playback_title_full or "") > _PLAYBACK_TITLE_WIDTH
+                and self._playback_marquee_after_id is None
+            ):
+                self._schedule_playback_marquee()
+        else:
+            try:
+                self.playback_row.pack_forget()
+            except Exception:
+                pass
+            self._playback_row_visible = False
+            self._cancel_playback_marquee()
+
+    @staticmethod
+    def marquee_window(
+        text: str,
+        offset: int,
+        width: int = _PLAYBACK_TITLE_WIDTH,
+        *,
+        gap: str = _PLAYBACK_MARQUEE_GAP,
+    ) -> str:
+        """Return a *width*-char slice of *text* starting at *offset* (wraps).
+
+        When *text* fits in *width*, returns the full string (no padding).
+        Long titles use *gap* between end and start so the loop reads cleanly.
+        """
+        full = text or ""
+        if width <= 0:
+            return ""
+        if len(full) <= width:
+            return full
+        cycle = full + (gap or "")
+        if not cycle:
+            return ""
+        n = len(cycle)
+        start = int(offset) % n
+        doubled = cycle + cycle
+        return doubled[start : start + width]
+
+    def _cancel_playback_marquee(self) -> None:
+        aid = self._playback_marquee_after_id
+        self._playback_marquee_after_id = None
+        if aid is not None:
+            try:
+                self.root.after_cancel(aid)
+            except Exception:
+                pass
+
+    def _apply_playback_title_slice(self) -> None:
+        """Paint the current marquee window onto the title label."""
+        visible = self.marquee_window(
+            self._playback_title_full,
+            self._playback_title_offset,
+            _PLAYBACK_TITLE_WIDTH,
+        )
+        try:
+            self.lbl_playback_title.configure(text=visible)
+        except Exception:
+            pass
+
+    def _schedule_playback_marquee(self) -> None:
+        """Advance long titles by 1 character every 250ms."""
+        self._cancel_playback_marquee()
+        full = self._playback_title_full or ""
+        if len(full) <= _PLAYBACK_TITLE_WIDTH:
+            return
+        self._playback_marquee_after_id = self.root.after(
+            _PLAYBACK_MARQUEE_MS, self._on_playback_marquee_tick
+        )
+
+    def _on_playback_marquee_tick(self) -> None:
+        self._playback_marquee_after_id = None
+        full = self._playback_title_full or ""
+        if len(full) <= _PLAYBACK_TITLE_WIDTH:
+            self._apply_playback_title_slice()
+            return
+        cycle_len = len(full) + len(_PLAYBACK_MARQUEE_GAP)
+        if cycle_len <= 0:
+            return
+        self._playback_title_offset = (
+            self._playback_title_offset + 1
+        ) % cycle_len
+        self._apply_playback_title_slice()
+        self._schedule_playback_marquee()
+
+    def set_playback_title(self, title: str) -> None:
+        """Set the full playback title; start marquee when it overflows."""
+        text = title or ""
+        if text == self._playback_title_full:
+            # Same track — keep offset; ensure timer is running if needed.
+            if (
+                len(text) > _PLAYBACK_TITLE_WIDTH
+                and self._playback_marquee_after_id is None
+            ):
+                self._schedule_playback_marquee()
+            return
+        self._playback_title_full = text
+        self._playback_title_offset = 0
+        self._cancel_playback_marquee()
+        self._apply_playback_title_slice()
+        self._schedule_playback_marquee()
+
+    def update_playback_state(
+        self,
+        *,
+        title: str = "",
+        position_sec: float = 0.0,
+        duration_sec: float = 0.0,
+        playing: bool = False,
+        paused: bool = False,
+        show_nav: bool = False,
+        enabled: bool = False,
+    ) -> None:
+        """Refresh labels, scrubber, and button enablement."""
+        self._playback_duration = max(0.0, float(duration_sec or 0.0))
+        self._playback_show_nav = bool(show_nav)
+
+        self.set_playback_title(title or "")
+        self.lbl_playback_time.configure(
+            text=(
+                f"{self._format_playback_time(position_sec)} / "
+                f"{self._format_playback_time(self._playback_duration)}"
+            )
+        )
+
+        # Prev/Next only when a multi-track queue is loaded.
+        nav_state = NORMAL if (enabled and show_nav) else DISABLED
+        self.btn_playback_prev.configure(state=nav_state)
+        self.btn_playback_next.configure(state=nav_state)
+        if show_nav:
+            try:
+                self.btn_playback_prev.pack(
+                    side=LEFT, padx=(4, 2), pady=4, before=self.btn_playback_play
+                )
+                self.btn_playback_next.pack(
+                    side=LEFT, padx=2, pady=4, after=self.btn_playback_play
+                )
+            except Exception:
+                pass
+        else:
+            try:
+                self.btn_playback_prev.pack_forget()
+                self.btn_playback_next.pack_forget()
+            except Exception:
+                pass
+
+        if playing and not paused:
+            self.btn_playback_play.configure(
+                text="Pause", state=NORMAL if enabled else DISABLED
+            )
+        else:
+            self.btn_playback_play.configure(
+                text="Play", state=NORMAL if enabled else DISABLED
+            )
+
+        scrub_state = NORMAL if enabled else DISABLED
+        try:
+            self.playback_scrub.configure(state=scrub_state)
+        except Exception:
+            pass
+
+        if not self._scrub_dragging:
+            if self._playback_duration > 0:
+                frac = max(
+                    0.0,
+                    min(1.0, float(position_sec) / self._playback_duration),
+                )
+            else:
+                frac = 0.0
+            self._scrub_programmatic = True
+            try:
+                self.var_playback_scrub.set(frac * 1000.0)
+            finally:
+                self._scrub_programmatic = False
+
+    def set_playing_row(self, iid: str | None) -> None:
+        """Highlight the currently playing track row (deep dark purple)."""
+        prev = self._playing_iid
+        if prev and prev != iid:
+            self._clear_playing_tag(prev)
+        self._playing_iid = iid
+        if iid:
+            self._set_playing_tag(iid)
+
+    def _set_playing_tag(self, iid: str) -> None:
+        for tree in self.library_media_trees():
+            if not tree.exists(iid):
+                continue
+            tags = list(tree.item(iid, "tags") or ())
+            if "playing" not in tags:
+                tags.append("playing")
+                tree.item(iid, tags=tags)
+            return
+
+    def _clear_playing_tag(self, iid: str) -> None:
+        for tree in self.library_media_trees():
+            if not tree.exists(iid):
+                continue
+            tags = [t for t in (tree.item(iid, "tags") or ()) if t != "playing"]
+            tree.item(iid, tags=tags)
+            return
+
+    def clear_playing_styles(self) -> None:
+        """Remove playing highlight from all library trees."""
+        self._playing_iid = None
+        for tree in self.library_media_trees():
+            for iid in self._all_iids(tree):
+                tags = [
+                    t for t in (tree.item(iid, "tags") or ()) if t != "playing"
+                ]
+                tree.item(iid, tags=tags)
 
     def set_library_menu_state(
         self,
         *,
-        update_enabled: bool,
-        select_enabled: bool = True,
+        manage_enabled: bool = True,
+        update_enabled: bool | None = None,
+        select_enabled: bool | None = None,
     ) -> None:
-        """Enable/disable Library menu commands."""
+        """Enable/disable Library → Manage Library….
+
+        *update_enabled* / *select_enabled* are legacy aliases: the menu stays
+        enabled when either would have been true (roots manager is always
+        useful to add a first root).
+        """
+        if update_enabled is not None or select_enabled is not None:
+            # Legacy dual-flag call sites: keep the manager openable whenever
+            # select was allowed; update-only disable no longer hides the menu.
+            legacy_select = True if select_enabled is None else bool(select_enabled)
+            manage_enabled = legacy_select and manage_enabled
         self.menu_library.entryconfig(
-            MENU_SELECT_ROOT,
-            state=NORMAL if select_enabled else DISABLED,
-        )
-        self.menu_library.entryconfig(
-            MENU_UPDATE_LIBRARY,
-            state=NORMAL if update_enabled else DISABLED,
+            MENU_MANAGE_LIBRARY,
+            state=NORMAL if manage_enabled else DISABLED,
         )
 
     def set_library_status(
         self,
-        root_path: str,
-        track_count: int,
+        root_path: str = "",
+        track_count: int = 0,
         *,
+        root_paths: list[str] | None = None,
         root_reachable: bool = True,
         busy_message: str | None = None,
     ) -> None:
         """Update toolbar path label and track count.
 
+        When multiple *root_paths* are present, the label shows
+        ``Multiple Library Roots`` and the hover tip lists every root.
+        A single root shows an elided path (full path on hover).
+
         When *busy_message* is set (e.g. during a background scan), the count
         label shows that status instead of a numeric track total.
         """
-        if root_path:
-            display = _elide_path(root_path)
+        if root_paths is not None:
+            paths = [p for p in root_paths if p]
+        elif root_path:
+            paths = [root_path]
+        else:
+            paths = []
+
+        if len(paths) > 1:
+            display = "Multiple Library Roots"
             if not root_reachable:
                 display = f"(unreachable) {display}"
             self.lbl_library_path.configure(text=display)
+            self._library_path_tip.set_text("\n".join(paths))
+        elif len(paths) == 1:
+            display = _elide_path(paths[0])
+            if not root_reachable:
+                display = f"(unreachable) {display}"
+            self.lbl_library_path.configure(text=display)
+            self._library_path_tip.set_text(paths[0])
         else:
             self.lbl_library_path.configure(text="No library selected")
+            self._library_path_tip.set_text("")
+
         if busy_message:
             self.lbl_library_count.configure(text=busy_message)
             return
@@ -609,6 +2069,43 @@ class MainWindow:
         self.tree.delete(*self.tree.get_children())
         # Drop in-memory PhotoImage refs; on-disk thumbs remain.
         self._album_art_cache.clear()
+
+    def clear_videos_tree(self) -> None:
+        """Clear Library → Video tree."""
+        try:
+            self.videos_tree.delete(*self.videos_tree.get_children())
+        except Exception:
+            pass
+
+    def clear_audiobooks_tree(self) -> None:
+        """Clear Library → Audiobooks tree."""
+        try:
+            self.audiobooks_tree.delete(*self.audiobooks_tree.get_children())
+        except Exception:
+            pass
+
+    def clear_device_track_tree(self) -> None:
+        """Clear Device → Music tree (album-art cache shared with library)."""
+        try:
+            self.device_tree.delete(*self.device_tree.get_children())
+        except Exception:
+            pass
+
+    def clear_device_video_tree(self) -> None:
+        """Clear Device → Video tree."""
+        try:
+            self.device_video_tree.delete(*self.device_video_tree.get_children())
+        except Exception:
+            pass
+
+    def clear_device_audiobooks_tree(self) -> None:
+        """Clear Device → Audiobooks tree."""
+        try:
+            self.device_audiobooks_tree.delete(
+                *self.device_audiobooks_tree.get_children()
+            )
+        except Exception:
+            pass
 
     def album_art_photo_from_disk(
         self,
@@ -665,25 +2162,71 @@ class MainWindow:
     def set_tracks_usable(self, usable: bool) -> None:
         """Allow interaction, or mark the tree as dead/unreachable."""
         self._tracks_interactive = usable
+        trees = (self.tree, self.videos_tree, self.audiobooks_tree)
         if usable:
-            self.tree.configure(selectmode="extended")
-            # Drop dead tag from all items
-            for iid in self._all_iids():
-                tags = [t for t in self.tree.item(iid, "tags") if t != "dead"]
-                self.tree.item(iid, tags=tags)
+            for tree in trees:
+                tree.configure(selectmode="extended")
+                # Drop dead tag from all items
+                for iid in self._all_iids(tree):
+                    tags = [t for t in tree.item(iid, "tags") if t != "dead"]
+                    tree.item(iid, tags=tags)
             return
-        self.tree.configure(selectmode="none")
-        for iid in self._all_iids():
-            tags = list(self.tree.item(iid, "tags"))
-            if "dead" not in tags:
-                tags.append("dead")
-            self.tree.item(iid, tags=tags)
+        for tree in trees:
+            tree.configure(selectmode="none")
+            for iid in self._all_iids(tree):
+                tags = list(tree.item(iid, "tags"))
+                if "dead" not in tags:
+                    tags.append("dead")
+                tree.item(iid, tags=tags)
 
-    def _all_iids(self) -> list[str]:
+    def active_library_tree(self):
+        """Treeview for the selected library media tab (Music / Video / Audiobooks)."""
+        try:
+            current = self.media_notebook.select()
+        except Exception:
+            return self.tree
+        try:
+            if current == str(self.videoLibrary_tab):
+                return self.videos_tree
+            if current == str(self.audiobooksLibrary_tab):
+                return self.audiobooks_tree
+        except Exception:
+            pass
+        return self.tree
+
+    def library_media_trees(self):
+        """All host library Treeviews (Music, Video, Audiobooks)."""
+        return (self.tree, self.videos_tree, self.audiobooks_tree)
+
+    def device_media_trees(self):
+        """All on-device Treeviews (Music, Video, Audiobooks)."""
+        return (
+            self.device_tree,
+            self.device_video_tree,
+            self.device_audiobooks_tree,
+        )
+
+    def active_device_tree(self):
+        """Treeview for the selected device media tab."""
+        try:
+            current = self.device_notebook.select()
+        except Exception:
+            return self.device_tree
+        try:
+            if current == str(self.device_video_tab):
+                return self.device_video_tree
+            if current == str(self.device_audiobooks_tab):
+                return self.device_audiobooks_tree
+        except Exception:
+            pass
+        return self.device_tree
+
+    def _all_iids(self, tree=None) -> list[str]:
+        tree = tree if tree is not None else self.tree
         out: list[str] = []
 
         def walk(parent: str) -> None:
-            for child in self.tree.get_children(parent):
+            for child in tree.get_children(parent):
                 out.append(child)
                 walk(child)
 
@@ -692,33 +2235,49 @@ class MainWindow:
 
     def set_track_transfer_style(self, iid: str, status: str | None) -> None:
         """Tint a track row for transfer state via tags."""
-        if not self.tree.exists(iid):
+        tree = None
+        for candidate in (*self.library_media_trees(), self.playlist_tree):
+            try:
+                if candidate.exists(iid):
+                    tree = candidate
+                    break
+            except Exception:
+                continue
+        if tree is None:
             return
         tags = [
             t
-            for t in self.tree.item(iid, "tags")
+            for t in tree.item(iid, "tags")
             if not str(t).startswith("xfer_")
         ]
+        # Prefer transfer tint over playing highlight while a job is active;
+        # re-apply playing when transfer style is cleared.
         if status in (None, "done", "failed", "skipped", ""):
-            self.tree.item(iid, tags=tags)
+            if self._playing_iid == iid and "playing" not in tags:
+                tags.append("playing")
+            tree.item(iid, tags=tags)
             return
+        tags = [t for t in tags if t != "playing"]
         if status == "transferring":
             tags.append("xfer_transferring")
         elif status == "transcoding":
             tags.append("xfer_transcoding")
         else:
             tags.append("xfer_queued")
-        self.tree.item(iid, tags=tags)
+        tree.item(iid, tags=tags)
 
     def clear_transfer_styles(self) -> None:
-        """Clear all transfer tint tags from the tree."""
-        for iid in self._all_iids():
-            tags = [
-                t
-                for t in self.tree.item(iid, "tags")
-                if not str(t).startswith("xfer_")
-            ]
-            self.tree.item(iid, tags=tags)
+        """Clear all transfer tint tags from library trees."""
+        for tree in self.library_media_trees():
+            for iid in self._all_iids(tree):
+                tags = [
+                    t
+                    for t in tree.item(iid, "tags")
+                    if not str(t).startswith("xfer_")
+                ]
+                if self._playing_iid == iid and "playing" not in tags:
+                    tags.append("playing")
+                tree.item(iid, tags=tags)
 
     def popup_track_context(self, event) -> str | None:
         """Show context menu for the row under the pointer.
@@ -733,22 +2292,26 @@ class MainWindow:
         try:
             if not self._tracks_interactive:
                 return "break"
-            row = self.tree.identify_row(event.y)
+            # Prefer the widget that received the click (Music / Video / Audiobooks).
+            tree = event.widget if event is not None else self.tree
+            if tree not in self.library_media_trees():
+                tree = self.active_library_tree()
+            row = tree.identify_row(event.y)
             if not row:
                 return "break"
-            tags = set(self.tree.item(row, "tags"))
+            tags = set(tree.item(row, "tags"))
             # Preserve multi-select when right-clicking inside the selection.
-            current = self.tree.selection()
+            current = tree.selection()
             if row not in current:
-                self.tree.selection_set(row)
-            self.tree.focus(row)
-            self.tree.see(row)
+                tree.selection_set(row)
+            tree.focus(row)
+            tree.see(row)
 
             if "track" in tags:
                 menu = self.menu_track_ctx
             elif "group_artist" in tags:
                 menu = self.menu_artist_ctx
-            elif "group_album" in tags:
+            elif "group_directory" in tags or "group_album" in tags:
                 menu = self.menu_album_ctx
             else:
                 return "break"
@@ -770,19 +2333,128 @@ class MainWindow:
         """Optional hook(row_iid, tags) called before a context menu is shown."""
         self._prepare_context_menu = handler
 
+    def set_prepare_device_context_menu(self, handler) -> None:
+        """Optional hook(tree, row_iid, tags) before a device context menu."""
+        self._prepare_device_context_menu = handler
+
+    def set_device_context_commands(
+        self,
+        *,
+        on_delete=None,
+        on_pull=None,
+        on_pull_folder=None,
+        on_delete_artist=None,
+        on_delete_album=None,
+        on_delete_folder=None,
+        on_device_info=None,
+        on_delete_all=None,
+    ) -> None:
+        """Wire Device tree / panel context menu commands."""
+        if on_pull is not None:
+            self.menu_device_track_ctx.entryconfig(
+                CTX_DEVICE_PULL, command=on_pull
+            )
+        if on_pull_folder is not None:
+            self.menu_device_track_ctx.entryconfig(
+                CTX_DEVICE_PULL_FOLDER, command=on_pull_folder
+            )
+        if on_delete is not None:
+            self.menu_device_track_ctx.entryconfig(
+                CTX_DEVICE_DELETE, command=on_delete
+            )
+        if on_delete_artist is not None:
+            self.menu_device_artist_ctx.entryconfig(
+                0, command=on_delete_artist
+            )
+        if on_delete_album is not None:
+            self.menu_device_album_ctx.entryconfig(
+                0, command=on_delete_album
+            )
+        if on_delete_folder is not None:
+            self.menu_device_folder_ctx.entryconfig(
+                0, command=on_delete_folder
+            )
+        if on_device_info is not None:
+            self.menu_device_panel_ctx.entryconfig(
+                CTX_DEVICE_INFO, command=on_device_info
+            )
+        if on_delete_all is not None:
+            self.menu_device_panel_ctx.entryconfig(
+                CTX_DEVICE_DELETE_ALL, command=on_delete_all
+            )
+
+    def popup_device_context(self, event) -> str | None:
+        """Show on-device media context menu for the row under the pointer."""
+        menu = None
+        try:
+            if self._mode == "stable":
+                return "break"
+            tree = event.widget if event is not None else self.device_tree
+            if tree not in self.device_media_trees():
+                tree = self.active_device_tree()
+            row = tree.identify_row(event.y)
+            if not row:
+                return "break"
+            tags = set(tree.item(row, "tags"))
+            current = tree.selection()
+            if row not in current:
+                tree.selection_set(row)
+            tree.focus(row)
+            tree.see(row)
+
+            if "track" in tags:
+                menu = self.menu_device_track_ctx
+            elif "group_artist" in tags:
+                menu = self.menu_device_artist_ctx
+            elif "group_album" in tags:
+                menu = self.menu_device_album_ctx
+            elif "group_folder" in tags:
+                menu = self.menu_device_folder_ctx
+            else:
+                return "break"
+
+            if self._prepare_device_context_menu is not None:
+                self._prepare_device_context_menu(tree, row, tags)
+
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            if menu is not None:
+                try:
+                    menu.grab_release()
+                except Exception:
+                    pass
+        return "break"
+
+    def popup_device_panel_context(self, event) -> str | None:
+        """Show Device Info / Delete All on the device panel or graphic."""
+        menu = None
+        try:
+            if self._mode == "stable":
+                return "break"
+            menu = self.menu_device_panel_ctx
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            if menu is not None:
+                try:
+                    menu.grab_release()
+                except Exception:
+                    pass
+        return "break"
+
     def selected_tree_iid(self) -> str | None:
         """Primary selected row (focus preferred, else first in selection)."""
-        focus = self.tree.focus()
-        if focus and self.tree.exists(focus):
+        tree = self.active_library_tree()
+        focus = tree.focus()
+        if focus and tree.exists(focus):
             return focus
-        sel = self.tree.selection()
+        sel = tree.selection()
         if not sel:
             return None
         return sel[0]
 
     def selected_tree_iids(self) -> list[str]:
-        """All selected row iids (multi-select)."""
-        return list(self.tree.selection())
+        """All selected row iids (multi-select) from the active library tab."""
+        return list(self.active_library_tree().selection())
 
     def set_progress_status(self, text: str) -> None:
         """Update the status line above the progress bar (sync track, etc.)."""
@@ -842,35 +2514,81 @@ class MainWindow:
         image_path: Path | str | None,
         *,
         caption: str = "",
-        max_width: int = 180,
+        max_width: int = _DEVICE_GRAPHIC_MAX_WIDTH,
+        max_height: int = _DEVICE_GRAPHIC_HEIGHT,
     ) -> None:
-        """Show device art in the left panel, or clear when *image_path* is None."""
+        """Show device art in the fixed graphic slot, or clear when *image_path* is None.
+
+        Images are scaled to fit ``max_width`` × ``max_height`` (default 180×140).
+        Caption/photo are remembered so Stable Mode can borrow the device
+        caption label for help text and restore art when PyMTP mode returns.
+        """
         if image_path is None:
             self._device_photo = None
-            self.lbl_device_graphic.configure(image="")
-            self.lbl_device_caption.configure(text="")
+            self._device_caption = ""
+            if self._mode != "stable":
+                self.lbl_device_graphic.configure(image="")
+                self.lbl_device_caption.configure(text="")
             return
 
         path = Path(image_path)
-        key = f"{path.resolve()}:{max_width}"
+        key = f"{path.resolve()}:{max_width}x{max_height}"
         photo = self._device_photo_cache.get(key)
         if photo is None:
             if not path.is_file():
                 self.set_device_graphic(None)
                 return
             try:
-                raw = PhotoImage(file=str(path))
-                # Downscale large PNGs to fit the left column.
-                factor = max(1, int(raw.width() / max_width))
-                photo = raw.subsample(factor, factor) if factor > 1 else raw
+                photo = self._load_device_photo(
+                    path, max_width=max_width, max_height=max_height
+                )
+                if photo is None:
+                    self.set_device_graphic(None)
+                    return
                 self._device_photo_cache[key] = photo
             except Exception:
                 self.set_device_graphic(None)
                 return
 
         self._device_photo = photo  # prevent GC
-        self.lbl_device_graphic.configure(image=photo)
-        self.lbl_device_caption.configure(text=caption or "")
+        self._device_caption = caption or ""
+        if self._mode != "stable":
+            self.lbl_device_graphic.configure(image=photo)
+            self.lbl_device_caption.configure(text=self._device_caption)
+            if not self.device_graphic_slot.winfo_ismapped():
+                self.device_graphic_slot.pack(padx=6, pady=6, fill=X)
+
+    def _load_device_photo(
+        self,
+        path: Path,
+        *,
+        max_width: int,
+        max_height: int,
+    ) -> PhotoImage | None:
+        """Load *path* scaled to fit inside max_width × max_height.
+
+        Prefers Pillow (LANCZOS) when available so tall assets (e.g. 540×900)
+        land cleanly in the 140px slot; falls back to integer PhotoImage
+        subsample.
+        """
+        max_width = max(1, int(max_width))
+        max_height = max(1, int(max_height))
+        try:
+            from PIL import Image, ImageTk
+
+            im = Image.open(path)
+            im = im.convert("RGBA") if im.mode not in ("RGB", "RGBA") else im
+            im.thumbnail((max_width, max_height), Image.Resampling.LANCZOS)
+            return ImageTk.PhotoImage(im, master=self.root)
+        except Exception:
+            pass
+
+        raw = PhotoImage(file=str(path), master=self.root)
+        # Integer downsample so both width and height stay within the slot.
+        sx = raw.width() / max_width
+        sy = raw.height() / max_height
+        factor = max(1, int(math.ceil(max(sx, sy))))
+        return raw.subsample(factor, factor) if factor > 1 else raw
 
     def mainloop(self) -> None:
         self.root.mainloop()

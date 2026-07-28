@@ -7,7 +7,10 @@ from dataclasses import dataclass
 
 from tkinter import (
     BOTH,
+    DISABLED,
+    END,
     LEFT,
+    NORMAL,
     RIGHT,
     BooleanVar,
     Button,
@@ -15,9 +18,13 @@ from tkinter import (
     Entry,
     Frame,
     Label,
+    Listbox,
+    Menu,
     Radiobutton,
+    Scrollbar,
     StringVar,
     Toplevel,
+    Y,
     messagebox,
     simpledialog,
 )
@@ -32,6 +39,12 @@ from mtpmanager.infra.remote_naming import (
     ZEN_VISION_M_FOLDER_IDS,
 )
 from mtpmanager.ui.formatting import folder_line
+
+
+def _video_folder_radio_label(kind: str, folder_id: int, name: str) -> str:
+    """Label like ``Video  (folder 108 — Video)`` for destination radios."""
+    label = (name or "").strip() or kind
+    return f"{kind}  (folder {int(folder_id)} — {label})"
 
 
 def ask_text(
@@ -247,6 +260,501 @@ def show_config_dialog(
     return result[0]
 
 
+class ManageLibraryDialog:
+    """Modeless Library roots manager (add / remove / rescan).
+
+    Kept modeless so background scan/update can finish and refresh the list
+    without blocking the main window.
+    """
+
+    def __init__(
+        self,
+        parent,
+        *,
+        get_roots: Callable[[], list[str]],
+        on_add: Callable[[], None],
+        on_remove: Callable[[list[str]], None],
+        on_update: Callable[[], None],
+        is_busy: Callable[[], bool],
+        can_update: Callable[[], bool],
+        on_exclusions: Callable[[], None] | None = None,
+        on_close: Callable[[], None] | None = None,
+    ) -> None:
+        self._get_roots = get_roots
+        self._on_add = on_add
+        self._on_remove = on_remove
+        self._on_update = on_update
+        self._is_busy = is_busy
+        self._can_update = can_update
+        self._on_exclusions = on_exclusions
+        self._on_close = on_close
+
+        dlg = Toplevel(parent)
+        dlg.title("Manage Library")
+        dlg.transient(parent)
+        dlg.minsize(480, 320)
+        dlg.geometry("560x360")
+        self._dlg = dlg
+
+        body = Frame(dlg, padx=14, pady=12)
+        body.pack(fill=BOTH, expand=True)
+
+        Label(
+            body,
+            text="Library roots — folders scanned into the track list.",
+            anchor="w",
+            justify=LEFT,
+        ).pack(fill="x")
+
+        list_frame = Frame(body)
+        list_frame.pack(fill=BOTH, expand=True, pady=(8, 8))
+        scroll = Scrollbar(list_frame)
+        scroll.pack(side=RIGHT, fill=Y)
+        self._lb = Listbox(
+            list_frame,
+            yscrollcommand=scroll.set,
+            selectmode="extended",
+            activestyle="dotbox",
+            exportselection=False,
+        )
+        self._lb.pack(side=LEFT, fill=BOTH, expand=True)
+        scroll.config(command=self._lb.yview)
+        try:
+            self._lb.configure(font=("Menlo", 11))
+        except Exception:
+            try:
+                self._lb.configure(font=("Courier", 11))
+            except Exception:
+                pass
+
+        self._status = Label(body, text="", anchor="w", justify=LEFT)
+        self._status.pack(fill="x", pady=(0, 8))
+
+        row = Frame(body)
+        row.pack(fill="x")
+        self._btn_add = Button(row, text="Add Root…", width=12, command=self._click_add)
+        self._btn_add.pack(side=LEFT)
+        self._btn_remove = Button(
+            row, text="Remove Selected", width=14, command=self._click_remove
+        )
+        self._btn_remove.pack(side=LEFT, padx=(8, 0))
+        self._btn_update = Button(
+            row, text="Update Library", width=14, command=self._click_update
+        )
+        self._btn_update.pack(side=LEFT, padx=(8, 0))
+        self._btn_exclusions = Button(
+            row, text="Exclusions…", width=12, command=self._click_exclusions
+        )
+        self._btn_exclusions.pack(side=LEFT, padx=(8, 0))
+        if on_exclusions is None:
+            self._btn_exclusions.configure(state=DISABLED)
+        Button(row, text="Close", width=10, command=self.close).pack(side=RIGHT)
+
+        dlg.protocol("WM_DELETE_WINDOW", self.close)
+        self._lb.bind("<Delete>", lambda _e: self._click_remove())
+        self._lb.bind("<BackSpace>", lambda _e: self._click_remove())
+
+        try:
+            px = parent.winfo_rootx() + max(
+                0, (parent.winfo_width() - 560) // 2
+            )
+            py = parent.winfo_rooty() + max(
+                0, (parent.winfo_height() - 360) // 3
+            )
+            dlg.geometry(f"+{px}+{py}")
+        except Exception:
+            pass
+
+        self.refresh()
+        try:
+            dlg.focus_set()
+        except Exception:
+            pass
+
+    @property
+    def window(self) -> Toplevel:
+        """Underlying Tk window (for parenting file pickers / messageboxes)."""
+        return self._dlg
+
+    def is_open(self) -> bool:
+        try:
+            return bool(self._dlg.winfo_exists())
+        except Exception:
+            return False
+
+    def focus(self) -> None:
+        if not self.is_open():
+            return
+        try:
+            self._dlg.lift()
+            self._dlg.focus_force()
+        except Exception:
+            pass
+
+    def close(self) -> None:
+        dlg = self._dlg
+        try:
+            if dlg.winfo_exists():
+                dlg.destroy()
+        except Exception:
+            pass
+        if self._on_close is not None:
+            try:
+                self._on_close()
+            except Exception:
+                pass
+
+    def refresh(self) -> None:
+        """Reload root list and button enablement from callbacks."""
+        if not self.is_open():
+            return
+        roots = list(self._get_roots() or [])
+        selected = set(self._selected_paths())
+        self._lb.delete(0, END)
+        for path in roots:
+            self._lb.insert(END, path)
+            if path in selected:
+                self._lb.selection_set(END)
+
+        busy = False
+        try:
+            busy = bool(self._is_busy())
+        except Exception:
+            busy = False
+        can_up = False
+        try:
+            can_up = bool(self._can_update())
+        except Exception:
+            can_up = False
+
+        if busy:
+            self._status.configure(text="Library is scanning or a job is running…")
+        elif not roots:
+            self._status.configure(text="No roots yet. Add a folder to build the library.")
+        elif not can_up:
+            self._status.configure(
+                text="No reachable roots — reconnect volumes or add another folder."
+            )
+        else:
+            n = len(roots)
+            self._status.configure(
+                text=f"{n} library root{'s' if n != 1 else ''}."
+            )
+
+        add_state = DISABLED if busy else NORMAL
+        rem_state = DISABLED if busy or not roots else NORMAL
+        upd_state = DISABLED if busy or not can_up else NORMAL
+        try:
+            self._btn_add.configure(state=add_state)
+            self._btn_remove.configure(state=rem_state)
+            self._btn_update.configure(state=upd_state)
+        except Exception:
+            pass
+
+    def _selected_paths(self) -> list[str]:
+        try:
+            idxs = self._lb.curselection()
+        except Exception:
+            return []
+        out: list[str] = []
+        for i in idxs:
+            try:
+                out.append(str(self._lb.get(i)))
+            except Exception:
+                continue
+        return out
+
+    def _click_add(self) -> None:
+        if self._is_busy():
+            return
+        self._on_add()
+
+    def _click_remove(self) -> None:
+        if self._is_busy():
+            return
+        paths = self._selected_paths()
+        if not paths:
+            messagebox.showinfo(
+                "Manage Library",
+                "Select one or more roots to remove.",
+                parent=self._dlg,
+            )
+            return
+        if len(paths) == 1:
+            msg = f"Remove this library root?\n\n{paths[0]}"
+        else:
+            msg = f"Remove {len(paths)} library roots?"
+        if not messagebox.askyesno("Remove Library Root", msg, parent=self._dlg):
+            return
+        self._on_remove(paths)
+
+    def _click_update(self) -> None:
+        if self._is_busy() or not self._can_update():
+            return
+        self._on_update()
+
+    def _click_exclusions(self) -> None:
+        if self._on_exclusions is None:
+            return
+        self._on_exclusions()
+
+
+def open_manage_library_dialog(
+    parent,
+    *,
+    get_roots: Callable[[], list[str]],
+    on_add: Callable[[], None],
+    on_remove: Callable[[list[str]], None],
+    on_update: Callable[[], None],
+    is_busy: Callable[[], bool],
+    can_update: Callable[[], bool],
+    on_exclusions: Callable[[], None] | None = None,
+    on_close: Callable[[], None] | None = None,
+) -> ManageLibraryDialog:
+    """Open (or the caller reuses) the Manage Library window."""
+    return ManageLibraryDialog(
+        parent,
+        get_roots=get_roots,
+        on_add=on_add,
+        on_remove=on_remove,
+        on_update=on_update,
+        is_busy=is_busy,
+        can_update=can_update,
+        on_exclusions=on_exclusions,
+        on_close=on_close,
+    )
+
+
+class ExclusionsManagerDialog:
+    """Modeless list of excluded file/folder paths with de-exclude actions."""
+
+    def __init__(
+        self,
+        parent,
+        *,
+        get_exclusions: Callable[[], list[tuple[str, str]]],
+        on_remove: Callable[[list[str]], None],
+        is_busy: Callable[[], bool],
+        on_close: Callable[[], None] | None = None,
+    ) -> None:
+        self._get_exclusions = get_exclusions
+        self._on_remove = on_remove
+        self._is_busy = is_busy
+        self._on_close = on_close
+        # Display label → absolute path for selection mapping.
+        self._path_by_display: dict[str, str] = {}
+
+        dlg = Toplevel(parent)
+        dlg.title("Exclusions Manager")
+        dlg.transient(parent)
+        dlg.minsize(520, 340)
+        dlg.geometry("640x400")
+        self._dlg = dlg
+
+        body = Frame(dlg, padx=14, pady=12)
+        body.pack(fill=BOTH, expand=True)
+
+        Label(
+            body,
+            text=(
+                "Excluded paths are skipped when scanning and removed from the "
+                "library list. GUIDs stay in the index for device joins."
+            ),
+            anchor="w",
+            justify=LEFT,
+            wraplength=600,
+        ).pack(fill="x")
+
+        list_frame = Frame(body)
+        list_frame.pack(fill=BOTH, expand=True, pady=(8, 8))
+        scroll = Scrollbar(list_frame)
+        scroll.pack(side=RIGHT, fill=Y)
+        self._lb = Listbox(
+            list_frame,
+            yscrollcommand=scroll.set,
+            selectmode="extended",
+            activestyle="dotbox",
+            exportselection=False,
+        )
+        self._lb.pack(side=LEFT, fill=BOTH, expand=True)
+        scroll.config(command=self._lb.yview)
+        try:
+            self._lb.configure(font=("Menlo", 11))
+        except Exception:
+            try:
+                self._lb.configure(font=("Courier", 11))
+            except Exception:
+                pass
+
+        self._status = Label(body, text="", anchor="w", justify=LEFT)
+        self._status.pack(fill="x", pady=(0, 8))
+
+        row = Frame(body)
+        row.pack(fill="x")
+        self._btn_remove = Button(
+            row,
+            text="Remove from Exclusions",
+            width=20,
+            command=self._click_remove,
+        )
+        self._btn_remove.pack(side=LEFT)
+        Button(row, text="Close", width=10, command=self.close).pack(side=RIGHT)
+
+        self._menu = Menu(dlg, tearoff=0)
+        self._menu.add_command(
+            label="Remove from exclusions",
+            command=self._click_remove,
+        )
+        self._lb.bind("<Button-3>", self._popup_menu)
+        self._lb.bind("<Button-2>", self._popup_menu)
+        self._lb.bind("<Delete>", lambda _e: self._click_remove())
+        self._lb.bind("<BackSpace>", lambda _e: self._click_remove())
+        self._lb.bind("<Double-Button-1>", lambda _e: self._click_remove())
+
+        dlg.protocol("WM_DELETE_WINDOW", self.close)
+        try:
+            px = parent.winfo_rootx() + max(
+                0, (parent.winfo_width() - 640) // 2
+            )
+            py = parent.winfo_rooty() + max(
+                0, (parent.winfo_height() - 400) // 3
+            )
+            dlg.geometry(f"+{px}+{py}")
+        except Exception:
+            pass
+
+        self.refresh()
+        try:
+            dlg.focus_set()
+        except Exception:
+            pass
+
+    @property
+    def window(self) -> Toplevel:
+        return self._dlg
+
+    def is_open(self) -> bool:
+        try:
+            return bool(self._dlg.winfo_exists())
+        except Exception:
+            return False
+
+    def focus(self) -> None:
+        if not self.is_open():
+            return
+        try:
+            self._dlg.lift()
+            self._dlg.focus_force()
+        except Exception:
+            pass
+
+    def close(self) -> None:
+        dlg = self._dlg
+        try:
+            if dlg.winfo_exists():
+                dlg.destroy()
+        except Exception:
+            pass
+        if self._on_close is not None:
+            try:
+                self._on_close()
+            except Exception:
+                pass
+
+    def refresh(self) -> None:
+        if not self.is_open():
+            return
+        selected = set(self._selected_paths())
+        rows = list(self._get_exclusions() or [])
+        self._path_by_display.clear()
+        self._lb.delete(0, END)
+        for path, kind in rows:
+            label = f"[{kind}] {path}"
+            self._path_by_display[label] = path
+            self._lb.insert(END, label)
+            if path in selected:
+                self._lb.selection_set(END)
+
+        busy = False
+        try:
+            busy = bool(self._is_busy())
+        except Exception:
+            busy = False
+        n = len(rows)
+        if busy:
+            self._status.configure(text="Library is busy…")
+        elif n == 0:
+            self._status.configure(text="No exclusions. Right-click media to exclude.")
+        else:
+            self._status.configure(
+                text=f"{n} exclusion{'s' if n != 1 else ''}."
+            )
+        rem_state = DISABLED if busy or n == 0 else NORMAL
+        try:
+            self._btn_remove.configure(state=rem_state)
+        except Exception:
+            pass
+
+    def _selected_paths(self) -> list[str]:
+        try:
+            idxs = self._lb.curselection()
+        except Exception:
+            return []
+        out: list[str] = []
+        for i in idxs:
+            try:
+                label = str(self._lb.get(i))
+            except Exception:
+                continue
+            path = self._path_by_display.get(label)
+            if path:
+                out.append(path)
+        return out
+
+    def _popup_menu(self, event) -> str | None:
+        try:
+            idx = self._lb.nearest(event.y)
+            if idx >= 0 and idx not in self._lb.curselection():
+                self._lb.selection_clear(0, END)
+                self._lb.selection_set(idx)
+            self._menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            try:
+                self._menu.grab_release()
+            except Exception:
+                pass
+        return "break"
+
+    def _click_remove(self) -> None:
+        if self._is_busy():
+            return
+        paths = self._selected_paths()
+        if not paths:
+            messagebox.showinfo(
+                "Exclusions Manager",
+                "Select one or more exclusions to remove.",
+                parent=self._dlg,
+            )
+            return
+        if len(paths) == 1:
+            msg = (
+                "Stop excluding this path?\n\n"
+                f"{paths[0]}\n\n"
+                "It will be scanned again if it is still under a library root."
+            )
+        else:
+            msg = (
+                f"Stop excluding {len(paths)} paths?\n\n"
+                "They will be scanned again if still under a library root."
+            )
+        if not messagebox.askyesno(
+            "Remove Exclusion", msg, parent=self._dlg
+        ):
+            return
+        self._on_remove(paths)
+
+
+
 @dataclass(frozen=True)
 class SendVideoDialogResult:
     """User choices from Device → Send Video…"""
@@ -320,13 +828,35 @@ def ask_video_destination(
     video_options: DeviceVideoOptions | None = None,
     encode_default: bool = True,
     include_broken_presets: bool = False,
+    video_folder_id: int | None = None,
+    tv_folder_id: int | None = None,
+    video_folder_name: str = "Video",
+    tv_folder_name: str = "TV",
 ) -> SendVideoDialogResult | None:
     """Ask Video/TV parent and optional device encode preset. None if cancelled.
 
     *video_options* is only set for known players (e.g. ZEN Vision:M). The
     generic device profile passes None — no format notebook is shown.
     *include_broken_presets* comes from Config (show broken recipes like WMV).
+
+    *video_folder_id* / *tv_folder_id* come from a live folder-name resolution
+    when available; defaults fall back to legacy Vision:M ids (120 / 124).
     """
+    vid = (
+        int(video_folder_id)
+        if video_folder_id is not None
+        else DEFAULT_VIDEO_FOLDER_ID
+    )
+    tid = (
+        int(tv_folder_id) if tv_folder_id is not None else DEFAULT_TV_FOLDER_ID
+    )
+    vname = (video_folder_name or "").strip() or ZEN_VISION_M_FOLDER_IDS.get(
+        vid, "Video"
+    )
+    tname = (tv_folder_name or "").strip() or ZEN_VISION_M_FOLDER_IDS.get(
+        tid, "TV"
+    )
+
     dlg = Toplevel(parent)
     dlg.title("Send Video")
     dlg.transient(parent)
@@ -347,16 +877,14 @@ def ask_video_destination(
     choice = StringVar(value="video")
     Radiobutton(
         body,
-        text=f"Video  (folder {DEFAULT_VIDEO_FOLDER_ID} — "
-        f"{ZEN_VISION_M_FOLDER_IDS[DEFAULT_VIDEO_FOLDER_ID]})",
+        text=_video_folder_radio_label("Video", vid, vname),
         variable=choice,
         value="video",
         anchor="w",
     ).pack(fill="x", pady=2)
     Radiobutton(
         body,
-        text=f"TV show  (folder {DEFAULT_TV_FOLDER_ID} — "
-        f"{ZEN_VISION_M_FOLDER_IDS[DEFAULT_TV_FOLDER_ID]})",
+        text=_video_folder_radio_label("TV show", tid, tname),
         variable=choice,
         value="tv",
         anchor="w",
@@ -499,11 +1027,7 @@ def ask_video_destination(
     result: list[SendVideoDialogResult | None] = [None]
 
     def on_send() -> None:
-        parent_id = (
-            DEFAULT_TV_FOLDER_ID
-            if choice.get() == "tv"
-            else DEFAULT_VIDEO_FOLDER_ID
-        )
+        parent_id = tid if choice.get() == "tv" else vid
         do_encode = bool(encode_var.get()) and has_options
         preset = _selected_preset() if do_encode else None
         cap = float(preset.max_fps or 0) if preset is not None else 0.0
@@ -1004,3 +1528,225 @@ def show_track_info_dialog(parent, info) -> None:
     except Exception:
         pass
     parent.wait_window(dlg)
+
+
+@dataclass
+class AddToPlaylistResult:
+    """Outcome of the Add to Playlist dialog."""
+
+    playlist_id: int
+    playlist_name: str
+    skip_existing: bool = True
+    # True when the user created/deleted playlists (caller may refresh tab).
+    playlists_changed: bool = False
+
+
+def ask_add_to_playlist(
+    parent,
+    *,
+    candidate_tracks: list,
+    list_playlists: Callable[[], list],
+    create_playlist: Callable[[str], object],
+    delete_playlist: Callable[[int], bool],
+) -> AddToPlaylistResult | None:
+    """Modal: pick (or create) a playlist and confirm adding *candidate_tracks*.
+
+    *list_playlists* returns a sequence of objects with ``.id``, ``.name``,
+    and optional ``.track_count``. *create_playlist(name)* returns an object
+    with ``.id`` / ``.name``. *delete_playlist(id)* returns success bool.
+
+    Returns :class:`AddToPlaylistResult` or None if cancelled.
+    """
+    from mtpmanager.domain.library import primary_artist
+
+    tracks = list(candidate_tracks or [])
+    result: list[AddToPlaylistResult | None] = [None]
+    changed = [False]
+
+    dlg = Toplevel(parent)
+    dlg.title("Add to Playlist")
+    dlg.transient(parent)
+    dlg.resizable(True, True)
+
+    body = Frame(dlg, padx=12, pady=10)
+    body.pack(fill=BOTH, expand=True)
+
+    # --- Candidates (add mode only) ---
+    if tracks:
+        Label(
+            body,
+            text=f"Tracks to add ({len(tracks)})",
+            font=("", 11, "bold"),
+            anchor="w",
+        ).pack(anchor="w", pady=(0, 4))
+        cand_frame = Frame(body)
+        cand_frame.pack(fill=BOTH, expand=True, pady=(0, 8))
+        cand_scroll = Scrollbar(cand_frame)
+        cand_scroll.pack(side=RIGHT, fill=Y)
+        cand_list = Listbox(
+            cand_frame,
+            height=min(8, max(3, len(tracks))),
+            yscrollcommand=cand_scroll.set,
+            exportselection=False,
+        )
+        cand_list.pack(side=LEFT, fill=BOTH, expand=True)
+        cand_scroll.config(command=cand_list.yview)
+        for t in tracks:
+            title = (t.meta.title if t.meta else "") or "Unknown Title"
+            artist = primary_artist(t) if t else ""
+            cand_list.insert(END, f"{artist} — {title}" if artist else title)
+
+    Label(body, text="Playlists", font=("", 11, "bold"), anchor="w").pack(
+        anchor="w", pady=(0, 4)
+    )
+    pl_frame = Frame(body)
+    pl_frame.pack(fill=BOTH, expand=True)
+    pl_scroll = Scrollbar(pl_frame)
+    pl_scroll.pack(side=RIGHT, fill=Y)
+    pl_list = Listbox(
+        pl_frame,
+        height=8,
+        yscrollcommand=pl_scroll.set,
+        exportselection=False,
+    )
+    pl_list.pack(side=LEFT, fill=BOTH, expand=True)
+    pl_scroll.config(command=pl_list.yview)
+
+    # id list parallel to listbox rows
+    pl_ids: list[int] = []
+
+    def refresh_playlists(*, select_id: int | None = None) -> None:
+        pl_list.delete(0, END)
+        pl_ids.clear()
+        items = list(list_playlists() or [])
+        for info in items:
+            pid = int(getattr(info, "id", 0) or 0)
+            name = str(getattr(info, "name", "") or "")
+            count = getattr(info, "track_count", None)
+            label = f"{name}  ({count})" if count is not None else name
+            pl_list.insert(END, label)
+            pl_ids.append(pid)
+        if not pl_ids:
+            btn_add.configure(state=DISABLED)
+            btn_del.configure(state=DISABLED)
+            return
+        btn_del.configure(state=NORMAL)
+        btn_add.configure(state=NORMAL if tracks else DISABLED)
+        idx = 0
+        if select_id is not None and select_id in pl_ids:
+            idx = pl_ids.index(select_id)
+        pl_list.selection_clear(0, END)
+        pl_list.selection_set(idx)
+        pl_list.see(idx)
+
+    skip_var = BooleanVar(value=True)
+    Checkbutton(
+        body,
+        text="Skip tracks already in the playlist",
+        variable=skip_var,
+    ).pack(anchor="w", pady=(6, 2))
+
+    btn_row = Frame(body)
+    btn_row.pack(fill="x", pady=(8, 0))
+
+    def on_new() -> None:
+        name = ask_text(
+            dlg,
+            title="New Playlist",
+            prompt="Playlist name:",
+        )
+        if not name:
+            return
+        try:
+            created = create_playlist(name)
+        except ValueError as e:
+            messagebox.showerror("Playlist", str(e), parent=dlg)
+            return
+        except Exception as e:
+            messagebox.showerror("Playlist", f"Could not create playlist:\n{e}", parent=dlg)
+            return
+        changed[0] = True
+        refresh_playlists(select_id=int(getattr(created, "id", 0) or 0))
+
+    def on_delete() -> None:
+        sel = pl_list.curselection()
+        if not sel:
+            return
+        idx = int(sel[0])
+        if idx < 0 or idx >= len(pl_ids):
+            return
+        pid = pl_ids[idx]
+        label = pl_list.get(idx)
+        if not messagebox.askyesno(
+            "Delete Playlist",
+            f"Delete playlist?\n\n{label}",
+            parent=dlg,
+        ):
+            return
+        try:
+            ok = bool(delete_playlist(pid))
+        except Exception as e:
+            messagebox.showerror("Playlist", f"Delete failed:\n{e}", parent=dlg)
+            return
+        if not ok:
+            messagebox.showwarning("Playlist", "Playlist was not found.", parent=dlg)
+        changed[0] = True
+        refresh_playlists()
+
+    def on_add() -> None:
+        sel = pl_list.curselection()
+        if not sel or not tracks:
+            return
+        idx = int(sel[0])
+        if idx < 0 or idx >= len(pl_ids):
+            return
+        pid = pl_ids[idx]
+        name = pl_list.get(idx).rsplit("  (", 1)[0]
+        result[0] = AddToPlaylistResult(
+            playlist_id=pid,
+            playlist_name=name,
+            skip_existing=bool(skip_var.get()),
+            playlists_changed=changed[0],
+        )
+        dlg.destroy()
+
+    def on_cancel() -> None:
+        result[0] = None
+        dlg.destroy()
+
+    btn_new = Button(btn_row, text="+", width=3, command=on_new)
+    btn_new.pack(side=LEFT, padx=(0, 4))
+    btn_del = Button(btn_row, text="−", width=3, command=on_delete, state=DISABLED)
+    btn_del.pack(side=LEFT, padx=(0, 8))
+    Button(btn_row, text="Cancel", width=10, command=on_cancel).pack(side=RIGHT)
+    btn_add = Button(
+        btn_row,
+        text="Add to selected",
+        width=14,
+        command=on_add,
+        state=DISABLED,
+    )
+    btn_add.pack(side=RIGHT, padx=(0, 6))
+
+    refresh_playlists()
+    dlg.protocol("WM_DELETE_WINDOW", on_cancel)
+    dlg.grab_set()
+    try:
+        px = parent.winfo_rootx() + max(0, (parent.winfo_width() - 480) // 2)
+        py = parent.winfo_rooty() + max(0, (parent.winfo_height() - 520) // 3)
+        dlg.geometry(f"480x520+{px}+{py}")
+    except Exception:
+        dlg.geometry("480x520")
+    parent.wait_window(dlg)
+
+    out = result[0]
+    if out is None and changed[0]:
+        # User edited playlists but cancelled add — still signal refresh.
+        return AddToPlaylistResult(
+            playlist_id=-1,
+            playlist_name="",
+            skip_existing=True,
+            playlists_changed=True,
+        )
+    return out
+

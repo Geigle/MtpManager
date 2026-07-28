@@ -9,7 +9,7 @@ End-to-end send path, Stable vs Experimental behavior, and where to change thing
 ## End-to-end flow
 
 ```text
-[index load | Select/Scan Library] → Library / Track
+[index load | Manage Library / scan] → Library / Track
      → user action → transfer_track(s)
      → (optional) FFmpegTranscoder → Transport.send_track
 ```
@@ -17,15 +17,17 @@ End-to-end send path, Stable vs Experimental behavior, and where to change thing
 | Step | Module | Notes |
 |------|--------|--------|
 | Restore index | `ui/controllers._start_index_restore` | Startup: background load of durable JSON |
-| Library menu | `ui/window` menubar **Library** | Select root / Update (see below) |
+| Library menu | `ui/window` menubar **Library** | Manage Library… (see below) |
 | Library toolbar | `ui/window` (full-width under title) | Status only: path + track count (shows Scanning… / Loading index… when busy) |
-| Select root | `ui/controllers.on_select_library_root` | Folder picker → **background** full scan → save index |
-| Update | `ui/controllers.on_update_library` | **Background** re-scan of stored root; disabled if root missing/unreachable or busy |
-| Scan | `app/scan_library.scan_library` | Recursive music files → tags via mutagen (worker thread) |
+| Manage library | `ui/controllers.on_manage_library` + `dialogs.ManageLibraryDialog` | **Library → Manage Library…**: list roots; **Add Root…** / **Remove Selected** / **Update Library** |
+| Add root | `ui/controllers.on_add_library_root` | Folder picker → **add** root (if new) → **background** full scan of **all** roots → save index |
+| Remove root(s) | `ui/controllers.on_remove_library_roots` | Drop selected roots → **background** re-scan of remaining (or clear library if none left) |
+| Update | `ui/controllers.on_update_library` | **Background** re-scan of **all** stored roots; disabled in dialog when no root reachable or busy |
+| Scan | `app/scan_library.scan_library` / `scan_library_roots` | Recursive music files → tags via mutagen (worker thread); multi-root merge + path dedupe |
 | Background jobs | `ui/bg.TkBackgroundRunner` | Thread + queue + `root.after` poll; never touch Tk from workers |
 | Persist index | `infra/library_index` | SQLite `{data_dir}/library_index.db`; GUID per track; saved in scan worker |
 | Index (in-memory) | `domain/library.Library` | Source of truth; Treeview is a sorted view |
-| Library tree | `ttk.Treeview` + `domain/library_sort` | Columns Title/Artist/Album/Year; heading click sorts; Artist/Year hierarchy. Group rows put the full header text in Title. **Album** headers show a thumb in `#0` (rowheight sized so art is not cropped). Thumbs are **disk-cached** PNGs under `{data_dir}/album_art_cache/` and built **off the UI thread** (with index load/scan + after tree rebuild). |
+| Library tree | `ttk.Treeview` + `domain/library_sort` | Columns Title/Artist/Album/Year; heading click changes grouping. **Default (Artist option 3):** `{artist} - {album}`→Track (VA only when `tracks_should_group_as_various_artists` — compilations/path/true multi-core-artist; soundtrack/OST genre only if multi-artist; **feat./ft./with/vs. do not** force VA). **Artist** *cycles* four modes: (1) Artist→Album→Track A–Z, (2) same Z–A, (3) default combo, (4) combo reverse. **Album:** `{album} - {artist}`→Track. **Year / Title** as before. Group headers in Title; album thumbs in `#0` when cached. Fibonacci-chunked inserts. |
 | Format preference | **Config → Config…** → `{data_dir}/config.json` | Durable `send_format` (`mp3`/`wma`); all Sync actions use it |
 | Track context menu | Right-click listbox row | Sync this track / Sync Album / Sync all from Artist |
 | Transfer menu | Menubar | Sync Entire Library; Sync Folder… |
@@ -38,26 +40,29 @@ End-to-end send path, Stable vs Experimental behavior, and where to change thing
 
 | Chrome | Role |
 |--------|------|
-| **Library** menu | Commands: **Select Library Root…**, **Update Library** |
-| Status toolbar | Path + track count only (not action buttons) |
+| **Library** menu | Command: **Manage Library…** (add/remove roots + update scan) |
+| Status toolbar | Path (or **Multiple Library Roots**) + track count only (not action buttons). Hover the path label for the full path, or the full list of roots when multi-root. |
 
-| Menu command | Behavior |
-|--------------|----------|
-| **Select Library Root…** | Folder picker → background full scan → save index |
-| **Update Library** | Background re-scan of stored root → rewrite index; **disabled** when no root, root unreachable, or a library job is running |
+| Menu / dialog action | Behavior |
+|----------------------|----------|
+| **Library → Manage Library…** | Modeless window listing roots; **Add Root…**, **Remove Selected**, **Update Library**, **Close** |
+| **Add Root…** | Folder picker → add folder if new → background full scan of **all** roots → save index |
+| **Remove Selected** | Confirm → drop root(s) → background re-scan of remaining (empty library if none left) |
+| **Update Library** | Background re-scan of **all** stored roots → rewrite index; **disabled** when no root is reachable or a library job is running |
 
-- **Startup:** schedule index restore after the UI is up (`after(0, …)`). Worker loads `{data_dir}/library_index.db` (migrates legacy `library_index.json` once if needed); main thread fills the listbox. If `root_path` is still a directory, missing files are dropped. If the root is **unreachable**, still show index entries greyed/disabled and leave **Update Library** disabled.
+- **Startup:** schedule index restore after the UI is up (`after(0, …)`). Worker loads `{data_dir}/library_index.db` (migrates legacy `library_index.json` once if needed); main thread fills the listbox. If **any** root is still a directory, missing files are dropped. If **all** roots are **unreachable**, still show index entries greyed/disabled; Manage Library remains available so roots can be fixed.
+- **Multiple roots:** the durable index stores `root_paths` (JSON list) plus legacy `root_path` (first root). One mixed tree or several media locations can share a single library view.
 - **Send names:** ObjectFileName is `{guid}{ext}` under Music folder 100; full tags still go on the wire. Multi-track sync **skips** tracks whose GUID stem is in the durable device index (SQLite) — **not** a live `list_files` per job.
 - **Device index (skip only):** one `list_files` seed after Experimental connect (or **Refresh Device Index…**); successful send/delete update the cache. Used for **skip-if-present**, not as the sole browse UI.
 - **Experimental List Files / pickers:** **live** `get_filelisting` (may also refresh the durable index).
 - **Experimental List Tracks / Delete All list:** **live** filelisting + per-id `Get_Trackmetadata` (same algorithm as CLI `mtp-tracks`; complete on ZEN). Soft-fills empty titles from host GUID library when known. Bulk `Get_Tracklisting*` is diagnostic-only (`list_tracks_via_tracklisting`) — often returns only a few tracks on this device.
 - **Get Tracks from Device…:** list media (with tags), then download each via `get_file_to_file` to a chosen host folder; best-effort mutagen tag write when device metadata exists (audio containers; video often keeps embedded tags only). Writes an editable **`device_media_map.json`** (+ readable **`device_media_map.md`**) in the export folder: device identity, full MTP object fields, tags, host paths, retail-demo heuristics, and blank `editor_notes` / `desired_tags` for fixing missing tags before a later restore.
 - **Package Retail Demos… / Restore Retail Package… (Transfer menu):** From a Get Tracks export, zip **only** entries with `flags.looks_like_retail_demo` plus a reduced **`restore_map.json`** (`media/` + map). Restore sends that package with **no GUID** ObjectFileNames (`preferred_basename` from the map) and MTP tags from `desired_tags`; respects `include_in_restore`; fatal abort on transport error.
-- **Non-blocking:** scan and index restore run on a daemon thread (`TkBackgroundRunner`). The previous library stays until the job finishes; a newer job discards stale results. Listbox population is chunked so large libraries do not freeze the event loop.
+- **Non-blocking:** scan and index restore run on a daemon thread (`TkBackgroundRunner`). **Index restore streams** Fibonacci-sized track batches to the main thread (`on_progress`) so the library Treeview paints **while SQLite is still loading** (flat path-order preview); when load finishes the tree rebuilds with the active sort (Artist hierarchy, etc.), also Fibonacci-chunked. Album-art cache warm runs **after** paint starts (deferred thread), not before. A short yield between progress batches lets Tk poll paint between SSD-fast reads.
 - While busy, Library menu actions are disabled and the toolbar count shows `Loading index…` / `Scanning…`.
 - Transfers that need the library refuse to run while busy or while the root is unreachable.
 - Left panel: **PyMTP device session** front-and-center (graphic + caption). Track sync is via **context menu**. **Connect / Disconnect / Device Info** live under the **Device** menu (enabled when Stable Mode is off). Output format is **Config → Config…**; transfer engine is **Config → Stable Mode**; experimental **Config → Store tracks in artist folder** creates `Music/<Artist>` (numeric folder id) before send and uses that id as parent (PyMTP only; disabled under Stable Mode). Optional **Config → Store tracks in album folder** (enabled only when artist folders are on) nests `Music/<Artist>/<Album>` the same way — still `{folder_id}/{basename}` on the wire, not string paths. Preferences live in app data `config.json`.
-- **Default is PyMTP** (Stable Mode unchecked). Auto-connect: while Stable Mode is off (and auto-reconnect is enabled), a ~3s poll quietly maintains the PyMTP session: connect when absent, **probe liveness** when a session looks open (stale pointers after unplug via `LIBMTP_Get_Storage` — **not** cached `get_modelname`), soft-fail a couple of times then disconnect + clear art + retry when the device is gone. Absence is logged once per unplug streak (no dialogs). **Device → Disconnect** stops auto-reconnect until **Device → Connect** (or turning Stable Mode off again). **Enabling Stable Mode** disconnects PyMTP so `mtp-sendtr` is not blocked by an open session; the left panel shows Stable Mode help text instead of the device graphic.
+- **Default is PyMTP** (Stable Mode unchecked). Auto-connect: while Stable Mode is off (and auto-reconnect is enabled), a ~3s poll quietly maintains the PyMTP session: connect when absent, **probe liveness** when a session looks open (stale pointers after unplug via `LIBMTP_Get_Storage` — **not** cached `get_modelname`), soft-fail a couple of times then disconnect + clear art + retry when the device is gone. Absence is logged once per unplug streak (no dialogs). **Device → Disconnect** stops auto-reconnect until **Device → Connect** (or turning Stable Mode off again). **Enabling Stable Mode** disconnects PyMTP so `mtp-sendtr` is not blocked by an open session; the left panel shows Stable Mode help text instead of the device graphic. The fixed-width left column has two subframes: **Selection** (first-run PyMTP hint, then track/album/artist context for the tree selection) and **Device** (profile graphic under PyMTP, or Stable Mode help text when that mode is on).
 - **PyMTP sync** requires `PymtpDevice.is_connected()`; otherwise a warning points the user to Connect or Config → Stable Mode.
 - Data dir: macOS `~/Library/Application Support/MtpManager/`; Linux `$XDG_DATA_HOME/mtpmanager` or `~/.local/share/mtpmanager/`; override with `MTP_MANAGER_DATA_DIR`.
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,9 +11,12 @@ from unittest.mock import patch
 from mtpmanager.app.device_ops import (
     VIDEO_PARENT_CHOICES,
     SendVideoResult,
+    pick_library_root,
     prepare_and_send_video,
     send_video,
+    suggested_library_relpath,
 )
+from mtpmanager.domain.models import DeviceTrackInfo, DeviceTrackRef
 from mtpmanager.domain.device_profiles import (
     ZEN_AVI_XVID_MP3,
     ZEN_VISION_M,
@@ -21,6 +25,7 @@ from mtpmanager.domain.device_profiles import (
     ZEN_WMV_WMA,
 )
 from mtpmanager.domain.models import TrackMetadata
+from mtpmanager.domain.track_id import new_track_guid
 from mtpmanager.infra.remote_naming import (
     DEFAULT_MUSIC_FOLDER_ID,
     DEFAULT_TV_FOLDER_ID,
@@ -111,6 +116,31 @@ class SendVideoTests(unittest.TestCase):
             self.assertEqual(call["preferred_basename"], "demo.wmv")
             self.assertEqual(call["meta"].title, "demo")
 
+    def test_send_video_ignores_guid_for_object_name(self) -> None:
+        """Video ObjectFileName is title/basename, never library GUID.
+
+        GUID may still be passed for durable index recording by callers.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "feature.mp4"
+            path.write_bytes(b"fake")
+            guid = new_track_guid()
+            transport = _FakeTransport()
+            result = send_video(
+                transport,
+                str(path),
+                parent_id=DEFAULT_VIDEO_FOLDER_ID,
+                guid=guid,
+                preferred_basename="feature.mp4",
+                title="Feature Film",
+            )
+            self.assertEqual(result.remote_basename, "feature.mp4")
+            call = transport.calls[0]
+            self.assertIsNone(call["guid"])
+            self.assertEqual(call["preferred_basename"], "feature.mp4")
+            self.assertEqual(call["parent_id"], DEFAULT_VIDEO_FOLDER_ID)
+            self.assertEqual(call["meta"].title, "Feature Film")
+
     def test_send_video_tv_folder(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "episode.avi"
@@ -126,7 +156,7 @@ class SendVideoTests(unittest.TestCase):
             self.assertEqual(result.remote_basename, "episode.avi")
             self.assertEqual(transport.calls[0]["meta"].title, "Episode 1")
 
-    def test_send_video_rejects_music_parent(self) -> None:
+    def test_send_video_rejects_disallowed_parent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "x.wmv"
             path.write_bytes(b"fake")
@@ -135,7 +165,18 @@ class SendVideoTests(unittest.TestCase):
                     _FakeTransport(),
                     str(path),
                     parent_id=DEFAULT_MUSIC_FOLDER_ID,
+                    allowed_parents=frozenset(
+                        {DEFAULT_VIDEO_FOLDER_ID, DEFAULT_TV_FOLDER_ID}
+                    ),
                 )
+            # Without allowed_parents, any positive folder id is accepted
+            # (firmware-specific Video/TV ids).
+            result = send_video(
+                _FakeTransport(),
+                str(path),
+                parent_id=108,  # Video on Music-88 firmware map
+            )
+            self.assertEqual(result.parent_id, 108)
 
     def test_send_video_missing_file(self) -> None:
         with self.assertRaises(FileNotFoundError):
@@ -284,6 +325,74 @@ class SendVideoTests(unittest.TestCase):
             convert.assert_not_called()
             self.assertFalse(result.encoded)
             self.assertEqual(transport.calls[0]["path"], str(path))
+
+
+class LibraryPullPathTests(unittest.TestCase):
+    def test_suggested_library_relpath_from_tags(self) -> None:
+        ref = DeviceTrackRef(
+            item_id=42,
+            name="xyz.mp3",
+            title="Song",
+            artist="Artist",
+            album="Album",
+        )
+        rel = suggested_library_relpath(ref)
+        self.assertEqual(rel, os.path.join("Artist", "Album", "Song.mp3"))
+
+    def test_suggested_library_relpath_prefers_info(self) -> None:
+        ref = DeviceTrackRef(item_id=1, name="clip.avi", title="Old")
+        info = DeviceTrackInfo(
+            item_id=1,
+            name="clip.avi",
+            title="New Title",
+            artist="Dir",
+            album="Show",
+        )
+        rel = suggested_library_relpath(ref, info=info)
+        self.assertEqual(
+            rel, os.path.join("Dir", "Show", "New Title.avi")
+        )
+
+    def test_suggested_library_relpath_prefers_file_meta(self) -> None:
+        from mtpmanager.domain.models import TrackMetadata
+
+        ref = DeviceTrackRef(
+            item_id=1,
+            name="dump.mp3",
+            title="Unknown Title",
+            artist="Unknown Artist",
+            album="Unknown Album",
+        )
+        info = DeviceTrackInfo(
+            item_id=1,
+            name="dump.mp3",
+            title="Unknown Title",
+            artist="Unknown Artist",
+            album="Unknown Album",
+        )
+        file_meta = TrackMetadata(
+            title="Recovered",
+            artist="Real Artist",
+            album="Real Album",
+        )
+        rel = suggested_library_relpath(ref, info=info, file_meta=file_meta)
+        self.assertEqual(
+            rel,
+            os.path.join("Real Artist", "Real Album", "Recovered.mp3"),
+        )
+
+    def test_pick_library_root_prefers_existing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            a = os.path.join(tmp, "a")
+            b = os.path.join(tmp, "b")
+            os.makedirs(b)
+            # First root whose parent exists is accepted (a is creatable under tmp).
+            self.assertEqual(pick_library_root([a, b]), a)
+            self.assertEqual(pick_library_root([b]), b)
+            self.assertIsNone(pick_library_root([]))
+            # Prefer an existing directory over a non-existent sibling first.
+            missing = os.path.join(tmp, "no", "such", "deep")
+            self.assertEqual(pick_library_root([missing, b]), b)
 
 
 class VideoEncodeProfileProbeTests(unittest.TestCase):
