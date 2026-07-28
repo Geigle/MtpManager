@@ -103,21 +103,29 @@ VIDEO_EXTS = (
     ".asf",
 )
 
-# ZEN Vision:M parents that are not the Music category (see remote_naming).
+# Legacy Vision:M parents that are not Music (firmware may differ — prefer
+# :class:`~mtpmanager.domain.device_folders.DeviceFolderLayout.non_music_parent_ids`).
 _NON_MUSIC_PARENT_IDS = frozenset(
     {
-        120,  # Video
-        124,  # TV
-        128,  # ZENcast / Podcasts
-        116,  # Pictures
+        120,  # Video (legacy)
+        124,  # TV (legacy)
+        128,  # ZENcast / Podcasts (legacy)
+        116,  # Pictures (legacy)
+        # Alternate firmware map (e.g. Music 88 layout): Video/TV/etc. ids.
+        104,  # Pictures
+        108,  # Video
+        112,  # TV
+        116,  # ZENcast
     }
 )
 
-# Device → Send Video destinations (Video / TV folders).
+# Device → Send Video destinations (legacy defaults; prefer live layout).
 VIDEO_PARENT_IDS = frozenset(
     {
-        120,  # Video
+        120,  # Video (legacy Music-100 map)
         124,  # TV
+        108,  # Video (Music-88 map)
+        112,  # TV
     }
 )
 
@@ -134,11 +142,16 @@ def looks_like_track(entry: object) -> bool:
     return any(name.endswith(ext) for ext in TRACK_EXTS)
 
 
-def looks_like_music(entry: object) -> bool:
+def looks_like_music(
+    entry: object,
+    *,
+    non_music_parents: frozenset[int] | None = None,
+) -> bool:
     """True when a listed object is likely audio for the Device → Music tab.
 
-    Excludes video filetypes/extensions and known non-music ZEN parents
-    (Video / TV / ZENcast / Pictures). App-sent tracks live under Music 100.
+    Excludes video filetypes/extensions and non-music parents (Video / TV /
+    ZENcast / Pictures). Parent ids should come from a live folder layout when
+    available; *non_music_parents* defaults to a union of known firmware maps.
     """
     ft = int(getattr(entry, "filetype", 0) or 0)
     if ft in VIDEO_FILETYPES:
@@ -147,7 +160,8 @@ def looks_like_music(entry: object) -> bool:
     if any(name.endswith(ext) for ext in VIDEO_EXTS):
         return False
     parent = int(getattr(entry, "parent_id", 0) or 0)
-    if parent in _NON_MUSIC_PARENT_IDS:
+    exclude = non_music_parents if non_music_parents is not None else _NON_MUSIC_PARENT_IDS
+    if parent in exclude:
         return False
     if ft in MUSIC_FILETYPES:
         return True
@@ -155,7 +169,7 @@ def looks_like_music(entry: object) -> bool:
         return True
     # MP4 under Music (or unknown parent) can be audio; keep if looks_like_track
     # already would, but not video-parent (handled above).
-    if name.endswith(".mp4") and parent not in _NON_MUSIC_PARENT_IDS:
+    if name.endswith(".mp4") and parent not in exclude:
         return True
     return False
 
@@ -228,12 +242,26 @@ def video_refs_from_files(
     return _sort_track_refs(result)
 
 
-def video_folder_label(parent_id: int) -> str:
-    """Human label for a video object parent (Video / TV / Other)."""
+def video_folder_label(
+    parent_id: int,
+    *,
+    layout=None,
+) -> str:
+    """Human label for a video object parent (Video / TV / Other).
+
+    When *layout* is a :class:`~mtpmanager.domain.device_folders.DeviceFolderLayout`,
+    use its resolved role/name map (firmware-safe). Otherwise fall back to
+    legacy Vision:M ids 120/124 plus a few alternate-map ids.
+    """
+    if layout is not None:
+        try:
+            return layout.video_folder_label(int(parent_id or 0))
+        except Exception:
+            pass
     pid = int(parent_id or 0)
-    if pid == 120:
+    if pid in (120, 108):  # Video (legacy / Music-88 map)
         return "Video"
-    if pid == 124:
+    if pid in (124, 112):  # TV
         return "TV"
     return "Other"
 

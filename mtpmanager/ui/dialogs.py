@@ -41,6 +41,12 @@ from mtpmanager.infra.remote_naming import (
 from mtpmanager.ui.formatting import folder_line
 
 
+def _video_folder_radio_label(kind: str, folder_id: int, name: str) -> str:
+    """Label like ``Video  (folder 108 — Video)`` for destination radios."""
+    label = (name or "").strip() or kind
+    return f"{kind}  (folder {int(folder_id)} — {label})"
+
+
 def ask_text(
     parent,
     *,
@@ -822,13 +828,35 @@ def ask_video_destination(
     video_options: DeviceVideoOptions | None = None,
     encode_default: bool = True,
     include_broken_presets: bool = False,
+    video_folder_id: int | None = None,
+    tv_folder_id: int | None = None,
+    video_folder_name: str = "Video",
+    tv_folder_name: str = "TV",
 ) -> SendVideoDialogResult | None:
     """Ask Video/TV parent and optional device encode preset. None if cancelled.
 
     *video_options* is only set for known players (e.g. ZEN Vision:M). The
     generic device profile passes None — no format notebook is shown.
     *include_broken_presets* comes from Config (show broken recipes like WMV).
+
+    *video_folder_id* / *tv_folder_id* come from a live folder-name resolution
+    when available; defaults fall back to legacy Vision:M ids (120 / 124).
     """
+    vid = (
+        int(video_folder_id)
+        if video_folder_id is not None
+        else DEFAULT_VIDEO_FOLDER_ID
+    )
+    tid = (
+        int(tv_folder_id) if tv_folder_id is not None else DEFAULT_TV_FOLDER_ID
+    )
+    vname = (video_folder_name or "").strip() or ZEN_VISION_M_FOLDER_IDS.get(
+        vid, "Video"
+    )
+    tname = (tv_folder_name or "").strip() or ZEN_VISION_M_FOLDER_IDS.get(
+        tid, "TV"
+    )
+
     dlg = Toplevel(parent)
     dlg.title("Send Video")
     dlg.transient(parent)
@@ -849,16 +877,14 @@ def ask_video_destination(
     choice = StringVar(value="video")
     Radiobutton(
         body,
-        text=f"Video  (folder {DEFAULT_VIDEO_FOLDER_ID} — "
-        f"{ZEN_VISION_M_FOLDER_IDS[DEFAULT_VIDEO_FOLDER_ID]})",
+        text=_video_folder_radio_label("Video", vid, vname),
         variable=choice,
         value="video",
         anchor="w",
     ).pack(fill="x", pady=2)
     Radiobutton(
         body,
-        text=f"TV show  (folder {DEFAULT_TV_FOLDER_ID} — "
-        f"{ZEN_VISION_M_FOLDER_IDS[DEFAULT_TV_FOLDER_ID]})",
+        text=_video_folder_radio_label("TV show", tid, tname),
         variable=choice,
         value="tv",
         anchor="w",
@@ -1001,11 +1027,7 @@ def ask_video_destination(
     result: list[SendVideoDialogResult | None] = [None]
 
     def on_send() -> None:
-        parent_id = (
-            DEFAULT_TV_FOLDER_ID
-            if choice.get() == "tv"
-            else DEFAULT_VIDEO_FOLDER_ID
-        )
+        parent_id = tid if choice.get() == "tv" else vid
         do_encode = bool(encode_var.get()) and has_options
         preset = _selected_preset() if do_encode else None
         cap = float(preset.max_fps or 0) if preset is not None else 0.0

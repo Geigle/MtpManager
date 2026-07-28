@@ -42,6 +42,10 @@ from mtpmanager.domain.library_sort import (
     next_artist_column_sort,
     sort_tracks_flat,
 )
+from mtpmanager.domain.device_folders import (
+    DeviceFolderLayout,
+    legacy_zen_vision_m_layout,
+)
 from mtpmanager.domain.device_media import (
     apply_host_meta,
     enrich_refs_from_host,
@@ -95,7 +99,6 @@ from mtpmanager.infra.pymtp_device import PymtpDevice
 from mtpmanager.infra.remote_naming import (
     DEFAULT_MUSIC_FOLDER_ID,
     DEFAULT_STORAGE_ID,
-    ZEN_VISION_M_FOLDER_IDS,
     build_remote_path,
     split_remote_path,
 )
@@ -232,6 +235,8 @@ class AppController:
         self._file_meta_probe_asked: set[int] = set()
         self._file_meta_probe_after_id: str | None = None
         self._file_meta_probe_inflight = False
+        # Live Music/Video/TV folder ids from list_folders name match.
+        self._folder_layout: DeviceFolderLayout = legacy_zen_vision_m_layout()
         self._device_video_populate_after_id: str | None = None
         self._device_audiobook_populate_after_id: str | None = None
         self._audiobooks_populate_after_id: str | None = None
@@ -375,9 +380,51 @@ class AppController:
         self._load_sync_job_for_resume()
 
 
+    def _folder_layout_or_legacy(self) -> DeviceFolderLayout:
+        """Current device folder map (live or legacy fallback)."""
+        return self._folder_layout or legacy_zen_vision_m_layout()
+
+    def _music_folder_id(self) -> int:
+        return self._folder_layout_or_legacy().music_id
+
+    def _video_folder_id(self) -> int:
+        return self._folder_layout_or_legacy().video_id
+
+    def _tv_folder_id(self) -> int:
+        return self._folder_layout_or_legacy().tv_id
+
+    def _apply_folder_layout(self, layout: DeviceFolderLayout) -> None:
+        """Store layout and push Music parent id onto transports/device."""
+        self._folder_layout = layout
+        mid = layout.music_id
+        try:
+            self.device.music_folder_id = mid
+        except Exception:
+            pass
+        logger.info(
+            "Device folder layout source=%s music=%s video=%s tv=%s names=%s",
+            layout.source,
+            layout.music_id,
+            layout.video_id,
+            layout.tv_id,
+            {
+                rid: layout.name_for(rid)
+                for rid in (
+                    layout.music_id,
+                    layout.video_id,
+                    layout.tv_id,
+                )
+            },
+        )
+
     def _transport(self):
+        mid = self._music_folder_id()
         if self.win.active_mode() == "stable":
-            return CmdTransport()
+            return CmdTransport(music_folder_id=mid)
+        try:
+            self.device.music_folder_id = mid
+        except Exception:
+            pass
         return self.device
 
     def _target_format(self) -> str:
@@ -522,8 +569,18 @@ class AppController:
 
         def resolve(meta) -> int | None:
             if use_album:
-                return ensure_album_folder(device, meta, cache=cache)
-            return ensure_artist_folder(device, meta, cache=cache)
+                return ensure_album_folder(
+                    device,
+                    meta,
+                    music_parent_id=self._music_folder_id(),
+                    cache=cache,
+                )
+            return ensure_artist_folder(
+                device,
+                meta,
+                music_parent_id=self._music_folder_id(),
+                cache=cache,
+            )
 
         return resolve
 
@@ -2090,11 +2147,15 @@ class AppController:
             pid = int(ref.parent_id or 0)
             by_folder.setdefault(pid, []).append(ref)
 
-        # Prefer known folders first, then others by id.
+        layout = self._folder_layout_or_legacy()
+        video_id = layout.video_id
+        tv_id = layout.tv_id
+
+        # Prefer known Video/TV folders first, then others by id.
         def folder_sort_key(pid: int) -> tuple:
-            if pid == 120:
+            if pid == video_id:
                 return (0, pid)
-            if pid == 124:
+            if pid == tv_id:
                 return (1, pid)
             return (2, pid)
 
@@ -2102,7 +2163,7 @@ class AppController:
         for pid in sorted(by_folder.keys(), key=folder_sort_key):
             folder_refs = by_folder[pid]
             folder_iid = f"dv:folder:{pid}"
-            label = video_folder_label(pid)
+            label = video_folder_label(pid, layout=layout)
             ops.append(
                 (
                     "group",
@@ -2681,6 +2742,11 @@ class AppController:
             except Exception:
                 pass
             self._file_meta_probe_after_id = None
+        self._folder_layout = legacy_zen_vision_m_layout()
+        try:
+            self.device.music_folder_id = DEFAULT_MUSIC_FOLDER_ID
+        except Exception:
+            pass
         self._clear_device_music_tree()
 
     def _note_device_session(self, info: DeviceInfo | None) -> None:
@@ -2736,18 +2802,31 @@ class AppController:
         device = self.device
 
         def work():
+            # Folders first (cheap): name → Music/Video/TV object ids for this
+            # firmware, then full file listing for the durable inventory.
+            layout = device_ops.resolve_folder_layout(device)
             files = device_ops.list_files(device)
             n = replace_device_listing(serial, files, source="list")
-            return n
+            return {"layout": layout, "files": n}
 
-        def on_done(n: int) -> None:
+        def on_done(result) -> None:
             self._device_index_seed_inflight = False
             self._device_index_seeded = True
             self._mark_usb_quiet(_DEVICE_USB_COOLDOWN_S)
             # Clear seed label so it does not linger after indexing.
             self.win.set_progress_status("")
+            layout = None
+            n = 0
+            if isinstance(result, dict):
+                layout = result.get("layout")
+                n = int(result.get("files") or 0)
+            if layout is not None:
+                self._apply_folder_layout(layout)
             logger.info(
-                "Device index seeded serial=%s files=%s", serial, n
+                "Device index seeded serial=%s files=%s music_folder=%s",
+                serial,
+                n,
+                self._music_folder_id(),
             )
             # Populate Device → Music (GUID join; optional tag enrich after quiet).
             self._refresh_device_music_tree(enrich_missing_tags=True)
@@ -2761,7 +2840,7 @@ class AppController:
             )
             self._mark_usb_quiet(_DEVICE_USB_COOLDOWN_S)
 
-        self.win.set_progress_status("Indexing device files…")
+        self.win.set_progress_status("Indexing device folders + files…")
         self._bg.submit(
             work,
             on_done=on_done,
@@ -3951,10 +4030,11 @@ class AppController:
             return
         serial = self._device_serial or device_serial_key()
         _, ext = os.path.splitext(send_path)
+        music_parent = self._music_folder_id()
         remote = build_remote_path(
             TrackMetadata(),
             ext or ".mp3",
-            music_folder_id=DEFAULT_MUSIC_FOLDER_ID,
+            music_folder_id=music_parent,
             guid=guid,
         )
         _, basename = split_remote_path(remote)
@@ -3964,7 +4044,7 @@ class AppController:
                 remote_name=basename,
                 guid=guid,
                 item_id=object_id,
-                parent_id=DEFAULT_MUSIC_FOLDER_ID,
+                parent_id=music_parent,
                 storage_id=DEFAULT_STORAGE_ID,
             )
             # Debounced rebuild from cache (many sends in a batch).
@@ -4634,6 +4714,7 @@ class AppController:
         else:
             dlg_name = f"{len(files)} video files"
 
+        layout = self._folder_layout_or_legacy()
         opts = ask_video_destination(
             self.win.root,
             filename=dlg_name,
@@ -4642,6 +4723,10 @@ class AppController:
             include_broken_presets=bool(
                 self._config.show_broken_video_presets
             ),
+            video_folder_id=layout.video_id,
+            tv_folder_id=layout.tv_id,
+            video_folder_name=layout.name_for(layout.video_id) or "Video",
+            tv_folder_name=layout.name_for(layout.tv_id) or "TV",
         )
         if opts is None:
             return
@@ -4653,7 +4738,11 @@ class AppController:
             if preset is None:
                 preset = video_options.default_preset()
         ignore_max_fps = bool(opts.ignore_max_fps) and encode and preset is not None
-        folder_label = ZEN_VISION_M_FOLDER_IDS.get(parent, str(parent))
+        folder_label = (
+            layout.video_folder_label(parent)
+            if parent
+            else layout.name_for(parent) or str(parent)
+        )
         if encode and preset is not None:
             encode_note = f"Encode: {preset.display_name}\n"
             if ignore_max_fps:
@@ -4746,6 +4835,7 @@ class AppController:
                         title=title_map.get(path),
                         preferred_basename=basename_map.get(path),
                         guid=guid_map.get(path),
+                        allowed_parents=layout.video_parent_ids(),
                     )
                 )
             return results

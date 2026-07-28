@@ -156,7 +156,7 @@ class SendVideoTests(unittest.TestCase):
             self.assertEqual(result.remote_basename, "episode.avi")
             self.assertEqual(transport.calls[0]["meta"].title, "Episode 1")
 
-    def test_send_video_rejects_music_parent(self) -> None:
+    def test_send_video_rejects_disallowed_parent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "x.wmv"
             path.write_bytes(b"fake")
@@ -165,7 +165,18 @@ class SendVideoTests(unittest.TestCase):
                     _FakeTransport(),
                     str(path),
                     parent_id=DEFAULT_MUSIC_FOLDER_ID,
+                    allowed_parents=frozenset(
+                        {DEFAULT_VIDEO_FOLDER_ID, DEFAULT_TV_FOLDER_ID}
+                    ),
                 )
+            # Without allowed_parents, any positive folder id is accepted
+            # (firmware-specific Video/TV ids).
+            result = send_video(
+                _FakeTransport(),
+                str(path),
+                parent_id=108,  # Video on Music-88 firmware map
+            )
+            self.assertEqual(result.parent_id, 108)
 
     def test_send_video_missing_file(self) -> None:
         with self.assertRaises(FileNotFoundError):

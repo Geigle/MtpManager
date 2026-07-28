@@ -95,6 +95,18 @@ def list_folders(device: DevicePort) -> list[FolderEntry]:
     return device.list_folders()
 
 
+def resolve_folder_layout(device: DevicePort):
+    """List folders and map names → Music / Video / TV / … object ids.
+
+    Firmware and models do not share a stable Music=100 map. Prefer this over
+    hard-coded :data:`~mtpmanager.infra.remote_naming.DEFAULT_MUSIC_FOLDER_ID`.
+    """
+    from mtpmanager.domain.device_folders import resolve_device_folder_layout
+
+    folders = list_folders(device)
+    return resolve_device_folder_layout(folders)
+
+
 def list_files(device: DevicePort) -> list[FileEntry]:
     """Experimental full file listing (Device -> List Files)."""
     return device.list_files()
@@ -985,6 +997,7 @@ def send_test_file(device: DevicePort, path: str) -> None:
 
 
 # Ad-hoc video send destinations (Device → Send Video…).
+# Legacy hard-coded pair — prefer :class:`~mtpmanager.domain.device_folders.DeviceFolderLayout.video_parent_ids`.
 VIDEO_PARENT_CHOICES: frozenset[int] = frozenset(
     {DEFAULT_VIDEO_FOLDER_ID, DEFAULT_TV_FOLDER_ID}
 )
@@ -1017,12 +1030,18 @@ def send_video(
     title: str | None = None,
     preferred_basename: str | None = None,
     guid: str | None = None,
+    allowed_parents: frozenset[int] | None = None,
 ) -> SendVideoResult:
-    """Send a local video file under Video (120) or TV (124).
+    """Send a local video file under the device Video or TV folder.
 
     Uses the normal track-send path (``LIBMTP_Send_Track_From_File``) so
-    storage_id, filetype, and parent match the ZEN contract — same approach
+    storage_id, filetype, and parent match the device contract — same approach
     as retail video restore.
+
+    *parent_id* must be a positive folder object id. When *allowed_parents* is
+    set (from a live :class:`~mtpmanager.domain.device_folders.DeviceFolderLayout`),
+    the parent must be in that set. Otherwise any positive id is accepted so
+    firmware-specific Video/TV ids (not only 120/124) work.
 
     ObjectFileName is always title/basename style (sanitized host stem +
     extension), never a library GUID. *guid* is accepted for API compatibility
@@ -1030,10 +1049,13 @@ def send_video(
     index after a successful send for skip-if-present / future joins.
     """
     parent = int(parent_id)
-    if parent not in VIDEO_PARENT_CHOICES:
+    if parent <= 0:
+        raise ValueError(f"parent_id must be a positive folder object id, got {parent}")
+    allowed = allowed_parents if allowed_parents is not None else None
+    if allowed is not None and parent not in allowed:
         raise ValueError(
-            f"parent_id must be Video ({DEFAULT_VIDEO_FOLDER_ID}) or "
-            f"TV ({DEFAULT_TV_FOLDER_ID}), got {parent}"
+            f"parent_id {parent} is not a known Video/TV folder "
+            f"(allowed: {sorted(allowed)})"
         )
     if not path or not os.path.isfile(path):
         raise FileNotFoundError(f"Video file not found: {path!r}")
@@ -1099,6 +1121,7 @@ def prepare_and_send_video(
     title: str | None = None,
     preferred_basename: str | None = None,
     guid: str | None = None,
+    allowed_parents: frozenset[int] | None = None,
 ) -> SendVideoResult:
     """Optional device-profile encode, then :func:`send_video`.
 
@@ -1209,6 +1232,7 @@ def prepare_and_send_video(
             title=display_title,
             preferred_basename=pref,
             guid=guid,
+            allowed_parents=allowed_parents,
         )
         _emit("progress", 100, 100, "done")
         return SendVideoResult(

@@ -12,33 +12,51 @@
 
 ## Target device assumptions
 
-Defaults are **Creative ZEN Vision:M–centric** (VID `041e`, PID `413e`). They work for this player; other devices may differ.
+Defaults are **Creative ZEN Vision:M–centric** (VID `041e`, PID `413e`). Folder **object IDs are not stable** across firmware builds of the same model.
 
 | Constant | Value | Source |
 |----------|--------|--------|
-| `DEFAULT_MUSIC_FOLDER_ID` | **100** | List Folders / `mtp-folders`: folder 100 == `"Music"` |
+| `DEFAULT_MUSIC_FOLDER_ID` | **100** | **Fallback only** when folder listing fails (one historical Vision:M map) |
 | `DEFAULT_STORAGE_ID` | **`0x00010001`** (65537) | `mtp-detect`: Storage Media |
 | `MAX_REMOTE_BASENAME` | **56** | Empirical send hygiene (margin under a suspected ~64 boundary from a ZEN finalize incident) — **not** a proven hard device max; see [basename-limit-evidence.md](./basename-limit-evidence.md) |
 
-These are hardcoded in `remote_naming` and constructor defaults on `CmdTransport` / `PymtpDevice`. **Auto-discovery of folder/storage IDs is future work**, not present today.
+### Live folder layout (preferred)
 
-### ZEN Vision:M top-level folder IDs (`ZEN_VISION_M_FOLDER_IDS`)
+On connect / index seed the app runs **List Folders**, then maps **names → roles** (`Music`, `Video`, `TV`, …) via `domain/device_folders.py` / `device_ops.resolve_folder_layout`. Send parents use those resolved object ids (e.g. Music may be **88** or **100** depending on firmware).
 
-Captured via **Device → List Folders** on a real Creative ZEN Vision:M (same layout as `mtp-folders`). Code: `mtpmanager/infra/remote_naming.py`.
+Use **numeric IDs from the live map**, never string paths like `Music/...`, and **do not hard-code 100/120/124** for production sends when a listing is available.
 
-| ID | Name | Notes |
-|----|------|--------|
-| **100** | Music | **Track send parent** (`DEFAULT_MUSIC_FOLDER_ID`) |
-| 104 | My Playlists | |
-| 108 | My Recordings | |
-| 112 | My Organizer | |
-| 116 | Pictures | |
-| **120** | Video | **Device → Send Video…** when user picks Video (`DEFAULT_VIDEO_FOLDER_ID`) |
-| **124** | TV | **Device → Send Video…** when user picks TV show (`DEFAULT_TV_FOLDER_ID`) |
-| 128 | ZENcast | Podcasts |
-| 132 | My Slideshows | |
+### Example: same model, different firmware maps
 
-Use **numeric IDs**, never string paths like `Music/...`.
+**Map A** (older docs / one Vision:M capture — `ZEN_VISION_M_FOLDER_IDS` fallback):
+
+| ID | Name |
+|----|------|
+| **100** | Music |
+| 104 | My Playlists |
+| 108 | My Recordings |
+| 112 | My Organizer |
+| 116 | Pictures |
+| **120** | Video |
+| **124** | TV |
+| 128 | ZENcast |
+| 132 | My Slideshows |
+
+**Map B** (Vision:M `1.40.02_0.00.02` — names are the source of truth):
+
+| ID | Name |
+|----|------|
+| **88** | Music |
+| 92 | My Playlists |
+| 96 | My Recordings |
+| 100 | My Organizer |
+| 104 | Pictures |
+| **108** | Video |
+| **112** | TV |
+| 116 | ZENcast |
+| 120 | My Slideshows |
+
+On Map B, treating **100 as Music** would send into **My Organizer** — wrong.
 
 ---
 
