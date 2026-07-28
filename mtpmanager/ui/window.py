@@ -13,6 +13,7 @@ from tkinter import (
     BooleanVar,
     Button,
     DISABLED,
+    DoubleVar,
     END,
     LEFT,
     NORMAL,
@@ -67,6 +68,14 @@ _DEAD_TRACK_FG = "gray50"
 BG_TRANSFER_QUEUED = "#b8cbb8"  # desaturated green — in batch, waiting
 BG_TRANSFER_TRANSCODING = "#8faf8f"  # desaturated green — converting
 BG_TRANSFER_TRANSFERRING = "#bf8f8f"  # desaturated red — sending to device
+# Currently playing track (deep dark purple; light text for contrast).
+BG_PLAYING = "#4a1f6b"
+FG_PLAYING = "#f0e6fa"
+# Playback title label (Tk character-cell width) + marquee speed.
+_PLAYBACK_TITLE_WIDTH = 28
+_PLAYBACK_MARQUEE_MS = 250
+# Gap between end and start when the title scrolls.
+_PLAYBACK_MARQUEE_GAP = "   "
 
 # Tree column ids (values order).
 TREE_COLS = ("title", "artist", "album", "year")
@@ -85,6 +94,9 @@ MENU_RESUME_SYNC = "Resume Sync"
 MENU_CANCEL_JOB = "Cancel Current Job"
 MENU_PACKAGE_RETAIL = "Package Retail Demos… (experimental)"
 MENU_RESTORE_RETAIL = "Restore Retail Package… (experimental)"
+
+# View menu
+MENU_ALWAYS_SHOW_PLAYBACK = "Always show playback controls"
 
 # Config menu
 MENU_STABLE_MODE = "Stable Mode"
@@ -113,12 +125,16 @@ CTX_SYNC_SELECTED = "Sync selected tracks"
 CTX_SYNC_TRACK = "Sync this track"
 CTX_SYNC_ALBUM = "Sync Album"
 CTX_SYNC_ARTIST = "Sync all from Artist"
+CTX_PLAY_TRACK = "Play This Track"
+CTX_PLAY_TRACKS = "Play These Tracks"
 CTX_EXCLUDE_FILE = "Exclude this file…"
 CTX_EXCLUDE_FOLDER = "Exclude this folder…"
 
 # Group header context menus (labels updated dynamically before popup)
 CTX_SYNC_ARTIST_GROUP = "Sync all from Artist"
 CTX_SYNC_ALBUM_GROUP = "Sync album"
+CTX_PLAY_ARTIST_GROUP = "Play All from Artist"
+CTX_PLAY_ALBUM_GROUP = "Play Album"
 CTX_EXCLUDE_GROUP_FOLDER = "Exclude this folder…"
 
 # Device media context menus (on-device Music / Video / Audiobooks trees)
@@ -326,7 +342,7 @@ class MainWindow:
         self.root["borderwidth"] = 1
         self.root["relief"] = "sunken"
 
-        # Menubar: Library | Transfer | Device | Config
+        # Menubar: Library | Transfer | Device | View | Config
         self.menubar = Menu(self.root)
         self.root.config(menu=self.menubar)
 
@@ -350,6 +366,16 @@ class MainWindow:
         self.menubar.add_cascade(label="Device", menu=self.menu_device)
         for label in _DEVICE_MENU_LABELS:
             self.menu_device.add_command(label=label, state=DISABLED)
+
+        self.var_always_show_playback = BooleanVar(value=False)
+        self.menu_view = Menu(self.menubar, tearoff=0)
+        self.menubar.add_cascade(label="View", menu=self.menu_view)
+        self.menu_view.add_checkbutton(
+            label=MENU_ALWAYS_SHOW_PLAYBACK,
+            variable=self.var_always_show_playback,
+            onvalue=True,
+            offvalue=False,
+        )
 
         self.var_stable_mode = BooleanVar(value=False)
         self.var_artist_folders = BooleanVar(value=False)
@@ -386,14 +412,20 @@ class MainWindow:
         self.menu_track_ctx.add_command(label=CTX_SYNC_ALBUM)
         self.menu_track_ctx.add_command(label=CTX_SYNC_ARTIST)
         self.menu_track_ctx.add_separator()
+        self.menu_track_ctx.add_command(label=CTX_PLAY_TRACK)
+        self.menu_track_ctx.add_separator()
         self.menu_track_ctx.add_command(label=CTX_EXCLUDE_FILE)
         self.menu_track_ctx.add_command(label=CTX_EXCLUDE_FOLDER)
 
         self.menu_artist_ctx = Menu(self.root, tearoff=0)
         self.menu_artist_ctx.add_command(label=CTX_SYNC_ARTIST_GROUP)
+        self.menu_artist_ctx.add_separator()
+        self.menu_artist_ctx.add_command(label=CTX_PLAY_ARTIST_GROUP)
 
         self.menu_album_ctx = Menu(self.root, tearoff=0)
         self.menu_album_ctx.add_command(label=CTX_SYNC_ALBUM_GROUP)
+        self.menu_album_ctx.add_separator()
+        self.menu_album_ctx.add_command(label=CTX_PLAY_ALBUM_GROUP)
         self.menu_album_ctx.add_separator()
         self.menu_album_ctx.add_command(label=CTX_EXCLUDE_GROUP_FOLDER)
 
@@ -444,6 +476,71 @@ class MainWindow:
         bottomframe["borderwidth"] = 1
         bottomframe["relief"] = "sunken"
         bottomframe.pack(side=BOTTOM, fill=X)
+        self.bottomframe = bottomframe
+
+        # Playback controls (hidden unless playing or View → always show).
+        self.playback_row = Frame(bottomframe)
+        self._playback_row_visible = False
+        self._playback_always_show = False
+        self._playback_session_active = False
+        self._playback_duration = 0.0
+        self._playback_show_nav = False
+        self._scrub_dragging = False
+        self._scrub_programmatic = False
+        self._on_playback_play_pause = None
+        self._on_playback_prev = None
+        self._on_playback_next = None
+        self._on_playback_close = None
+        self._on_playback_seek = None
+        self._playing_iid: str | None = None
+        self._playback_title_full = ""
+        self._playback_title_offset = 0
+        self._playback_marquee_after_id: str | None = None
+
+        self.btn_playback_prev = Button(
+            self.playback_row, text="Prev", width=5, state=DISABLED
+        )
+        self.btn_playback_play = Button(
+            self.playback_row, text="Play", width=6, state=DISABLED
+        )
+        self.btn_playback_next = Button(
+            self.playback_row, text="Next", width=5, state=DISABLED
+        )
+        self.var_playback_scrub = DoubleVar(value=0.0)
+        self.playback_scrub = ttk.Scale(
+            self.playback_row,
+            from_=0.0,
+            to=1000.0,
+            orient="horizontal",
+            variable=self.var_playback_scrub,
+            command=self._on_scrub_command,
+        )
+        self.lbl_playback_time = Label(
+            self.playback_row, text="0:00 / 0:00", width=12, anchor="e"
+        )
+        self.lbl_playback_title = Label(
+            self.playback_row,
+            text="",
+            anchor="w",
+            width=_PLAYBACK_TITLE_WIDTH,
+        )
+        self.btn_playback_close = Button(
+            self.playback_row, text="×", width=3
+        )
+        # Layout: [Prev] [Play] [Next] [title] [====scrub====] [time] [×]
+        self.btn_playback_prev.pack(side=LEFT, padx=(4, 2), pady=4)
+        self.btn_playback_play.pack(side=LEFT, padx=2, pady=4)
+        self.btn_playback_next.pack(side=LEFT, padx=2, pady=4)
+        self.lbl_playback_title.pack(side=LEFT, padx=(6, 4), pady=4)
+        self.btn_playback_close.pack(side=RIGHT, padx=(2, 4), pady=4)
+        self.lbl_playback_time.pack(side=RIGHT, padx=(4, 2), pady=4)
+        self.playback_scrub.pack(
+            side=LEFT, fill=X, expand=True, padx=(4, 4), pady=4
+        )
+        self.playback_scrub.bind("<ButtonPress-1>", self._on_scrub_press, add="+")
+        self.playback_scrub.bind(
+            "<ButtonRelease-1>", self._on_scrub_release, add="+"
+        )
 
         # Status line above progress (current track during sync / device jobs).
         self.lbl_progress_status = Label(
@@ -825,6 +922,9 @@ class MainWindow:
         self.tree.tag_configure(
             "xfer_transferring", background=BG_TRANSFER_TRANSFERRING
         )
+        self.tree.tag_configure(
+            "playing", background=BG_PLAYING, foreground=FG_PLAYING
+        )
         self.videos_tree.tag_configure("group", font=("", 11, "bold"))
         self.videos_tree.tag_configure("group_directory", font=("", 12, "bold"))
         self.videos_tree.tag_configure("dead", foreground=_DEAD_TRACK_FG)
@@ -835,6 +935,9 @@ class MainWindow:
         self.videos_tree.tag_configure(
             "xfer_transferring", background=BG_TRANSFER_TRANSFERRING
         )
+        self.videos_tree.tag_configure(
+            "playing", background=BG_PLAYING, foreground=FG_PLAYING
+        )
         self.audiobooks_tree.tag_configure("group", font=("", 11, "bold"))
         self.audiobooks_tree.tag_configure("group_artist", font=("", 12, "bold"))
         self.audiobooks_tree.tag_configure("dead", foreground=_DEAD_TRACK_FG)
@@ -844,6 +947,9 @@ class MainWindow:
         )
         self.audiobooks_tree.tag_configure(
             "xfer_transferring", background=BG_TRANSFER_TRANSFERRING
+        )
+        self.audiobooks_tree.tag_configure(
+            "playing", background=BG_PLAYING, foreground=FG_PLAYING
         )
         self.device_tree.tag_configure("group", font=("", 11, "bold"))
         self.device_tree.tag_configure("group_artist", font=("", 12, "bold"))
@@ -1011,6 +1117,13 @@ class MainWindow:
                 MENU_ALBUM_FOLDERS, command=on_album_folders_toggle
             )
 
+    def set_view_menu_commands(self, *, on_always_show_playback_toggle=None) -> None:
+        if on_always_show_playback_toggle is not None:
+            self.menu_view.entryconfig(
+                MENU_ALWAYS_SHOW_PLAYBACK,
+                command=on_always_show_playback_toggle,
+            )
+
     def set_album_folders_menu_enabled(self, enabled: bool) -> None:
         """Enable/disable album-folder checkbutton (requires artist folders)."""
         self.menu_config.entryconfig(
@@ -1073,6 +1186,9 @@ class MainWindow:
         on_sync_artist_group,
         on_sync_album_group,
         on_sync_selected=None,
+        on_play_track=None,
+        on_play_artist_group=None,
+        on_play_album_group=None,
         on_exclude_file=None,
         on_exclude_folder=None,
         on_exclude_group_folder=None,
@@ -1084,6 +1200,9 @@ class MainWindow:
         self.menu_track_ctx.entryconfig(CTX_SYNC_TRACK, command=on_sync_track)
         self.menu_track_ctx.entryconfig(CTX_SYNC_ALBUM, command=on_sync_album)
         self.menu_track_ctx.entryconfig(CTX_SYNC_ARTIST, command=on_sync_artist)
+        if on_play_track is not None:
+            # Index (not label): label toggles Play This / These Tracks.
+            self.menu_track_ctx.entryconfig(6, command=on_play_track)
         if on_exclude_file is not None:
             self.menu_track_ctx.entryconfig(
                 CTX_EXCLUDE_FILE, command=on_exclude_file
@@ -1093,11 +1212,330 @@ class MainWindow:
                 CTX_EXCLUDE_FOLDER, command=on_exclude_folder
             )
         self.menu_artist_ctx.entryconfig(0, command=on_sync_artist_group)
+        if on_play_artist_group is not None:
+            # Index 2 (label changes with artist name).
+            self.menu_artist_ctx.entryconfig(2, command=on_play_artist_group)
         self.menu_album_ctx.entryconfig(0, command=on_sync_album_group)
+        if on_play_album_group is not None:
+            # Index 2 (label changes with album/folder name).
+            self.menu_album_ctx.entryconfig(2, command=on_play_album_group)
         if on_exclude_group_folder is not None:
-            self.menu_album_ctx.entryconfig(
-                CTX_EXCLUDE_GROUP_FOLDER, command=on_exclude_group_folder
+            # Index 4 after Play + separator.
+            self.menu_album_ctx.entryconfig(4, command=on_exclude_group_folder)
+
+    def set_playback_commands(
+        self,
+        *,
+        on_play_pause=None,
+        on_prev=None,
+        on_next=None,
+        on_close=None,
+        on_seek=None,
+    ) -> None:
+        """Wire bottom-frame playback control callbacks."""
+        self._on_playback_play_pause = on_play_pause
+        self._on_playback_prev = on_prev
+        self._on_playback_next = on_next
+        self._on_playback_close = on_close
+        self._on_playback_seek = on_seek
+        if on_play_pause is not None:
+            self.btn_playback_play.configure(command=on_play_pause)
+        if on_prev is not None:
+            self.btn_playback_prev.configure(command=on_prev)
+        if on_next is not None:
+            self.btn_playback_next.configure(command=on_next)
+        if on_close is not None:
+            self.btn_playback_close.configure(command=on_close)
+
+    @staticmethod
+    def _format_playback_time(seconds: float) -> str:
+        sec = max(0, int(seconds or 0))
+        m, s = divmod(sec, 60)
+        h, m = divmod(m, 60)
+        if h:
+            return f"{h}:{m:02d}:{s:02d}"
+        return f"{m}:{s:02d}"
+
+    def _on_scrub_press(self, _event=None) -> None:
+        self._scrub_dragging = True
+
+    def _on_scrub_command(self, _value=None) -> None:
+        # Live time label while dragging; commit seek on release.
+        if self._scrub_programmatic or not self._scrub_dragging:
+            return
+        # Duration is stored on the scale's last update via update_playback_state.
+        duration = float(getattr(self, "_playback_duration", 0.0) or 0.0)
+        if duration <= 0:
+            return
+        frac = float(self.var_playback_scrub.get()) / 1000.0
+        pos = max(0.0, min(duration, frac * duration))
+        self.lbl_playback_time.configure(
+            text=(
+                f"{self._format_playback_time(pos)} / "
+                f"{self._format_playback_time(duration)}"
             )
+        )
+
+    def _on_scrub_release(self, _event=None) -> None:
+        if not self._scrub_dragging:
+            return
+        self._scrub_dragging = False
+        duration = float(getattr(self, "_playback_duration", 0.0) or 0.0)
+        if duration <= 0 or self._on_playback_seek is None:
+            return
+        frac = float(self.var_playback_scrub.get()) / 1000.0
+        pos = max(0.0, min(duration, frac * duration))
+        try:
+            self._on_playback_seek(pos)
+        except Exception:
+            pass
+
+    def set_playback_always_show(self, always: bool) -> None:
+        """Persist View → Always show playback controls into the bar layout."""
+        self._playback_always_show = bool(always)
+        # Close is only useful when the bar can auto-hide.
+        if self._playback_always_show:
+            try:
+                self.btn_playback_close.pack_forget()
+            except Exception:
+                pass
+        else:
+            try:
+                self.btn_playback_close.pack(side=RIGHT, padx=(2, 4), pady=4)
+            except Exception:
+                pass
+        self._refresh_playback_row_visibility(force=True)
+
+    def set_playback_active(self, active: bool) -> None:
+        """Show/hide the playback bar based on activity + always-show pref."""
+        self._playback_session_active = bool(active)
+        self._refresh_playback_row_visibility()
+
+    def _refresh_playback_row_visibility(self, *, force: bool = False) -> None:
+        show = bool(
+            getattr(self, "_playback_always_show", False)
+            or getattr(self, "_playback_session_active", False)
+        )
+        if show == self._playback_row_visible and not force:
+            return
+        if show:
+            # Above status/progress so controls stay readable during jobs.
+            self.playback_row.pack(
+                side=TOP, fill=X, padx=2, pady=(4, 0), before=self.lbl_progress_status
+            )
+            self._playback_row_visible = True
+            # Resume marquee if a long title is already set.
+            if (
+                len(self._playback_title_full or "") > _PLAYBACK_TITLE_WIDTH
+                and self._playback_marquee_after_id is None
+            ):
+                self._schedule_playback_marquee()
+        else:
+            try:
+                self.playback_row.pack_forget()
+            except Exception:
+                pass
+            self._playback_row_visible = False
+            self._cancel_playback_marquee()
+
+    @staticmethod
+    def marquee_window(
+        text: str,
+        offset: int,
+        width: int = _PLAYBACK_TITLE_WIDTH,
+        *,
+        gap: str = _PLAYBACK_MARQUEE_GAP,
+    ) -> str:
+        """Return a *width*-char slice of *text* starting at *offset* (wraps).
+
+        When *text* fits in *width*, returns the full string (no padding).
+        Long titles use *gap* between end and start so the loop reads cleanly.
+        """
+        full = text or ""
+        if width <= 0:
+            return ""
+        if len(full) <= width:
+            return full
+        cycle = full + (gap or "")
+        if not cycle:
+            return ""
+        n = len(cycle)
+        start = int(offset) % n
+        doubled = cycle + cycle
+        return doubled[start : start + width]
+
+    def _cancel_playback_marquee(self) -> None:
+        aid = self._playback_marquee_after_id
+        self._playback_marquee_after_id = None
+        if aid is not None:
+            try:
+                self.root.after_cancel(aid)
+            except Exception:
+                pass
+
+    def _apply_playback_title_slice(self) -> None:
+        """Paint the current marquee window onto the title label."""
+        visible = self.marquee_window(
+            self._playback_title_full,
+            self._playback_title_offset,
+            _PLAYBACK_TITLE_WIDTH,
+        )
+        try:
+            self.lbl_playback_title.configure(text=visible)
+        except Exception:
+            pass
+
+    def _schedule_playback_marquee(self) -> None:
+        """Advance long titles by 1 character every 250ms."""
+        self._cancel_playback_marquee()
+        full = self._playback_title_full or ""
+        if len(full) <= _PLAYBACK_TITLE_WIDTH:
+            return
+        self._playback_marquee_after_id = self.root.after(
+            _PLAYBACK_MARQUEE_MS, self._on_playback_marquee_tick
+        )
+
+    def _on_playback_marquee_tick(self) -> None:
+        self._playback_marquee_after_id = None
+        full = self._playback_title_full or ""
+        if len(full) <= _PLAYBACK_TITLE_WIDTH:
+            self._apply_playback_title_slice()
+            return
+        cycle_len = len(full) + len(_PLAYBACK_MARQUEE_GAP)
+        if cycle_len <= 0:
+            return
+        self._playback_title_offset = (
+            self._playback_title_offset + 1
+        ) % cycle_len
+        self._apply_playback_title_slice()
+        self._schedule_playback_marquee()
+
+    def set_playback_title(self, title: str) -> None:
+        """Set the full playback title; start marquee when it overflows."""
+        text = title or ""
+        if text == self._playback_title_full:
+            # Same track — keep offset; ensure timer is running if needed.
+            if (
+                len(text) > _PLAYBACK_TITLE_WIDTH
+                and self._playback_marquee_after_id is None
+            ):
+                self._schedule_playback_marquee()
+            return
+        self._playback_title_full = text
+        self._playback_title_offset = 0
+        self._cancel_playback_marquee()
+        self._apply_playback_title_slice()
+        self._schedule_playback_marquee()
+
+    def update_playback_state(
+        self,
+        *,
+        title: str = "",
+        position_sec: float = 0.0,
+        duration_sec: float = 0.0,
+        playing: bool = False,
+        paused: bool = False,
+        show_nav: bool = False,
+        enabled: bool = False,
+    ) -> None:
+        """Refresh labels, scrubber, and button enablement."""
+        self._playback_duration = max(0.0, float(duration_sec or 0.0))
+        self._playback_show_nav = bool(show_nav)
+
+        self.set_playback_title(title or "")
+        self.lbl_playback_time.configure(
+            text=(
+                f"{self._format_playback_time(position_sec)} / "
+                f"{self._format_playback_time(self._playback_duration)}"
+            )
+        )
+
+        # Prev/Next only when a multi-track queue is loaded.
+        nav_state = NORMAL if (enabled and show_nav) else DISABLED
+        self.btn_playback_prev.configure(state=nav_state)
+        self.btn_playback_next.configure(state=nav_state)
+        if show_nav:
+            try:
+                self.btn_playback_prev.pack(
+                    side=LEFT, padx=(4, 2), pady=4, before=self.btn_playback_play
+                )
+                self.btn_playback_next.pack(
+                    side=LEFT, padx=2, pady=4, after=self.btn_playback_play
+                )
+            except Exception:
+                pass
+        else:
+            try:
+                self.btn_playback_prev.pack_forget()
+                self.btn_playback_next.pack_forget()
+            except Exception:
+                pass
+
+        if playing and not paused:
+            self.btn_playback_play.configure(
+                text="Pause", state=NORMAL if enabled else DISABLED
+            )
+        else:
+            self.btn_playback_play.configure(
+                text="Play", state=NORMAL if enabled else DISABLED
+            )
+
+        scrub_state = NORMAL if enabled else DISABLED
+        try:
+            self.playback_scrub.configure(state=scrub_state)
+        except Exception:
+            pass
+
+        if not self._scrub_dragging:
+            if self._playback_duration > 0:
+                frac = max(
+                    0.0,
+                    min(1.0, float(position_sec) / self._playback_duration),
+                )
+            else:
+                frac = 0.0
+            self._scrub_programmatic = True
+            try:
+                self.var_playback_scrub.set(frac * 1000.0)
+            finally:
+                self._scrub_programmatic = False
+
+    def set_playing_row(self, iid: str | None) -> None:
+        """Highlight the currently playing track row (deep dark purple)."""
+        prev = self._playing_iid
+        if prev and prev != iid:
+            self._clear_playing_tag(prev)
+        self._playing_iid = iid
+        if iid:
+            self._set_playing_tag(iid)
+
+    def _set_playing_tag(self, iid: str) -> None:
+        for tree in self.library_media_trees():
+            if not tree.exists(iid):
+                continue
+            tags = list(tree.item(iid, "tags") or ())
+            if "playing" not in tags:
+                tags.append("playing")
+                tree.item(iid, tags=tags)
+            return
+
+    def _clear_playing_tag(self, iid: str) -> None:
+        for tree in self.library_media_trees():
+            if not tree.exists(iid):
+                continue
+            tags = [t for t in (tree.item(iid, "tags") or ()) if t != "playing"]
+            tree.item(iid, tags=tags)
+            return
+
+    def clear_playing_styles(self) -> None:
+        """Remove playing highlight from all library trees."""
+        self._playing_iid = None
+        for tree in self.library_media_trees():
+            for iid in self._all_iids(tree):
+                tags = [
+                    t for t in (tree.item(iid, "tags") or ()) if t != "playing"
+                ]
+                tree.item(iid, tags=tags)
 
     def set_library_menu_state(
         self,
@@ -1367,9 +1805,14 @@ class MainWindow:
             for t in tree.item(iid, "tags")
             if not str(t).startswith("xfer_")
         ]
+        # Prefer transfer tint over playing highlight while a job is active;
+        # re-apply playing when transfer style is cleared.
         if status in (None, "done", "failed", "skipped", ""):
+            if self._playing_iid == iid and "playing" not in tags:
+                tags.append("playing")
             tree.item(iid, tags=tags)
             return
+        tags = [t for t in tags if t != "playing"]
         if status == "transferring":
             tags.append("xfer_transferring")
         elif status == "transcoding":
@@ -1387,6 +1830,8 @@ class MainWindow:
                     for t in tree.item(iid, "tags")
                     if not str(t).startswith("xfer_")
                 ]
+                if self._playing_iid == iid and "playing" not in tags:
+                    tags.append("playing")
                 tree.item(iid, tags=tags)
 
     def popup_track_context(self, event) -> str | None:

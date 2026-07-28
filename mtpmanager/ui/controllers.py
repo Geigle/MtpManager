@@ -82,6 +82,7 @@ from mtpmanager.infra.device_index import (
     replace_device_listing,
     upsert_device,
 )
+from mtpmanager.infra.audio_player import AudioPlayer, ffplay_bin
 from mtpmanager.infra.ffmpeg_transcode import FFmpegTranscoder
 from mtpmanager.infra.library_index import (
     exclude_library_paths,
@@ -257,6 +258,11 @@ class AppController:
         self._album_art_job_gen = 0
         self._device_pending_album_art: list[tuple[str, str]] = []
         self._device_album_art_job_gen = 0
+        # Host audio playback (ffplay) + playlist state.
+        self._audio_player = AudioPlayer()
+        self._playback_queue: list[Track] = []
+        self._playback_index: int = -1
+        self._playback_poll_after_id: str | None = None
         self._wire()
         # Defer restore so mainloop can start before any index I/O.
         self.win.root.after(0, self._start_index_restore)
@@ -264,6 +270,8 @@ class AppController:
 
     def _wire(self) -> None:
         w = self.win
+        # Stop ffplay (and timers) when the user closes the main window.
+        w.root.protocol("WM_DELETE_WINDOW", self.on_app_close)
         w.set_library_menu_commands(
             on_manage_library=self.on_manage_library,
         )
@@ -287,6 +295,21 @@ class AppController:
         w.var_artist_folders.set(artist_on)
         w.var_album_folders.set(album_on)
         w.set_album_folders_menu_enabled(artist_on)
+        always_show = bool(self._config.always_show_playback_controls)
+        w.var_always_show_playback.set(always_show)
+        w.set_playback_always_show(always_show)
+        w.set_view_menu_commands(
+            on_always_show_playback_toggle=self.on_always_show_playback_toggle,
+        )
+        w.set_playback_commands(
+            on_play_pause=self.on_playback_play_pause,
+            on_prev=self.on_playback_prev,
+            on_next=self.on_playback_next,
+            on_close=self.on_playback_close,
+            on_seek=self.on_playback_seek,
+        )
+        # Idle bar state (Prev/Next hidden until a multi-track queue is loaded).
+        self._refresh_playback_ui()
         w.set_device_menu_commands(
             on_connect=self.on_connect,
             on_disconnect=self.on_disconnect,
@@ -310,6 +333,9 @@ class AppController:
             on_sync_artist_group=self.action_sync_artist_group,
             on_sync_album_group=self.action_sync_album_group,
             on_sync_selected=self.action_sync_selected,
+            on_play_track=self.action_play_selected_tracks,
+            on_play_artist_group=self.action_play_artist_group,
+            on_play_album_group=self.action_play_album_group,
             on_exclude_file=self.action_exclude_file,
             on_exclude_folder=self.action_exclude_folder,
             on_exclude_group_folder=self.action_exclude_group_folder,
@@ -1045,7 +1071,9 @@ class AppController:
 
         # Multi-select bulk action (track rows and expanded groups).
         selected_tracks = self._tracks_from_selected_iids(quiet=True)
+        audio_selected = self._audio_tracks_only(selected_tracks)
         n = len(selected_tracks)
+        n_audio = len(audio_selected)
         try:
             if n >= 1:
                 label = (
@@ -1063,6 +1091,20 @@ class AppController:
         except Exception:
             pass
 
+        # Play This Track / Play These Tracks (audio only).
+        # Index 6: after sync block + separator (label changes; do not key by label).
+        try:
+            from mtpmanager.ui.window import CTX_PLAY_TRACK, CTX_PLAY_TRACKS
+
+            play_label = CTX_PLAY_TRACKS if n_audio > 1 else CTX_PLAY_TRACK
+            self.win.menu_track_ctx.entryconfig(
+                6,
+                label=play_label,
+                state=NORMAL if n_audio >= 1 else DISABLED,
+            )
+        except Exception:
+            pass
+
         if seed is None:
             return
         if "group_artist" in tagset:
@@ -1070,6 +1112,13 @@ class AppController:
             self.win.menu_artist_ctx.entryconfig(
                 0, label=f"Sync all from {artist}"
             )
+            try:
+                # Index 2: Play All from Artist (label changes with artist name).
+                self.win.menu_artist_ctx.entryconfig(
+                    2, label=f"Play All from {artist}"
+                )
+            except Exception:
+                pass
         elif "group_directory" in tagset:
             folder = os.path.basename(
                 (os.path.dirname(seed.path) or seed.path).rstrip(os.sep + "/")
@@ -1077,11 +1126,24 @@ class AppController:
             self.win.menu_album_ctx.entryconfig(
                 0, label=f"Sync folder {folder}"
             )
+            try:
+                # Index 2: Play Album / folder (label changes).
+                self.win.menu_album_ctx.entryconfig(
+                    2, label=f"Play folder {folder}"
+                )
+            except Exception:
+                pass
         elif "group_album" in tagset:
             album = seed.meta.album or "Unknown Album"
             self.win.menu_album_ctx.entryconfig(
                 0, label=f"Sync album {album}"
             )
+            try:
+                self.win.menu_album_ctx.entryconfig(
+                    2, label=f"Play Album {album}"
+                )
+            except Exception:
+                pass
 
     def _prepare_device_context_menu(self, tree, row_iid: str, tags) -> None:
         """Update device group delete labels before popup."""
@@ -1143,6 +1205,354 @@ class AppController:
     def _audio_tracks_only(tracks: list[Track]) -> list[Track]:
         """Drop video files from an audio transfer batch."""
         return [t for t in tracks if not is_video_track(t)]
+
+    # ------------------------------------------------------------------
+    # Host library playback (ffplay)
+    # ------------------------------------------------------------------
+
+    def on_app_close(self) -> None:
+        """Main window close: terminate host playback, then destroy the UI."""
+        try:
+            self.shutdown_playback()
+        except Exception:
+            logger.debug("shutdown_playback on close failed", exc_info=True)
+        try:
+            self.win.root.destroy()
+        except Exception:
+            logger.debug("root.destroy on close failed", exc_info=True)
+
+    def shutdown_playback(self) -> None:
+        """Stop ffplay, cancel poll/marquee timers, and clear the play queue."""
+        self._cancel_playback_poll()
+        try:
+            self._audio_player.stop()
+        except Exception:
+            logger.debug("audio_player.stop during shutdown failed", exc_info=True)
+        self._playback_queue = []
+        self._playback_index = -1
+        try:
+            # Clears title + cancels the marquee after() timer.
+            self.win.set_playback_title("")
+            self.win.set_playing_row(None)
+            self.win.set_playback_active(False)
+        except Exception:
+            pass
+
+    def on_always_show_playback_toggle(self) -> None:
+        """View → Always show playback controls."""
+        always = bool(self.win.var_always_show_playback.get())
+        self._config.always_show_playback_controls = always
+        try:
+            save_app_config(self._config)
+        except Exception:
+            logger.exception("save_app_config for playback controls failed")
+        self.win.set_playback_always_show(always)
+        self._refresh_playback_ui()
+
+    def action_play_selected_tracks(self) -> None:
+        """Context: Play This Track / Play These Tracks."""
+        tracks = self._audio_tracks_only(
+            self._tracks_from_selected_iids_tree_order()
+        )
+        self._start_playback_queue(tracks)
+
+    def action_play_artist_group(self) -> None:
+        """Context: Play All from Artist (group header)."""
+        seed = self._context_group_seed
+        if seed is None:
+            iid = self.win.selected_tree_iid()
+            if iid:
+                seed = self._group_seed_by_iid.get(iid)
+        if seed is None:
+            messagebox.showinfo("Playback", "Select an artist group first.")
+            return
+        tracks = self._audio_tracks_only(
+            self._tracks_from_iids_tree_order(
+                [self.win.selected_tree_iid() or ""]
+            )
+        )
+        if not tracks:
+            # Fallback to library filter if selection iid missing.
+            tracks = self._audio_tracks_only(
+                self.library.filter_by_artist(seed)
+            )
+        self._start_playback_queue(tracks)
+
+    def action_play_album_group(self) -> None:
+        """Context: Play Album / Play folder (group header)."""
+        seed = self._context_group_seed
+        iid = self.win.selected_tree_iid() or ""
+        if seed is None and iid:
+            seed = self._group_seed_by_iid.get(iid)
+        tracks = self._audio_tracks_only(
+            self._tracks_from_iids_tree_order([iid] if iid else [])
+        )
+        if not tracks and seed is not None:
+            # Directory groups: same parent folder; album groups: album filter.
+            tags = set()
+            try:
+                tree = self.win.active_library_tree()
+                tags = set(tree.item(iid, "tags") or ())
+            except Exception:
+                pass
+            if "group_directory" in tags:
+                tracks = self._audio_tracks_only(
+                    self.library.filter_by_directory(seed)
+                )
+            else:
+                tracks = self._audio_tracks_only(
+                    self.library.filter_by_album(seed)
+                )
+        self._start_playback_queue(tracks)
+
+    def _tracks_from_selected_iids_tree_order(self) -> list[Track]:
+        """Like selection resolve, but preserve tree order (no path sort)."""
+        return self._tracks_from_iids_tree_order(self.win.selected_tree_iids())
+
+    def _tracks_from_iids_tree_order(self, iids: list[str]) -> list[Track]:
+        """Map row iids to tracks; group headers expand in tree order."""
+        tracks: list[Track] = []
+        seen: set[str] = set()
+        tree = self.win.active_library_tree()
+
+        def add_from_iid(iid: str) -> None:
+            if not iid:
+                return
+            track = self._track_by_iid.get(iid)
+            if track is not None:
+                if track.path not in seen:
+                    tracks.append(track)
+                    seen.add(track.path)
+                return
+            try:
+                children = tree.get_children(iid)
+            except Exception:
+                children = ()
+            for child in children:
+                add_from_iid(child)
+
+        for iid in iids:
+            add_from_iid(iid)
+        return tracks
+
+    def _start_playback_queue(self, tracks: list[Track]) -> None:
+        """Replace the play queue and start from the first track."""
+        playable = [
+            t
+            for t in tracks
+            if t and t.path and os.path.isfile(t.path) and not is_video_track(t)
+        ]
+        if not playable:
+            messagebox.showinfo(
+                "Playback",
+                "No playable audio files in the selection.",
+            )
+            return
+        if ffplay_bin() is None:
+            messagebox.showerror(
+                "Playback",
+                "ffplay was not found on PATH.\n\n"
+                "Install ffmpeg (Homebrew: brew install ffmpeg) to play "
+                "library tracks from the app.",
+            )
+            return
+        self._playback_queue = list(playable)
+        self._playback_index = 0
+        self._play_queue_index(0)
+
+    def _play_queue_index(self, index: int) -> None:
+        if not self._playback_queue:
+            self._stop_playback(hide=True)
+            return
+        if index < 0 or index >= len(self._playback_queue):
+            self._stop_playback(hide=True)
+            return
+        self._playback_index = index
+        track = self._playback_queue[index]
+        duration = float(track.meta.length_sec or 0.0) if track.meta else 0.0
+        try:
+            self._audio_player.play(track.path, duration_sec=duration)
+        except FileNotFoundError:
+            messagebox.showwarning(
+                "Playback",
+                f"File is missing:\n{track.path}",
+            )
+            self._advance_after_missing()
+            return
+        except RuntimeError as e:
+            messagebox.showerror("Playback", str(e))
+            self._stop_playback(hide=True)
+            return
+        self.win.set_playback_active(True)
+        self._refresh_playing_highlight()
+        self._refresh_playback_ui()
+        self._schedule_playback_poll()
+
+    def _advance_after_missing(self) -> None:
+        """Skip a missing file; stop if nothing left after current."""
+        nxt = self._playback_index + 1
+        if nxt < len(self._playback_queue):
+            self._play_queue_index(nxt)
+        else:
+            self._stop_playback(hide=True)
+
+    def on_playback_play_pause(self) -> None:
+        if not self._audio_player.is_active:
+            if self._playback_queue and 0 <= self._playback_index < len(
+                self._playback_queue
+            ):
+                self._play_queue_index(self._playback_index)
+            return
+        try:
+            self._audio_player.toggle_pause()
+        except RuntimeError as e:
+            messagebox.showerror("Playback", str(e))
+            self._stop_playback(hide=True)
+            return
+        self._refresh_playback_ui()
+
+    def on_playback_prev(self) -> None:
+        n = len(self._playback_queue)
+        if n <= 1:
+            return
+        idx = self._playback_index - 1
+        if idx < 0:
+            idx = n - 1
+        self._play_queue_index(idx)
+
+    def on_playback_next(self) -> None:
+        n = len(self._playback_queue)
+        if n <= 1:
+            return
+        idx = self._playback_index + 1
+        if idx >= n:
+            idx = 0
+        self._play_queue_index(idx)
+
+    def on_playback_close(self) -> None:
+        self._stop_playback(hide=True)
+
+    def on_playback_seek(self, position_sec: float) -> None:
+        if not self._audio_player.is_active:
+            return
+        try:
+            self._audio_player.seek(float(position_sec))
+        except RuntimeError as e:
+            messagebox.showerror("Playback", str(e))
+            self._stop_playback(hide=True)
+            return
+        self._refresh_playback_ui()
+
+    def _stop_playback(self, *, hide: bool) -> None:
+        self._cancel_playback_poll()
+        try:
+            self._audio_player.stop()
+        except Exception:
+            logger.debug("audio_player.stop failed", exc_info=True)
+        if hide and not self._config.always_show_playback_controls:
+            self.win.set_playback_active(False)
+        else:
+            # Session ended but bar may stay (always-show).
+            self.win.set_playback_active(
+                bool(self._config.always_show_playback_controls)
+            )
+        self.win.set_playing_row(None)
+        self._refresh_playback_ui()
+
+    def _cancel_playback_poll(self) -> None:
+        aid = self._playback_poll_after_id
+        self._playback_poll_after_id = None
+        if aid is not None:
+            try:
+                self.win.root.after_cancel(aid)
+            except Exception:
+                pass
+
+    def _schedule_playback_poll(self) -> None:
+        self._cancel_playback_poll()
+        self._playback_poll_after_id = self.win.root.after(
+            200, self._on_playback_poll
+        )
+
+    def _on_playback_poll(self) -> None:
+        self._playback_poll_after_id = None
+        state = self._audio_player.poll()
+        if state == "ended":
+            # Auto-advance within list; stop after last track (no wrap).
+            nxt = self._playback_index + 1
+            if 0 <= nxt < len(self._playback_queue):
+                self._play_queue_index(nxt)
+                return
+            self._stop_playback(hide=True)
+            return
+        if state in ("playing", "paused"):
+            self._refresh_playback_ui()
+            self._schedule_playback_poll()
+            return
+        # idle — keep bar in always-show mode only
+        self._refresh_playback_ui()
+
+    def _playback_title_for(self, track: Track | None) -> str:
+        if track is None:
+            return ""
+        title = (track.meta.title if track.meta else "") or "Unknown Title"
+        artist = primary_artist(track) if track else ""
+        if artist and artist != "Unknown Artist":
+            return f"{artist} — {title}"
+        return title
+
+    def _refresh_playback_ui(self) -> None:
+        active = self._audio_player.is_active
+        playing = self._audio_player.is_playing
+        paused = self._audio_player.is_paused
+        track: Track | None = None
+        if self._playback_queue and 0 <= self._playback_index < len(
+            self._playback_queue
+        ):
+            track = self._playback_queue[self._playback_index]
+        show_nav = len(self._playback_queue) > 1 and (
+            active or bool(self._config.always_show_playback_controls)
+        )
+        # When always-show and idle, keep nav if a queue is loaded.
+        if not active and self._playback_queue and len(self._playback_queue) > 1:
+            show_nav = True
+        enabled = active or (
+            bool(self._config.always_show_playback_controls)
+            and bool(self._playback_queue)
+        )
+        duration = (
+            self._audio_player.duration_sec
+            if active
+            else float((track.meta.length_sec if track and track.meta else 0) or 0)
+        )
+        position = self._audio_player.position_sec() if active else 0.0
+        title = self._playback_title_for(track) if (active or track) else ""
+        self.win.update_playback_state(
+            title=title,
+            position_sec=position,
+            duration_sec=duration,
+            playing=playing,
+            paused=paused or (not active and bool(self._playback_queue)),
+            show_nav=show_nav and bool(self._playback_queue),
+            enabled=enabled if (active or self._playback_queue) else False,
+        )
+        if active:
+            self.win.set_playback_active(True)
+        elif not self._config.always_show_playback_controls:
+            self.win.set_playback_active(False)
+
+    def _refresh_playing_highlight(self) -> None:
+        """Re-apply lavender highlight for the current queue track."""
+        path = ""
+        if self._audio_player.is_active and self._audio_player.path:
+            path = self._audio_player.path
+        elif (
+            self._playback_queue
+            and 0 <= self._playback_index < len(self._playback_queue)
+        ):
+            path = self._playback_queue[self._playback_index].path
+        iid = self._iid_by_path.get(path) if path else None
+        self.win.set_playing_row(iid if self._audio_player.is_active else None)
 
     def _sync_from_seed(self, seed: Track | None, *, kind: str) -> None:
         """Run filter_by_artist / filter_by_album / directory from a seed track."""
@@ -1443,6 +1853,7 @@ class AppController:
         tracks = music_tracks
         if not tracks:
             self.win.set_tracks_usable(self._library_root_reachable())
+            self._refresh_playing_highlight()
             return
 
         primary = self._sort_primary
@@ -1623,6 +2034,7 @@ class AppController:
             else:
                 self.win.set_tracks_usable(self._library_root_reachable())
                 self._start_background_album_art()
+                self._refresh_playing_highlight()
 
         run_chunk(0)
 
@@ -1766,6 +2178,8 @@ class AppController:
                 self._audiobooks_populate_after_id = self.win.root.after(
                     1, lambda i=nxt: run_chunk(i)
                 )
+            else:
+                self._refresh_playing_highlight()
 
         run_chunk(0)
 
