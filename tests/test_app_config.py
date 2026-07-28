@@ -24,6 +24,7 @@ class AppConfigTests(unittest.TestCase):
             self.assertFalse(cfg.store_tracks_in_album_folder)
             self.assertFalse(cfg.show_broken_video_presets)
             self.assertFalse(cfg.always_show_playback_controls)
+            self.assertFalse(cfg.store_podcasts_in_show_folders)
             self.assertEqual(cfg.active_mode(), "experimental")
 
     def test_round_trip(self) -> None:

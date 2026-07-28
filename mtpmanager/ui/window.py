@@ -23,6 +23,7 @@ from tkinter import (
     Y,
     Frame,
     Label,
+    Listbox,
     Menu,
     PhotoImage,
     Scrollbar,
@@ -104,7 +105,12 @@ MENU_ALWAYS_SHOW_PLAYBACK = "Always show playback controls"
 MENU_STABLE_MODE = "Stable Mode"
 MENU_ARTIST_FOLDERS = "Store tracks in artist folder (experimental)"
 MENU_ALBUM_FOLDERS = "Store tracks in album folder (experimental)"
+MENU_PODCAST_FOLDERS = "Store Podcasts in Identifiable Folders (experimental)"
 MENU_CONFIG = "Config…"
+
+# Podcasts tab
+CTX_PODCAST_SYNC_LATEST = "Sync Latest"
+CTX_PODCAST_EPISODE_SYNC = "Sync Episodes Now"
 
 # Device menu (PyMTP / default)
 MENU_CONNECT = "Connect"
@@ -392,6 +398,7 @@ class MainWindow:
         self.var_stable_mode = BooleanVar(value=False)
         self.var_artist_folders = BooleanVar(value=False)
         self.var_album_folders = BooleanVar(value=False)
+        self.var_podcast_folders = BooleanVar(value=False)
         self.menu_config = Menu(self.menubar, tearoff=0)
         self.menubar.add_cascade(label="Config", menu=self.menu_config)
         self.menu_config.add_checkbutton(
@@ -412,6 +419,12 @@ class MainWindow:
             onvalue=True,
             offvalue=False,
             state=DISABLED,
+        )
+        self.menu_config.add_checkbutton(
+            label=MENU_PODCAST_FOLDERS,
+            variable=self.var_podcast_folders,
+            onvalue=True,
+            offvalue=False,
         )
         self.menu_config.add_separator()
         self.menu_config.add_command(label=MENU_CONFIG)
@@ -449,6 +462,12 @@ class MainWindow:
         self.menu_playlist_ctx.add_command(label=CTX_PLAYLIST_REMOVE)
         self.menu_playlist_ctx.add_separator()
         self.menu_playlist_ctx.add_command(label=CTX_PLAYLIST_SYNC)
+
+        self.menu_podcast_show_ctx = Menu(self.root, tearoff=0)
+        self.menu_podcast_show_ctx.add_command(label=CTX_PODCAST_SYNC_LATEST)
+
+        self.menu_podcast_episode_ctx = Menu(self.root, tearoff=0)
+        self.menu_podcast_episode_ctx.add_command(label=CTX_PODCAST_EPISODE_SYNC)
 
         # Device on-media context menus (delete / pull).
         self.menu_device_track_ctx = Menu(self.root, tearoff=0)
@@ -692,8 +711,89 @@ class MainWindow:
         ab_tree_frame = Frame(self.audiobooksLibrary_tab)
         ab_tree_frame.pack(fill=BOTH, expand=True)
 
-        p_tree_frame = Frame(self.podcastsLibrary_tab)
-        p_tree_frame.pack(fill=BOTH, expand=True)
+        # Podcasts tab: subscriptions + episodes + Sync Latest.
+        # TODO(follow-up): OPML import/export, auto-refresh timer, in-app playback
+        pod_outer = Frame(self.podcastsLibrary_tab)
+        pod_outer.pack(fill=BOTH, expand=True, padx=4, pady=4)
+
+        pod_top = Frame(pod_outer)
+        pod_top.pack(side=TOP, fill=BOTH, expand=True)
+        Label(pod_top, text="Subscriptions", font=("", 11, "bold")).pack(
+            anchor="w", pady=(0, 2)
+        )
+        pod_sub_row = Frame(pod_top)
+        pod_sub_row.pack(side=TOP, fill=BOTH, expand=True)
+        pod_sub_list_frame = Frame(pod_sub_row)
+        pod_sub_list_frame.pack(side=LEFT, fill=BOTH, expand=True)
+        pod_sub_scroll = Scrollbar(pod_sub_list_frame)
+        pod_sub_scroll.pack(side=RIGHT, fill=Y)
+        self.podcast_show_list = Listbox(
+            pod_sub_list_frame,
+            height=8,
+            selectmode="extended",
+            exportselection=False,
+            yscrollcommand=pod_sub_scroll.set,
+        )
+        self.podcast_show_list.pack(side=LEFT, fill=BOTH, expand=True)
+        pod_sub_scroll.config(command=self.podcast_show_list.yview)
+        pod_sub_btns = Frame(pod_sub_row)
+        pod_sub_btns.pack(side=LEFT, fill=Y, padx=(6, 0))
+        self.btn_podcast_add = Button(pod_sub_btns, text="+", width=3)
+        self.btn_podcast_add.pack(side=TOP, pady=(0, 4))
+        self.btn_podcast_remove = Button(
+            pod_sub_btns, text="−", width=3, state=DISABLED
+        )
+        self.btn_podcast_remove.pack(side=TOP)
+
+        pod_ep_header = Frame(pod_outer)
+        pod_ep_header.pack(side=TOP, fill=X, pady=(8, 2))
+        self.lbl_podcast_episodes = Label(
+            pod_ep_header, text="Episodes", font=("", 11, "bold"), anchor="w"
+        )
+        self.lbl_podcast_episodes.pack(side=LEFT, fill=X, expand=True)
+        self.btn_podcast_more = Button(
+            pod_ep_header, text="More Episodes", state=DISABLED
+        )
+        self.btn_podcast_more.pack(side=RIGHT)
+
+        pod_ep_frame = Frame(pod_outer)
+        pod_ep_frame.pack(side=TOP, fill=BOTH, expand=True)
+        pod_ep_yscroll = Scrollbar(pod_ep_frame)
+        pod_ep_yscroll.pack(side=RIGHT, fill=Y)
+        pod_ep_xscroll = Scrollbar(pod_ep_frame, orient="horizontal")
+        pod_ep_xscroll.pack(side=BOTTOM, fill=X)
+        self.podcast_episode_tree = ttk.Treeview(
+            pod_ep_frame,
+            columns=("date", "title", "duration", "status"),
+            show="headings",
+            selectmode="extended",
+            yscrollcommand=pod_ep_yscroll.set,
+            xscrollcommand=pod_ep_xscroll.set,
+        )
+        self.podcast_episode_tree.pack(side=LEFT, fill=BOTH, expand=True)
+        pod_ep_yscroll.config(command=self.podcast_episode_tree.yview)
+        pod_ep_xscroll.config(command=self.podcast_episode_tree.xview)
+        self.podcast_episode_tree.heading("date", text="Date", anchor="w")
+        self.podcast_episode_tree.heading("title", text="Title", anchor="w")
+        self.podcast_episode_tree.heading("duration", text="Duration", anchor="w")
+        self.podcast_episode_tree.heading("status", text="Status", anchor="w")
+        self.podcast_episode_tree.column("date", width=100, minwidth=80, stretch=False)
+        self.podcast_episode_tree.column("title", width=320, minwidth=120, stretch=True)
+        self.podcast_episode_tree.column(
+            "duration", width=72, minwidth=56, stretch=False
+        )
+        self.podcast_episode_tree.column(
+            "status", width=90, minwidth=70, stretch=False
+        )
+
+        pod_bottom = Frame(pod_outer)
+        pod_bottom.pack(side=TOP, fill=X, pady=(8, 0))
+        self.btn_podcast_sync_latest = Button(
+            pod_bottom, text="Sync Latest", state=DISABLED
+        )
+        self.btn_podcast_sync_latest.pack(side=LEFT)
+        self.lbl_podcast_status = Label(pod_bottom, text="", anchor="w")
+        self.lbl_podcast_status.pack(side=LEFT, fill=X, expand=True, padx=8)
 
         # Playlists tab: combobox + toolbar + flat track list.
         pl_toolbar = Frame(self.playlists_tab)
@@ -1205,6 +1305,7 @@ class MainWindow:
         on_stable_mode_toggle=None,
         on_artist_folders_toggle=None,
         on_album_folders_toggle=None,
+        on_podcast_folders_toggle=None,
     ) -> None:
         self.menu_config.entryconfig(MENU_CONFIG, command=on_config)
         if on_stable_mode_toggle is not None:
@@ -1219,6 +1320,76 @@ class MainWindow:
             self.menu_config.entryconfig(
                 MENU_ALBUM_FOLDERS, command=on_album_folders_toggle
             )
+        if on_podcast_folders_toggle is not None:
+            self.menu_config.entryconfig(
+                MENU_PODCAST_FOLDERS, command=on_podcast_folders_toggle
+            )
+
+    def set_podcast_tab_commands(
+        self,
+        *,
+        on_add=None,
+        on_remove=None,
+        on_more=None,
+        on_sync_latest=None,
+        on_show_select=None,
+        on_episode_select=None,
+        on_show_sync=None,
+        on_episode_sync=None,
+    ) -> None:
+        if on_add is not None:
+            self.btn_podcast_add.configure(command=on_add)
+        if on_remove is not None:
+            self.btn_podcast_remove.configure(command=on_remove)
+        if on_more is not None:
+            self.btn_podcast_more.configure(command=on_more)
+        if on_sync_latest is not None:
+            self.btn_podcast_sync_latest.configure(command=on_sync_latest)
+        if on_show_select is not None:
+            self.podcast_show_list.bind(
+                "<<ListboxSelect>>", lambda _e: on_show_select()
+            )
+        if on_episode_select is not None:
+            self.podcast_episode_tree.bind(
+                "<<TreeviewSelect>>", lambda _e: on_episode_select()
+            )
+        if on_show_sync is not None:
+            self.menu_podcast_show_ctx.entryconfig(
+                CTX_PODCAST_SYNC_LATEST, command=on_show_sync
+            )
+        if on_episode_sync is not None:
+            self.menu_podcast_episode_ctx.entryconfig(
+                0, command=on_episode_sync
+            )
+
+    def popup_podcast_show_context(self, event) -> str | None:
+        try:
+            idx = self.podcast_show_list.nearest(event.y)
+            if idx >= 0:
+                if idx not in self.podcast_show_list.curselection():
+                    self.podcast_show_list.selection_clear(0, END)
+                    self.podcast_show_list.selection_set(idx)
+            self.menu_podcast_show_ctx.tk_popup(event.x_root, event.y_root)
+        finally:
+            try:
+                self.menu_podcast_show_ctx.grab_release()
+            except Exception:
+                pass
+        return "break"
+
+    def popup_podcast_episode_context(self, event) -> str | None:
+        try:
+            row = self.podcast_episode_tree.identify_row(event.y)
+            if row:
+                if row not in self.podcast_episode_tree.selection():
+                    self.podcast_episode_tree.selection_set(row)
+            self.menu_podcast_episode_ctx.tk_popup(event.x_root, event.y_root)
+        finally:
+            try:
+                self.menu_podcast_episode_ctx.grab_release()
+            except Exception:
+                pass
+        return "break"
 
     def set_view_menu_commands(self, *, on_always_show_playback_toggle=None) -> None:
         if on_always_show_playback_toggle is not None:

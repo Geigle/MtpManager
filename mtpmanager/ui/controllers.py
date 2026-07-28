@@ -19,6 +19,14 @@ from mtpmanager.app.playlist_device import (
     push_playlist_to_device,
     resolve_track_object_ids,
 )
+from mtpmanager.app.podcast_ops import (
+    INITIAL_EPISODE_LIMIT,
+    MORE_EPISODE_STEP,
+    load_more_episodes,
+    pick_latest_not_on_device,
+    prepare_episodes_for_sync,
+    subscribe_feed,
+)
 from mtpmanager.app.scan_library import scan_library, scan_library_roots
 from mtpmanager.app.transfer import transfer_track, transfer_tracks
 from mtpmanager.app.transfer_queue import BatchTransferQueue
@@ -110,7 +118,14 @@ from mtpmanager.infra.playlists import (
     rename_playlist,
     resolve_playlist_tracks,
 )
-from mtpmanager.ui.dialogs import ask_add_to_playlist
+from mtpmanager.infra.podcast_index import (
+    delete_podcast,
+    get_episode,
+    get_podcast,
+    list_episodes,
+    list_podcasts,
+)
+from mtpmanager.ui.dialogs import ask_add_to_playlist, ask_text
 from mtpmanager.infra.logging_setup import start_transfer_log, stop_transfer_log
 from mtpmanager.infra.mutagen_tags import read_metadata
 from mtpmanager.infra.pymtp_device import PymtpDevice
@@ -287,6 +302,10 @@ class AppController:
         # After track sync of kind=playlist: publish MTP playlist object.
         # {name, guids, host_id} or None.
         self._pending_device_playlist: dict | None = None
+        # Podcast subscriptions UI state (id ordered with listbox rows).
+        self._podcast_ids: list[int] = []
+        self._podcast_episode_by_iid: dict[str, int] = {}
+        self._selected_podcast_id: int | None = None
         self._wire()
         # Defer restore so mainloop can start before any index I/O.
         self.win.root.after(0, self._start_index_restore)
@@ -314,12 +333,47 @@ class AppController:
             on_stable_mode_toggle=self.on_stable_mode_toggle,
             on_artist_folders_toggle=self.on_artist_folders_toggle,
             on_album_folders_toggle=self.on_album_folders_toggle,
+            on_podcast_folders_toggle=self.on_podcast_folders_toggle,
         )
         artist_on = bool(self._config.store_tracks_in_artist_folder)
         album_on = bool(self._config.store_tracks_in_album_folder) and artist_on
         w.var_artist_folders.set(artist_on)
         w.var_album_folders.set(album_on)
+        w.var_podcast_folders.set(
+            bool(self._config.store_podcasts_in_show_folders)
+        )
         w.set_album_folders_menu_enabled(artist_on)
+        w.set_podcast_tab_commands(
+            on_add=self.on_podcast_add,
+            on_remove=self.on_podcast_remove,
+            on_more=None,  # handled via Shift-aware Button-1 bind below
+            on_sync_latest=self.on_podcast_sync_latest_all,
+            on_show_select=self.on_podcast_show_select,
+            on_episode_select=self.on_podcast_episode_select,
+            on_show_sync=self.on_podcast_sync_latest_selected,
+            on_episode_sync=self.on_podcast_sync_episodes_selected,
+        )
+        try:
+            w.podcast_show_list.bind(
+                "<Button-3>", w.popup_podcast_show_context
+            )
+            w.podcast_show_list.bind(
+                "<Button-2>", w.popup_podcast_show_context
+            )
+            w.podcast_episode_tree.bind(
+                "<Button-3>", w.popup_podcast_episode_context
+            )
+            w.podcast_episode_tree.bind(
+                "<Button-2>", w.popup_podcast_episode_context
+            )
+            # Shift+click More Episodes → full history (no default command).
+            w.btn_podcast_more.configure(command=lambda: None)
+            w.btn_podcast_more.bind(
+                "<ButtonRelease-1>", self._on_podcast_more_click
+            )
+        except Exception:
+            pass
+        self.win.root.after(80, self._refresh_podcast_tab)
         always_show = bool(self._config.always_show_playback_controls)
         w.var_always_show_playback.set(always_show)
         w.set_playback_always_show(always_show)
@@ -615,6 +669,419 @@ class AppController:
             return
         logger.info("Config store_tracks_in_album_folder=%s", enabled)
 
+    def on_podcast_folders_toggle(self) -> None:
+        """Config → Store Podcasts in Identifiable Folders (experimental)."""
+        enabled = bool(self.win.var_podcast_folders.get())
+        if enabled and self._config.stable_mode:
+            messagebox.showinfo(
+                "Podcast folders",
+                "Identifiable podcast folders need PyMTP "
+                "(uncheck Config → Stable Mode).\n\n"
+                "When enabled, episodes are sent under ZENcast/<Show Name>/ "
+                "so you can test whether the player surfaces those folders.",
+            )
+            self.win.var_podcast_folders.set(False)
+            return
+        self._config.store_podcasts_in_show_folders = enabled
+        try:
+            save_app_config(self._config)
+        except OSError as e:
+            logger.exception("Failed to save store_podcasts_in_show_folders")
+            messagebox.showerror("Config", f"Could not save settings:\n{e}")
+            return
+        logger.info("Config store_podcasts_in_show_folders=%s", enabled)
+
+    # ------------------------------------------------------------------
+    # Podcasts tab
+    # ------------------------------------------------------------------
+
+    def _refresh_podcast_tab(self) -> None:
+        shows = list_podcasts()
+        self._podcast_ids = [p.id for p in shows]
+        lb = self.win.podcast_show_list
+        try:
+            lb.delete(0, "end")
+            for p in shows:
+                label = (p.title or p.feed_url or f"Podcast {p.id}").strip()
+                lb.insert("end", label)
+        except Exception:
+            logger.debug("refresh podcast list failed", exc_info=True)
+        has = bool(shows)
+        try:
+            self.win.btn_podcast_remove.configure(
+                state=NORMAL if has else DISABLED
+            )
+            self.win.btn_podcast_sync_latest.configure(
+                state=NORMAL if has else DISABLED
+            )
+        except Exception:
+            pass
+        if self._selected_podcast_id not in self._podcast_ids:
+            self._selected_podcast_id = (
+                self._podcast_ids[0] if self._podcast_ids else None
+            )
+        if self._selected_podcast_id is not None:
+            try:
+                idx = self._podcast_ids.index(self._selected_podcast_id)
+                lb.selection_clear(0, "end")
+                lb.selection_set(idx)
+                lb.see(idx)
+            except Exception:
+                pass
+            self._load_podcast_episodes(self._selected_podcast_id)
+        else:
+            self._clear_podcast_episodes()
+            try:
+                self.win.lbl_podcast_status.configure(text="No subscriptions")
+            except Exception:
+                pass
+
+    def _clear_podcast_episodes(self) -> None:
+        tree = self.win.podcast_episode_tree
+        for iid in tree.get_children(""):
+            tree.delete(iid)
+        self._podcast_episode_by_iid.clear()
+        try:
+            self.win.btn_podcast_more.configure(state=DISABLED)
+            self.win.lbl_podcast_episodes.configure(text="Episodes")
+        except Exception:
+            pass
+
+    def _load_podcast_episodes(self, podcast_id: int) -> None:
+        show = get_podcast(podcast_id)
+        episodes = list_episodes(podcast_id)
+        tree = self.win.podcast_episode_tree
+        for iid in tree.get_children(""):
+            tree.delete(iid)
+        self._podcast_episode_by_iid.clear()
+        stems = self._device_guid_stems_for_skip() or set()
+        for ep in episodes:
+            date = (ep.pub_date or "")[:10]
+            dur = ""
+            if ep.duration_sec and ep.duration_sec > 0:
+                m, s = divmod(int(ep.duration_sec), 60)
+                h, m = divmod(m, 60)
+                dur = f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+            if ep.guid and ep.guid in stems:
+                status = "On device"
+            elif ep.local_path and os.path.isfile(ep.local_path):
+                status = "Downloaded"
+            else:
+                status = "New"
+            iid = f"pe:{ep.id}"
+            tree.insert(
+                "",
+                "end",
+                iid=iid,
+                values=(date, ep.title or "Untitled", dur, status),
+            )
+            self._podcast_episode_by_iid[iid] = ep.id
+        title = (show.title if show else "") or "Podcast"
+        try:
+            self.win.lbl_podcast_episodes.configure(
+                text=f"Episodes of “{title}” ({len(episodes)})"
+            )
+            self.win.btn_podcast_more.configure(
+                state=NORMAL if show else DISABLED
+            )
+            self.win.btn_podcast_remove.configure(state=NORMAL)
+            self.win.lbl_podcast_status.configure(
+                text=f"{len(episodes)} episode(s) indexed"
+            )
+        except Exception:
+            pass
+
+    def on_podcast_show_select(self) -> None:
+        try:
+            sel = self.win.podcast_show_list.curselection()
+        except Exception:
+            sel = ()
+        if not sel:
+            return
+        idx = int(sel[0])
+        if idx < 0 or idx >= len(self._podcast_ids):
+            return
+        self._selected_podcast_id = self._podcast_ids[idx]
+        self._load_podcast_episodes(self._selected_podcast_id)
+        self._refresh_podcast_context_detail()
+
+    def on_podcast_episode_select(self) -> None:
+        self._refresh_podcast_context_detail()
+
+    def _refresh_podcast_context_detail(self) -> None:
+        """Leftframe: podcast or episode detail when Podcasts tab is active."""
+        try:
+            current = self.win.media_notebook.select()
+            if current != str(self.win.podcastsLibrary_tab):
+                return
+        except Exception:
+            return
+        ep_ids = self._selected_episode_ids()
+        if len(ep_ids) == 1:
+            ep = get_episode(ep_ids[0])
+            show = (
+                get_podcast(ep.podcast_id)
+                if ep is not None
+                else None
+            )
+            if ep is not None:
+                lines = [
+                    ep.title or "Untitled episode",
+                    f"Show: {(show.title if show else '') or '—'}",
+                    f"Published: {(ep.pub_date or '—')[:19]}",
+                ]
+                if ep.duration_sec:
+                    lines.append(f"Duration: {int(ep.duration_sec)}s")
+                if ep.description:
+                    desc = ep.description
+                    if len(desc) > 600:
+                        desc = desc[:600] + "…"
+                    lines.append("")
+                    lines.append(desc)
+                self.win.set_context_detail("\n".join(lines), path=ep.enclosure_url)
+                return
+        if self._selected_podcast_id is not None:
+            show = get_podcast(self._selected_podcast_id)
+            if show is not None:
+                lines = [
+                    show.title or "Podcast",
+                    f"Author: {show.author or '—'}",
+                    f"Episodes indexed: {show.episode_count}",
+                    f"Last fetched: {show.last_fetched_at or '—'}",
+                ]
+                if show.description:
+                    desc = show.description
+                    if len(desc) > 600:
+                        desc = desc[:600] + "…"
+                    lines.append("")
+                    lines.append(desc)
+                self.win.set_context_detail(
+                    "\n".join(lines), path=show.feed_url
+                )
+                return
+        self.win.set_context_detail("")
+
+    def _selected_episode_ids(self) -> list[int]:
+        try:
+            sel = list(self.win.podcast_episode_tree.selection())
+        except Exception:
+            sel = []
+        out: list[int] = []
+        for iid in sel:
+            eid = self._podcast_episode_by_iid.get(iid)
+            if eid is not None:
+                out.append(int(eid))
+        return out
+
+    def _selected_podcast_ids(self) -> list[int]:
+        try:
+            sel = self.win.podcast_show_list.curselection()
+        except Exception:
+            sel = ()
+        out: list[int] = []
+        for idx in sel:
+            i = int(idx)
+            if 0 <= i < len(self._podcast_ids):
+                out.append(self._podcast_ids[i])
+        return out
+
+    def on_podcast_add(self) -> None:
+        url = ask_text(
+            self.win.root,
+            title="Add Podcast",
+            prompt="RSS / podcast feed URL:",
+        )
+        if not url:
+            return
+        self.win.lbl_podcast_status.configure(text="Fetching feed…")
+
+        def work():
+            return subscribe_feed(url, initial_limit=INITIAL_EPISODE_LIMIT)
+
+        def on_done(result) -> None:
+            podcast, n = result
+            self._selected_podcast_id = podcast.id
+            self._refresh_podcast_tab()
+            messagebox.showinfo(
+                "Podcast",
+                f"Subscribed to “{podcast.title}”.\n"
+                f"Loaded {n} new episode(s) "
+                f"(showing up to {INITIAL_EPISODE_LIMIT} newest).",
+            )
+
+        def on_error(exc: BaseException) -> None:
+            self.win.lbl_podcast_status.configure(text="")
+            logger.exception("subscribe_feed failed")
+            messagebox.showerror("Podcast", f"Could not add podcast:\n{exc}")
+
+        self._bg.submit(work, on_done=on_done, on_error=on_error, name="podcast-add")
+
+    def on_podcast_remove(self) -> None:
+        ids = self._selected_podcast_ids()
+        if not ids and self._selected_podcast_id is not None:
+            ids = [self._selected_podcast_id]
+        if not ids:
+            messagebox.showinfo("Podcast", "Select a podcast to remove.")
+            return
+        names = []
+        for pid in ids:
+            p = get_podcast(pid)
+            names.append((p.title if p else None) or f"#{pid}")
+        if not messagebox.askyesno(
+            "Remove Podcast",
+            "Unsubscribe and remove local episode index for:\n\n"
+            + "\n".join(f"• {n}" for n in names)
+            + "\n\nFiles already on the device are not deleted.",
+        ):
+            return
+        for pid in ids:
+            delete_podcast(pid)
+        self._selected_podcast_id = None
+        self._refresh_podcast_tab()
+
+    def _on_podcast_more_click(self, event) -> None:
+        """More Episodes: Shift+click → full history with warning."""
+        try:
+            if str(self.win.btn_podcast_more["state"]) == str(DISABLED):
+                return
+        except Exception:
+            pass
+        shift = bool(event.state & 0x0001)
+        self.on_podcast_more(full_history=shift)
+
+    def on_podcast_more(self, *, full_history: bool = False) -> None:
+        pid = self._selected_podcast_id
+        if pid is None:
+            ids = self._selected_podcast_ids()
+            pid = ids[0] if ids else None
+        if pid is None:
+            messagebox.showinfo("Podcast", "Select a podcast first.")
+            return
+        if full_history:
+            if not messagebox.askyesno(
+                "Fetch full history",
+                "Fetch the entire episode history for this podcast?\n\n"
+                "This can take a long time and use significant disk/database "
+                "space for long-running shows.",
+            ):
+                return
+            count = 0
+        else:
+            count = MORE_EPISODE_STEP
+        self.win.lbl_podcast_status.configure(
+            text="Fetching more episodes…" if not full_history else "Fetching full history…"
+        )
+
+        def work():
+            return load_more_episodes(
+                pid, count=count, full_history=full_history
+            )
+
+        def on_done(result) -> None:
+            _podcast, n = result
+            self._load_podcast_episodes(pid)
+            self.win.lbl_podcast_status.configure(
+                text=f"Added {n} episode(s)"
+            )
+
+        def on_error(exc: BaseException) -> None:
+            self.win.lbl_podcast_status.configure(text="")
+            logger.exception("load_more_episodes failed")
+            messagebox.showerror("Podcast", f"Could not load episodes:\n{exc}")
+
+        self._bg.submit(work, on_done=on_done, on_error=on_error, name="podcast-more")
+
+    def on_podcast_sync_latest_all(self) -> None:
+        ids = list(self._podcast_ids)
+        self._sync_latest_for_podcasts(ids)
+
+    def on_podcast_sync_latest_selected(self) -> None:
+        ids = self._selected_podcast_ids()
+        if not ids and self._selected_podcast_id is not None:
+            ids = [self._selected_podcast_id]
+        self._sync_latest_for_podcasts(ids)
+
+    def _sync_latest_for_podcasts(self, podcast_ids: list[int]) -> None:
+        if not podcast_ids:
+            messagebox.showinfo("Podcast", "No podcasts to sync.")
+            return
+        if not self._require_sync_ready():
+            return
+        stems = self._device_guid_stems_for_skip() or set()
+        episodes = []
+        for pid in podcast_ids:
+            ep = pick_latest_not_on_device(pid, stems)
+            if ep is not None:
+                episodes.append(ep)
+        if not episodes:
+            messagebox.showinfo(
+                "Podcast",
+                "Every selected show already has its latest indexed episode "
+                "on the device (or has no episodes yet).",
+            )
+            return
+        self._sync_podcast_episodes(episodes, label="Podcast Sync Latest")
+
+    def on_podcast_sync_episodes_selected(self) -> None:
+        eids = self._selected_episode_ids()
+        if not eids:
+            messagebox.showinfo("Podcast", "Select one or more episodes.")
+            return
+        if not self._require_sync_ready():
+            return
+        episodes = []
+        for eid in eids:
+            ep = get_episode(eid)
+            if ep is not None:
+                episodes.append(ep)
+        if not episodes:
+            return
+        n = len(episodes)
+        noun = "Episode" if n == 1 else "Episodes"
+        # Update context menu label for next open (best-effort).
+        try:
+            self.win.menu_podcast_episode_ctx.entryconfig(
+                0, label=f"Sync {n} {noun} Now"
+            )
+        except Exception:
+            pass
+        self._sync_podcast_episodes(
+            episodes, label=f"Podcast {n} {noun.lower()}"
+        )
+
+    def _sync_podcast_episodes(self, episodes: list, *, label: str) -> None:
+        """Download enclosures on a worker, then transfer under ZENcast."""
+        self.win.lbl_podcast_status.configure(text="Preparing episodes…")
+        self.win.set_progress_status("Downloading podcast media…")
+
+        def work():
+            return prepare_episodes_for_sync(episodes)
+
+        def on_done(tracks) -> None:
+            self.win.set_progress_status("")
+            if not tracks:
+                messagebox.showwarning(
+                    "Podcast",
+                    "No episodes could be prepared for transfer "
+                    "(download failed or missing enclosures).",
+                )
+                return
+            self._transfer_many(
+                tracks,
+                kind="podcast",
+                label=label,
+            )
+
+        def on_error(exc: BaseException) -> None:
+            self.win.set_progress_status("")
+            self.win.lbl_podcast_status.configure(text="")
+            logger.exception("prepare podcast episodes failed")
+            messagebox.showerror("Podcast", f"Could not prepare episodes:\n{exc}")
+
+        self._bg.submit(
+            work, on_done=on_done, on_error=on_error, name="podcast-prepare"
+        )
+
     def _clear_artist_album_folder_prefs(self, *, reason: str) -> None:
         """Turn off artist/album folder options and update the Config menu."""
         self._config.store_tracks_in_artist_folder = False
@@ -624,20 +1091,64 @@ class AppController:
         self.win.set_album_folders_menu_enabled(False)
         logger.info("Disabled artist/album folder prefs (%s)", reason)
 
+    def _podcast_folder_id(self) -> int:
+        """ZENcast / Podcasts parent (live layout or legacy default)."""
+        from mtpmanager.domain.device_folders import FolderRole
+        from mtpmanager.infra.remote_naming import ZEN_VISION_M_FOLDER_NAMES
+
+        try:
+            rid = self._folder_layout.id_for(FolderRole.PODCAST)
+            if rid is not None and int(rid) > 0:
+                return int(rid)
+        except Exception:
+            pass
+        return int(ZEN_VISION_M_FOLDER_NAMES.get("zencast", 128))
+
     def _parent_folder_resolver(self):
-        """Return a resolve_parent_folder callback, or None when feature is off."""
-        if not self._config.store_tracks_in_artist_folder:
-            return None
-        if self.win.active_mode() != "experimental":
-            return None
-        if not self.device.is_connected():
-            return None
+        """Return a resolve_parent_folder callback for music and/or podcasts."""
+        experimental = self.win.active_mode() == "experimental"
+        connected = self.device.is_connected()
+        artist_on = bool(self._config.store_tracks_in_artist_folder)
+        podcast_folders = bool(self._config.store_podcasts_in_show_folders)
+
+        if not experimental or not connected:
+            # Still send podcasts under ZENcast root when we know the id.
+            zencast = self._podcast_folder_id()
+
+            def flat_podcast_or_default(meta) -> int | None:
+                genre = (getattr(meta, "genre", "") or "").strip().casefold()
+                if genre == "podcast":
+                    return zencast
+                return None
+
+            return flat_podcast_or_default
 
         cache: dict[str, int] = {}
         device = self.device
         use_album = bool(self._config.store_tracks_in_album_folder)
+        zencast = self._podcast_folder_id()
+        show_cache: dict[str, int] = {}
 
         def resolve(meta) -> int | None:
+            genre = (getattr(meta, "genre", "") or "").strip().casefold()
+            if genre == "podcast":
+                if podcast_folders:
+                    from mtpmanager.app.podcast_ops import ensure_podcast_show_folder
+
+                    show = (
+                        (getattr(meta, "album", None) or "")
+                        or (getattr(meta, "albumartist", None) or "")
+                        or "Podcast"
+                    )
+                    return ensure_podcast_show_folder(
+                        device,
+                        str(show),
+                        podcast_parent_id=zencast,
+                        folder_cache=show_cache,
+                    )
+                return zencast
+            if not artist_on:
+                return None
             if use_album:
                 return ensure_album_folder(
                     device,
