@@ -19,6 +19,7 @@ from tkinter import (
     NORMAL,
     RIGHT,
     TOP,
+    WORD,
     X,
     Y,
     Frame,
@@ -28,6 +29,7 @@ from tkinter import (
     PhotoImage,
     Scrollbar,
     StringVar,
+    Text,
     Tk,
     Toplevel,
     ttk,
@@ -111,6 +113,8 @@ MENU_CONFIG = "Config…"
 # Podcasts tab
 CTX_PODCAST_SYNC_LATEST = "Sync Latest"
 CTX_PODCAST_EPISODE_SYNC = "Sync Episodes Now"
+CTX_PODCAST_PLAY_EPISODE = "Play This Episode"
+CTX_PODCAST_PLAY_EPISODES = "Play These Episodes"
 
 # Device menu (PyMTP / default)
 MENU_CONNECT = "Connect"
@@ -467,6 +471,7 @@ class MainWindow:
         self.menu_podcast_show_ctx.add_command(label=CTX_PODCAST_SYNC_LATEST)
 
         self.menu_podcast_episode_ctx = Menu(self.root, tearoff=0)
+        self.menu_podcast_episode_ctx.add_command(label=CTX_PODCAST_PLAY_EPISODE)
         self.menu_podcast_episode_ctx.add_command(label=CTX_PODCAST_EPISODE_SYNC)
 
         # Device on-media context menus (delete / pull).
@@ -670,14 +675,47 @@ class MainWindow:
         self._startup_hint_active = True
         self._context_detail = ""
         self._context_path = ""
-        self.lbl_context_detail = Label(
-            self.context_panel,
-            text=EXPERIMENTAL_HINT,
-            wraplength=_LEFT_TEXT_WRAP,
-            justify=LEFT,
+        # Scrollable body: long podcast descriptions / multi-line selection text.
+        self.context_body = Frame(self.context_panel)
+        self.context_body.pack(
+            side=TOP, fill=BOTH, expand=True, padx=4, pady=(4, 0)
         )
-        self.lbl_context_detail.pack(padx=6, pady=(4, 0), anchor="nw")
-        # Full host path for single-track selection (italic, secondary).
+        self.context_scroll = Scrollbar(self.context_body)
+        self.context_scroll.pack(side=RIGHT, fill=Y)
+        self.txt_context_detail = Text(
+            self.context_body,
+            wrap=WORD,
+            height=8,
+            width=28,
+            relief="flat",
+            borderwidth=0,
+            highlightthickness=0,
+            yscrollcommand=self.context_scroll.set,
+            takefocus=0,
+        )
+        self.txt_context_detail.pack(side=LEFT, fill=BOTH, expand=True)
+        self.context_scroll.config(command=self.txt_context_detail.yview)
+        # Match panel background; keep a normal (non-bold) body font.
+        try:
+            bg = self.context_panel.cget("background")
+            self.txt_context_detail.configure(background=bg, font=("", 11))
+        except Exception:
+            pass
+        self.txt_context_detail.insert("1.0", EXPERIMENTAL_HINT)
+        self.txt_context_detail.configure(state=DISABLED)
+        # Mouse-wheel scroll when cursor is over the context body.
+        self.txt_context_detail.bind(
+            "<MouseWheel>", self._on_context_mousewheel, add="+"
+        )
+        self.txt_context_detail.bind(
+            "<Button-4>", self._on_context_mousewheel, add="+"
+        )
+        self.txt_context_detail.bind(
+            "<Button-5>", self._on_context_mousewheel, add="+"
+        )
+        # Back-compat aliases (some code may still reference label names).
+        self.lbl_context_detail = self.txt_context_detail
+        # Full host path / URL for single selection (italic, secondary).
         self.lbl_context_path = Label(
             self.context_panel,
             text="",
@@ -685,7 +723,7 @@ class MainWindow:
             justify=LEFT,
             font=("", 10, "italic"),
         )
-        self.lbl_context_path.pack(padx=6, pady=(2, 6), anchor="nw")
+        self.lbl_context_path.pack(side=BOTTOM, fill=X, padx=6, pady=(2, 6), anchor="nw")
 
         self.media_notebook = ttk.Notebook(rightframe)
         self.media_notebook.pack(side=TOP, fill=BOTH, expand=True, padx=2, pady=2)
@@ -1200,20 +1238,41 @@ class MainWindow:
         """True while the context subframe still shows the first-run blurb."""
         return bool(self._startup_hint_active)
 
+    def _on_context_mousewheel(self, event) -> str | None:
+        """Scroll the selection detail Text on wheel / trackpad."""
+        try:
+            if getattr(event, "num", None) == 4 or (
+                getattr(event, "delta", 0) > 0
+            ):
+                self.txt_context_detail.yview_scroll(-1, "units")
+            elif getattr(event, "num", None) == 5 or (
+                getattr(event, "delta", 0) < 0
+            ):
+                self.txt_context_detail.yview_scroll(1, "units")
+        except Exception:
+            pass
+        return "break"
+
     def set_context_detail(
         self, text: str, *, path: str | None = None
     ) -> None:
         """Update the context subframe (selection metadata).
 
         Replaces the first-run experimental hint. Always updates the visible
-        label (including under Stable Mode) so selection still has a home.
-        *path* is the full host path for a single track (shown italic below).
+        body (including under Stable Mode) so selection still has a home.
+        Long text scrolls inside the left panel. *path* is the full host path
+        or URL for a single item (shown italic below the scroll area).
         """
         self._startup_hint_active = False
         self._context_detail = text or ""
         self._context_path = (path or "").strip()
         try:
-            self.lbl_context_detail.configure(text=self._context_detail)
+            self.txt_context_detail.configure(state=NORMAL)
+            self.txt_context_detail.delete("1.0", END)
+            if self._context_detail:
+                self.txt_context_detail.insert("1.0", self._context_detail)
+            self.txt_context_detail.configure(state=DISABLED)
+            self.txt_context_detail.yview_moveto(0)
         except Exception:
             pass
         try:
@@ -1336,6 +1395,7 @@ class MainWindow:
         on_episode_select=None,
         on_show_sync=None,
         on_episode_sync=None,
+        on_episode_play=None,
     ) -> None:
         if on_add is not None:
             self.btn_podcast_add.configure(command=on_add)
@@ -1357,9 +1417,13 @@ class MainWindow:
             self.menu_podcast_show_ctx.entryconfig(
                 CTX_PODCAST_SYNC_LATEST, command=on_show_sync
             )
+        if on_episode_play is not None:
+            # Index 0: Play (label toggles This/These).
+            self.menu_podcast_episode_ctx.entryconfig(0, command=on_episode_play)
         if on_episode_sync is not None:
+            # Index 1: Sync N Episodes Now.
             self.menu_podcast_episode_ctx.entryconfig(
-                0, command=on_episode_sync
+                1, command=on_episode_sync
             )
 
     def popup_podcast_show_context(self, event) -> str | None:
@@ -1383,6 +1447,11 @@ class MainWindow:
             if row:
                 if row not in self.podcast_episode_tree.selection():
                     self.podcast_episode_tree.selection_set(row)
+            # Controller may refresh Play/Sync labels for multi-select.
+            try:
+                self.podcast_episode_tree.event_generate("<<TreeviewSelect>>")
+            except Exception:
+                pass
             self.menu_podcast_episode_ctx.tk_popup(event.x_root, event.y_root)
         finally:
             try:

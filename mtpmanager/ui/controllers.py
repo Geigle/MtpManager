@@ -352,6 +352,7 @@ class AppController:
             on_episode_select=self.on_podcast_episode_select,
             on_show_sync=self.on_podcast_sync_latest_selected,
             on_episode_sync=self.on_podcast_sync_episodes_selected,
+            on_episode_play=self.on_podcast_play_episodes_selected,
         )
         try:
             w.podcast_show_list.bind(
@@ -807,6 +808,31 @@ class AppController:
 
     def on_podcast_episode_select(self) -> None:
         self._refresh_podcast_context_detail()
+        self._update_podcast_episode_menu_labels()
+
+    def _update_podcast_episode_menu_labels(self) -> None:
+        n = len(self._selected_episode_ids())
+        try:
+            from mtpmanager.ui.window import (
+                CTX_PODCAST_PLAY_EPISODE,
+                CTX_PODCAST_PLAY_EPISODES,
+            )
+
+            play_label = (
+                CTX_PODCAST_PLAY_EPISODES if n > 1 else CTX_PODCAST_PLAY_EPISODE
+            )
+            self.win.menu_podcast_episode_ctx.entryconfig(0, label=play_label)
+            if n >= 1:
+                noun = "Episode" if n == 1 else "Episodes"
+                self.win.menu_podcast_episode_ctx.entryconfig(
+                    1, label=f"Sync {n} {noun} Now"
+                )
+            else:
+                self.win.menu_podcast_episode_ctx.entryconfig(
+                    1, label="Sync Episodes Now"
+                )
+        except Exception:
+            pass
 
     def _refresh_podcast_context_detail(self) -> None:
         """Leftframe: podcast or episode detail when Podcasts tab is active."""
@@ -1038,15 +1064,62 @@ class AppController:
             return
         n = len(episodes)
         noun = "Episode" if n == 1 else "Episodes"
-        # Update context menu label for next open (best-effort).
-        try:
-            self.win.menu_podcast_episode_ctx.entryconfig(
-                0, label=f"Sync {n} {noun} Now"
-            )
-        except Exception:
-            pass
+        self._update_podcast_episode_menu_labels()
         self._sync_podcast_episodes(
             episodes, label=f"Podcast {n} {noun.lower()}"
+        )
+
+    def on_podcast_play_episodes_selected(self) -> None:
+        """Download selected episode enclosures if needed, then play locally."""
+        eids = self._selected_episode_ids()
+        if not eids:
+            messagebox.showinfo("Playback", "Select one or more episodes to play.")
+            return
+        episodes = []
+        for eid in eids:
+            ep = get_episode(eid)
+            if ep is not None:
+                episodes.append(ep)
+        if not episodes:
+            return
+        self._update_podcast_episode_menu_labels()
+        self.win.lbl_podcast_status.configure(text="Preparing playback…")
+        self.win.set_progress_status("Downloading podcast media for playback…")
+
+        def work():
+            return prepare_episodes_for_sync(episodes)
+
+        def on_done(tracks) -> None:
+            self.win.set_progress_status("")
+            try:
+                self.win.lbl_podcast_status.configure(text="")
+            except Exception:
+                pass
+            if not tracks:
+                messagebox.showwarning(
+                    "Playback",
+                    "No episodes could be prepared for playback "
+                    "(download failed or missing enclosures).",
+                )
+                return
+            # Refresh episode statuses (Downloaded) after fetch.
+            if self._selected_podcast_id is not None:
+                self._load_podcast_episodes(self._selected_podcast_id)
+            self._start_playback_queue(tracks)
+
+        def on_error(exc: BaseException) -> None:
+            self.win.set_progress_status("")
+            try:
+                self.win.lbl_podcast_status.configure(text="")
+            except Exception:
+                pass
+            logger.exception("prepare podcast episodes for playback failed")
+            messagebox.showerror(
+                "Playback", f"Could not prepare episodes:\n{exc}"
+            )
+
+        self._bg.submit(
+            work, on_done=on_done, on_error=on_error, name="podcast-play"
         )
 
     def _sync_podcast_episodes(self, episodes: list, *, label: str) -> None:
@@ -1066,6 +1139,8 @@ class AppController:
                     "(download failed or missing enclosures).",
                 )
                 return
+            if self._selected_podcast_id is not None:
+                self._load_podcast_episodes(self._selected_podcast_id)
             self._transfer_many(
                 tracks,
                 kind="podcast",

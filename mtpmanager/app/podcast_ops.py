@@ -2,7 +2,6 @@
 
 # TODO(follow-up): OPML import/export
 # TODO(follow-up): auto-refresh on a timer
-# TODO(follow-up): in-app episode playback
 # TODO(follow-up): Device → Podcasts inventory browser
 # TODO(follow-up): video podcasts
 # TODO(follow-up): per-show auto-download rules beyond “latest”
