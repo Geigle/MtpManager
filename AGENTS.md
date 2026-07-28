@@ -55,6 +55,8 @@ Do **not**:
 | Scan / tags | `app/scan_library.py`, `infra/mutagen_tags.py` |
 | Album art thumbs | `infra/album_art.py` (mutagen + Pillow; album header rows only) |
 | Library index (SQLite + GUID; multi-root) | `infra/library_index.py`, `domain/library.py` (`root_paths`), `app/scan_library.py`, `domain/track_id.py`, `infra/app_paths.py` |
+| Host playlists (M3U in index DB) | `domain/playlist_m3u.py`, `infra/playlists.py`, Playlists tab + context menus in `ui/window.py` / `ui/controllers.py`, dialog `ui/dialogs.py` (`ask_add_to_playlist`) |
+| On-device playlist push (GUID→item_id) | `app/playlist_device.py`, `infra/device_index.item_ids_for_guids`, patched playlist APIs in `pymtp_wrapper` / `pymtp_device`; phase-2 after Sync playlist track transfer |
 | Device list join / skip-if-present | `domain/device_media.py`, `app/transfer.py`, controllers list/sync |
 | Durable device inventory (list_files once) | `infra/device_index.py` + connect seed / Refresh menu in controllers |
 | Device profiles / graphics | `domain/device_profile.py`, `domain/device_profiles.py`, `assets/devices/` |

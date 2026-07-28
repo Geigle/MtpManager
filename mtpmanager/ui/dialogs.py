@@ -1528,3 +1528,225 @@ def show_track_info_dialog(parent, info) -> None:
     except Exception:
         pass
     parent.wait_window(dlg)
+
+
+@dataclass
+class AddToPlaylistResult:
+    """Outcome of the Add to Playlist dialog."""
+
+    playlist_id: int
+    playlist_name: str
+    skip_existing: bool = True
+    # True when the user created/deleted playlists (caller may refresh tab).
+    playlists_changed: bool = False
+
+
+def ask_add_to_playlist(
+    parent,
+    *,
+    candidate_tracks: list,
+    list_playlists: Callable[[], list],
+    create_playlist: Callable[[str], object],
+    delete_playlist: Callable[[int], bool],
+) -> AddToPlaylistResult | None:
+    """Modal: pick (or create) a playlist and confirm adding *candidate_tracks*.
+
+    *list_playlists* returns a sequence of objects with ``.id``, ``.name``,
+    and optional ``.track_count``. *create_playlist(name)* returns an object
+    with ``.id`` / ``.name``. *delete_playlist(id)* returns success bool.
+
+    Returns :class:`AddToPlaylistResult` or None if cancelled.
+    """
+    from mtpmanager.domain.library import primary_artist
+
+    tracks = list(candidate_tracks or [])
+    result: list[AddToPlaylistResult | None] = [None]
+    changed = [False]
+
+    dlg = Toplevel(parent)
+    dlg.title("Add to Playlist")
+    dlg.transient(parent)
+    dlg.resizable(True, True)
+
+    body = Frame(dlg, padx=12, pady=10)
+    body.pack(fill=BOTH, expand=True)
+
+    # --- Candidates (add mode only) ---
+    if tracks:
+        Label(
+            body,
+            text=f"Tracks to add ({len(tracks)})",
+            font=("", 11, "bold"),
+            anchor="w",
+        ).pack(anchor="w", pady=(0, 4))
+        cand_frame = Frame(body)
+        cand_frame.pack(fill=BOTH, expand=True, pady=(0, 8))
+        cand_scroll = Scrollbar(cand_frame)
+        cand_scroll.pack(side=RIGHT, fill=Y)
+        cand_list = Listbox(
+            cand_frame,
+            height=min(8, max(3, len(tracks))),
+            yscrollcommand=cand_scroll.set,
+            exportselection=False,
+        )
+        cand_list.pack(side=LEFT, fill=BOTH, expand=True)
+        cand_scroll.config(command=cand_list.yview)
+        for t in tracks:
+            title = (t.meta.title if t.meta else "") or "Unknown Title"
+            artist = primary_artist(t) if t else ""
+            cand_list.insert(END, f"{artist} — {title}" if artist else title)
+
+    Label(body, text="Playlists", font=("", 11, "bold"), anchor="w").pack(
+        anchor="w", pady=(0, 4)
+    )
+    pl_frame = Frame(body)
+    pl_frame.pack(fill=BOTH, expand=True)
+    pl_scroll = Scrollbar(pl_frame)
+    pl_scroll.pack(side=RIGHT, fill=Y)
+    pl_list = Listbox(
+        pl_frame,
+        height=8,
+        yscrollcommand=pl_scroll.set,
+        exportselection=False,
+    )
+    pl_list.pack(side=LEFT, fill=BOTH, expand=True)
+    pl_scroll.config(command=pl_list.yview)
+
+    # id list parallel to listbox rows
+    pl_ids: list[int] = []
+
+    def refresh_playlists(*, select_id: int | None = None) -> None:
+        pl_list.delete(0, END)
+        pl_ids.clear()
+        items = list(list_playlists() or [])
+        for info in items:
+            pid = int(getattr(info, "id", 0) or 0)
+            name = str(getattr(info, "name", "") or "")
+            count = getattr(info, "track_count", None)
+            label = f"{name}  ({count})" if count is not None else name
+            pl_list.insert(END, label)
+            pl_ids.append(pid)
+        if not pl_ids:
+            btn_add.configure(state=DISABLED)
+            btn_del.configure(state=DISABLED)
+            return
+        btn_del.configure(state=NORMAL)
+        btn_add.configure(state=NORMAL if tracks else DISABLED)
+        idx = 0
+        if select_id is not None and select_id in pl_ids:
+            idx = pl_ids.index(select_id)
+        pl_list.selection_clear(0, END)
+        pl_list.selection_set(idx)
+        pl_list.see(idx)
+
+    skip_var = BooleanVar(value=True)
+    Checkbutton(
+        body,
+        text="Skip tracks already in the playlist",
+        variable=skip_var,
+    ).pack(anchor="w", pady=(6, 2))
+
+    btn_row = Frame(body)
+    btn_row.pack(fill="x", pady=(8, 0))
+
+    def on_new() -> None:
+        name = ask_text(
+            dlg,
+            title="New Playlist",
+            prompt="Playlist name:",
+        )
+        if not name:
+            return
+        try:
+            created = create_playlist(name)
+        except ValueError as e:
+            messagebox.showerror("Playlist", str(e), parent=dlg)
+            return
+        except Exception as e:
+            messagebox.showerror("Playlist", f"Could not create playlist:\n{e}", parent=dlg)
+            return
+        changed[0] = True
+        refresh_playlists(select_id=int(getattr(created, "id", 0) or 0))
+
+    def on_delete() -> None:
+        sel = pl_list.curselection()
+        if not sel:
+            return
+        idx = int(sel[0])
+        if idx < 0 or idx >= len(pl_ids):
+            return
+        pid = pl_ids[idx]
+        label = pl_list.get(idx)
+        if not messagebox.askyesno(
+            "Delete Playlist",
+            f"Delete playlist?\n\n{label}",
+            parent=dlg,
+        ):
+            return
+        try:
+            ok = bool(delete_playlist(pid))
+        except Exception as e:
+            messagebox.showerror("Playlist", f"Delete failed:\n{e}", parent=dlg)
+            return
+        if not ok:
+            messagebox.showwarning("Playlist", "Playlist was not found.", parent=dlg)
+        changed[0] = True
+        refresh_playlists()
+
+    def on_add() -> None:
+        sel = pl_list.curselection()
+        if not sel or not tracks:
+            return
+        idx = int(sel[0])
+        if idx < 0 or idx >= len(pl_ids):
+            return
+        pid = pl_ids[idx]
+        name = pl_list.get(idx).rsplit("  (", 1)[0]
+        result[0] = AddToPlaylistResult(
+            playlist_id=pid,
+            playlist_name=name,
+            skip_existing=bool(skip_var.get()),
+            playlists_changed=changed[0],
+        )
+        dlg.destroy()
+
+    def on_cancel() -> None:
+        result[0] = None
+        dlg.destroy()
+
+    btn_new = Button(btn_row, text="+", width=3, command=on_new)
+    btn_new.pack(side=LEFT, padx=(0, 4))
+    btn_del = Button(btn_row, text="−", width=3, command=on_delete, state=DISABLED)
+    btn_del.pack(side=LEFT, padx=(0, 8))
+    Button(btn_row, text="Cancel", width=10, command=on_cancel).pack(side=RIGHT)
+    btn_add = Button(
+        btn_row,
+        text="Add to selected",
+        width=14,
+        command=on_add,
+        state=DISABLED,
+    )
+    btn_add.pack(side=RIGHT, padx=(0, 6))
+
+    refresh_playlists()
+    dlg.protocol("WM_DELETE_WINDOW", on_cancel)
+    dlg.grab_set()
+    try:
+        px = parent.winfo_rootx() + max(0, (parent.winfo_width() - 480) // 2)
+        py = parent.winfo_rooty() + max(0, (parent.winfo_height() - 520) // 3)
+        dlg.geometry(f"480x520+{px}+{py}")
+    except Exception:
+        dlg.geometry("480x520")
+    parent.wait_window(dlg)
+
+    out = result[0]
+    if out is None and changed[0]:
+        # User edited playlists but cancelled add — still signal refresh.
+        return AddToPlaylistResult(
+            playlist_id=-1,
+            playlist_name="",
+            skip_existing=True,
+            playlists_changed=True,
+        )
+    return out
+

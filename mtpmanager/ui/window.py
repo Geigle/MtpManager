@@ -26,6 +26,7 @@ from tkinter import (
     Menu,
     PhotoImage,
     Scrollbar,
+    StringVar,
     Tk,
     Toplevel,
     ttk,
@@ -82,6 +83,7 @@ TREE_COLS = ("title", "artist", "album", "year")
 
 # Library menu labels (used for entryconfig by label).
 MENU_MANAGE_LIBRARY = "Manage Library…"
+MENU_MANAGE_PLAYLISTS = "Manage Playlists…"
 # Back-compat aliases (older docs / call sites).
 MENU_SELECT_ROOT = MENU_MANAGE_LIBRARY
 MENU_UPDATE_LIBRARY = MENU_MANAGE_LIBRARY
@@ -127,6 +129,8 @@ CTX_SYNC_ALBUM = "Sync Album"
 CTX_SYNC_ARTIST = "Sync all from Artist"
 CTX_PLAY_TRACK = "Play This Track"
 CTX_PLAY_TRACKS = "Play These Tracks"
+CTX_ADD_TO_PLAYLIST = "Add This Track to Playlist…"
+CTX_ADD_TRACKS_TO_PLAYLIST = "Add These Tracks to Playlist…"
 CTX_EXCLUDE_FILE = "Exclude this file…"
 CTX_EXCLUDE_FOLDER = "Exclude this folder…"
 
@@ -135,7 +139,14 @@ CTX_SYNC_ARTIST_GROUP = "Sync all from Artist"
 CTX_SYNC_ALBUM_GROUP = "Sync album"
 CTX_PLAY_ARTIST_GROUP = "Play All from Artist"
 CTX_PLAY_ALBUM_GROUP = "Play Album"
+CTX_ADD_ARTIST_TO_PLAYLIST = "Add All from Artist to Playlist…"
+CTX_ADD_ALBUM_TO_PLAYLIST = "Add Album to Playlist…"
 CTX_EXCLUDE_GROUP_FOLDER = "Exclude this folder…"
+
+# Playlists tab context menu
+CTX_PLAYLIST_REMOVE = "Remove from Playlist"
+CTX_PLAYLIST_PLAY_TRACK = "Play This Track"
+CTX_PLAYLIST_SYNC = "Sync playlist to device"
 
 # Device media context menus (on-device Music / Video / Audiobooks trees)
 CTX_DEVICE_DELETE = "Delete from device…"
@@ -349,6 +360,7 @@ class MainWindow:
         self.menu_library = Menu(self.menubar, tearoff=0)
         self.menubar.add_cascade(label="Library", menu=self.menu_library)
         self.menu_library.add_command(label=MENU_MANAGE_LIBRARY)
+        self.menu_library.add_command(label=MENU_MANAGE_PLAYLISTS)
 
         self.menu_transfer = Menu(self.menubar, tearoff=0)
         self.menubar.add_cascade(label="Transfer", menu=self.menu_transfer)
@@ -413,6 +425,7 @@ class MainWindow:
         self.menu_track_ctx.add_command(label=CTX_SYNC_ARTIST)
         self.menu_track_ctx.add_separator()
         self.menu_track_ctx.add_command(label=CTX_PLAY_TRACK)
+        self.menu_track_ctx.add_command(label=CTX_ADD_TO_PLAYLIST)
         self.menu_track_ctx.add_separator()
         self.menu_track_ctx.add_command(label=CTX_EXCLUDE_FILE)
         self.menu_track_ctx.add_command(label=CTX_EXCLUDE_FOLDER)
@@ -421,13 +434,21 @@ class MainWindow:
         self.menu_artist_ctx.add_command(label=CTX_SYNC_ARTIST_GROUP)
         self.menu_artist_ctx.add_separator()
         self.menu_artist_ctx.add_command(label=CTX_PLAY_ARTIST_GROUP)
+        self.menu_artist_ctx.add_command(label=CTX_ADD_ARTIST_TO_PLAYLIST)
 
         self.menu_album_ctx = Menu(self.root, tearoff=0)
         self.menu_album_ctx.add_command(label=CTX_SYNC_ALBUM_GROUP)
         self.menu_album_ctx.add_separator()
         self.menu_album_ctx.add_command(label=CTX_PLAY_ALBUM_GROUP)
+        self.menu_album_ctx.add_command(label=CTX_ADD_ALBUM_TO_PLAYLIST)
         self.menu_album_ctx.add_separator()
         self.menu_album_ctx.add_command(label=CTX_EXCLUDE_GROUP_FOLDER)
+
+        self.menu_playlist_ctx = Menu(self.root, tearoff=0)
+        self.menu_playlist_ctx.add_command(label=CTX_PLAYLIST_PLAY_TRACK)
+        self.menu_playlist_ctx.add_command(label=CTX_PLAYLIST_REMOVE)
+        self.menu_playlist_ctx.add_separator()
+        self.menu_playlist_ctx.add_command(label=CTX_PLAYLIST_SYNC)
 
         # Device on-media context menus (delete / pull).
         self.menu_device_track_ctx = Menu(self.root, tearoff=0)
@@ -653,11 +674,13 @@ class MainWindow:
         self.videoLibrary_tab = Frame(self.media_notebook)
         self.audiobooksLibrary_tab = Frame(self.media_notebook)
         self.podcastsLibrary_tab = Frame(self.media_notebook)
+        self.playlists_tab = Frame(self.media_notebook)
         self.device_tab = Frame(self.media_notebook)
         self.media_notebook.add(self.musicLibrary_tab, text="Music")
         self.media_notebook.add(self.videoLibrary_tab, text="Video")
         self.media_notebook.add(self.audiobooksLibrary_tab, text="Audiobooks")
         self.media_notebook.add(self.podcastsLibrary_tab, text="Podcasts")
+        self.media_notebook.add(self.playlists_tab, text="Playlists")
         self.media_notebook.add(self.device_tab, text="Device")
 
         tree_frame = Frame(self.musicLibrary_tab)
@@ -671,6 +694,38 @@ class MainWindow:
 
         p_tree_frame = Frame(self.podcastsLibrary_tab)
         p_tree_frame.pack(fill=BOTH, expand=True)
+
+        # Playlists tab: combobox + toolbar + flat track list.
+        pl_toolbar = Frame(self.playlists_tab)
+        pl_toolbar.pack(side=TOP, fill=X, padx=4, pady=(4, 2))
+        Label(pl_toolbar, text="Playlist:").pack(side=LEFT, padx=(2, 4))
+        self.var_playlist_choice = StringVar(value="")
+        self.playlist_combo = ttk.Combobox(
+            pl_toolbar,
+            textvariable=self.var_playlist_choice,
+            state="disabled",
+            width=36,
+        )
+        self.playlist_combo.pack(side=LEFT, padx=2)
+        self.btn_playlist_rename = Button(
+            pl_toolbar, text="Rename…", width=9, state=DISABLED
+        )
+        self.btn_playlist_rename.pack(side=LEFT, padx=2)
+        self.btn_playlist_new = Button(pl_toolbar, text="+", width=3)
+        self.btn_playlist_new.pack(side=LEFT, padx=2)
+        self.btn_playlist_delete = Button(
+            pl_toolbar, text="−", width=3, state=DISABLED
+        )
+        self.btn_playlist_delete.pack(side=LEFT, padx=2)
+        self.btn_playlist_sync = Button(
+            pl_toolbar, text="Sync playlist to device", state=DISABLED
+        )
+        self.btn_playlist_sync.pack(side=LEFT, padx=(8, 2))
+        self.lbl_playlist_status = Label(pl_toolbar, text="", anchor="w")
+        self.lbl_playlist_status.pack(side=LEFT, fill=X, expand=True, padx=6)
+
+        pl_tree_frame = Frame(self.playlists_tab)
+        pl_tree_frame.pack(side=TOP, fill=BOTH, expand=True)
 
         # Device tab: nested notebook by media category.
         # Music + Video + Audiobooks; Podcasts deferred.
@@ -875,6 +930,48 @@ class MainWindow:
         self.audiobooks_tree.column("album", width=140, minwidth=60)
         self.audiobooks_tree.column("year", width=56, minwidth=40, stretch=False)
 
+        # Playlists tab tree (flat ordered list; same columns as Music).
+        pl_yscroll = Scrollbar(pl_tree_frame)
+        pl_yscroll.pack(side=RIGHT, fill=Y)
+        pl_xscroll = Scrollbar(pl_tree_frame, orient="horizontal")
+        pl_xscroll.pack(side=BOTTOM, fill=X)
+
+        self.playlist_tree = ttk.Treeview(
+            pl_tree_frame,
+            columns=TREE_COLS,
+            show="tree headings",
+            selectmode="extended",
+            yscrollcommand=pl_yscroll.set,
+            xscrollcommand=pl_xscroll.set,
+        )
+        self.playlist_tree.pack(side=LEFT, fill=BOTH, expand=True)
+        pl_yscroll.config(command=self.playlist_tree.yview)
+        pl_xscroll.config(command=self.playlist_tree.xview)
+
+        self.playlist_tree.heading("#0", text="#", anchor="w")
+        self.playlist_tree.heading("title", text="Title", anchor="w")
+        self.playlist_tree.heading("artist", text="Artist", anchor="w")
+        self.playlist_tree.heading("album", text="Album", anchor="w")
+        self.playlist_tree.heading("year", text="Year", anchor="w")
+        self.playlist_tree.column(
+            "#0", width=48, minwidth=40, stretch=False
+        )
+        self.playlist_tree.column("title", width=280, minwidth=120, stretch=True)
+        self.playlist_tree.column("artist", width=140, minwidth=60)
+        self.playlist_tree.column("album", width=140, minwidth=60)
+        self.playlist_tree.column("year", width=56, minwidth=40, stretch=False)
+        self.playlist_tree.tag_configure("dead", foreground=_DEAD_TRACK_FG)
+        self.playlist_tree.tag_configure(
+            "playing", background=BG_PLAYING, foreground=FG_PLAYING
+        )
+        self.playlist_tree.tag_configure("xfer_queued", background=BG_TRANSFER_QUEUED)
+        self.playlist_tree.tag_configure(
+            "xfer_transcoding", background=BG_TRANSFER_TRANSCODING
+        )
+        self.playlist_tree.tag_configure(
+            "xfer_transferring", background=BG_TRANSFER_TRANSFERRING
+        )
+
         # Device audiobooks tree (same columns/grouping as library audiobooks).
         dab_yscroll = Scrollbar(dab_tree_frame)
         dab_yscroll.pack(side=RIGHT, fill=Y)
@@ -1028,18 +1125,24 @@ class MainWindow:
         self,
         *,
         on_manage_library,
+        on_manage_playlists=None,
         on_select_root=None,
         on_update=None,
     ) -> None:
         """Wire Library menu entries (called once from the controller).
 
         *on_manage_library* opens the roots manager (add/remove/update).
+        *on_manage_playlists* focuses the Playlists notebook tab.
         *on_select_root* / *on_update* are ignored legacy kwargs.
         """
         del on_select_root, on_update
         self.menu_library.entryconfig(
             MENU_MANAGE_LIBRARY, command=on_manage_library
         )
+        if on_manage_playlists is not None:
+            self.menu_library.entryconfig(
+                MENU_MANAGE_PLAYLISTS, command=on_manage_playlists
+            )
 
     def set_transfer_menu_commands(
         self,
@@ -1189,6 +1292,9 @@ class MainWindow:
         on_play_track=None,
         on_play_artist_group=None,
         on_play_album_group=None,
+        on_add_to_playlist=None,
+        on_add_artist_to_playlist=None,
+        on_add_album_to_playlist=None,
         on_exclude_file=None,
         on_exclude_folder=None,
         on_exclude_group_folder=None,
@@ -1203,6 +1309,9 @@ class MainWindow:
         if on_play_track is not None:
             # Index (not label): label toggles Play This / These Tracks.
             self.menu_track_ctx.entryconfig(6, command=on_play_track)
+        if on_add_to_playlist is not None:
+            # Index 7: Add to playlist (label toggles This/These).
+            self.menu_track_ctx.entryconfig(7, command=on_add_to_playlist)
         if on_exclude_file is not None:
             self.menu_track_ctx.entryconfig(
                 CTX_EXCLUDE_FILE, command=on_exclude_file
@@ -1215,13 +1324,106 @@ class MainWindow:
         if on_play_artist_group is not None:
             # Index 2 (label changes with artist name).
             self.menu_artist_ctx.entryconfig(2, command=on_play_artist_group)
+        if on_add_artist_to_playlist is not None:
+            self.menu_artist_ctx.entryconfig(3, command=on_add_artist_to_playlist)
         self.menu_album_ctx.entryconfig(0, command=on_sync_album_group)
         if on_play_album_group is not None:
             # Index 2 (label changes with album/folder name).
             self.menu_album_ctx.entryconfig(2, command=on_play_album_group)
+        if on_add_album_to_playlist is not None:
+            self.menu_album_ctx.entryconfig(3, command=on_add_album_to_playlist)
         if on_exclude_group_folder is not None:
-            # Index 4 after Play + separator.
-            self.menu_album_ctx.entryconfig(4, command=on_exclude_group_folder)
+            # Index 5 after Play + Add + separator.
+            self.menu_album_ctx.entryconfig(5, command=on_exclude_group_folder)
+
+    def set_playlist_tab_commands(
+        self,
+        *,
+        on_combo_selected=None,
+        on_new=None,
+        on_delete=None,
+        on_rename=None,
+        on_sync=None,
+        on_remove_tracks=None,
+        on_play_track=None,
+    ) -> None:
+        """Wire Playlists tab toolbar + context menu."""
+        if on_combo_selected is not None:
+            self.playlist_combo.bind(
+                "<<ComboboxSelected>>", lambda _e: on_combo_selected()
+            )
+        if on_new is not None:
+            self.btn_playlist_new.configure(command=on_new)
+        if on_delete is not None:
+            self.btn_playlist_delete.configure(command=on_delete)
+        if on_rename is not None:
+            self.btn_playlist_rename.configure(command=on_rename)
+        if on_sync is not None:
+            self.btn_playlist_sync.configure(command=on_sync)
+            self.menu_playlist_ctx.entryconfig(
+                CTX_PLAYLIST_SYNC, command=on_sync
+            )
+        if on_remove_tracks is not None:
+            self.menu_playlist_ctx.entryconfig(
+                CTX_PLAYLIST_REMOVE, command=on_remove_tracks
+            )
+        if on_play_track is not None:
+            self.menu_playlist_ctx.entryconfig(
+                CTX_PLAYLIST_PLAY_TRACK, command=on_play_track
+            )
+
+    def show_playlists_tab(self) -> None:
+        """Select the Playlists notebook tab."""
+        try:
+            self.media_notebook.select(self.playlists_tab)
+        except Exception:
+            pass
+
+    def set_playlist_combo_values(
+        self,
+        names: list[str],
+        *,
+        selected: str = "",
+    ) -> None:
+        """Refresh playlist dropdown options and selection."""
+        values = list(names or [])
+        if not values:
+            self.playlist_combo.configure(values=[], state="disabled")
+            self.var_playlist_choice.set("")
+            self.btn_playlist_rename.configure(state=DISABLED)
+            self.btn_playlist_delete.configure(state=DISABLED)
+            self.btn_playlist_sync.configure(state=DISABLED)
+            return
+        self.playlist_combo.configure(values=values, state="readonly")
+        pick = selected if selected in values else values[0]
+        self.var_playlist_choice.set(pick)
+        self.btn_playlist_rename.configure(state=NORMAL)
+        self.btn_playlist_delete.configure(state=NORMAL)
+        self.btn_playlist_sync.configure(state=NORMAL)
+
+    def clear_playlist_tree(self) -> None:
+        tree = self.playlist_tree
+        for iid in tree.get_children(""):
+            tree.delete(iid)
+
+    def popup_playlist_context(self, event) -> str | None:
+        """Context menu for the Playlists tab tree."""
+        menu = self.menu_playlist_ctx
+        try:
+            tree = self.playlist_tree
+            row = tree.identify_row(event.y)
+            if row:
+                current = tree.selection()
+                if row not in current:
+                    tree.selection_set(row)
+                tree.focus(row)
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            try:
+                menu.grab_release()
+            except Exception:
+                pass
+        return "break"
 
     def set_playback_commands(
         self,
@@ -1794,10 +1996,13 @@ class MainWindow:
     def set_track_transfer_style(self, iid: str, status: str | None) -> None:
         """Tint a track row for transfer state via tags."""
         tree = None
-        for candidate in self.library_media_trees():
-            if candidate.exists(iid):
-                tree = candidate
-                break
+        for candidate in (*self.library_media_trees(), self.playlist_tree):
+            try:
+                if candidate.exists(iid):
+                    tree = candidate
+                    break
+            except Exception:
+                continue
         if tree is None:
             return
         tags = [

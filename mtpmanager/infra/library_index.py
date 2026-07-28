@@ -1,11 +1,11 @@
 """Persist and restore a Library as a SQLite index under the app data dir.
 
-Schema version 5: multi-root library + flat track rows (path, guid, tags) with
+Schema version 6: multi-root library + flat track rows (path, guid, tags) with
 ``tracked`` flag, plus ``library_exclusions`` (file/folder paths skipped on
 scan and untracked from the UI). **Tracked** rows appear in the library UI;
 **untracked** rows keep path/tags/GUID forever so device joins and future
 rescans can reuse the same identity (principle: once identified by GUID, keep
-it).
+it). Schema v6 adds ``playlists`` (named M3U bodies for host playlists).
 
 ``library_meta.root_path`` remains the first root (back-compat); ``root_paths``
 is a JSON array of active roots. Device inventory lives alongside in the same
@@ -40,7 +40,7 @@ from mtpmanager.infra.app_paths import default_data_dir
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 INDEX_FILENAME = "library_index.db"
 LEGACY_JSON_FILENAME = "library_index.json"
 
@@ -194,6 +194,13 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(_SCHEMA_SQL)
     _migrate_library_meta(conn)
     _migrate_tracks_tracked(conn)
+    # Host playlists (M3U text bodies).
+    try:
+        from mtpmanager.infra.playlists import ensure_playlists_schema
+
+        ensure_playlists_schema(conn)
+    except Exception:
+        logger.debug("playlists schema ensure skipped", exc_info=True)
     # Device inventory tables (same DB); safe no-op if already present.
     try:
         from mtpmanager.infra.device_index import _ensure_schema as _device_schema

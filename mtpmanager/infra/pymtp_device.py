@@ -12,6 +12,7 @@ import mtpmanager.infra.pymtp_wrapper as pymtp
 from mtpmanager.domain.device_media import apply_track_info, track_refs_from_files
 from mtpmanager.domain.models import (
     DeviceInfo,
+    DevicePlaylist,
     DeviceTrackInfo,
     DeviceTrackRef,
     FileEntry,
@@ -20,6 +21,7 @@ from mtpmanager.domain.models import (
 )
 from mtpmanager.infra.remote_naming import (
     DEFAULT_MUSIC_FOLDER_ID,
+    DEFAULT_PLAYLIST_FOLDER_ID,
     DEFAULT_STORAGE_ID,
     build_remote_path,
     split_remote_path,
@@ -415,6 +417,169 @@ class PymtpDevice:
                 fatal=True,
             ) from exc
         logger.info("delete_object ok id=%s", oid)
+
+    def list_playlists(self) -> list[DevicePlaylist]:
+        """Experimental: list on-device playlists (patched get_playlists)."""
+        logger.info("list_playlists")
+        try:
+            raw = self._mtp.get_playlists()
+        except pymtp.NotConnected as exc:
+            raise TransportError(
+                "PyMTP list playlists failed: device not connected. "
+                "Use Device → Connect first.",
+                fatal=True,
+            ) from exc
+        except Exception as exc:
+            try:
+                self._mtp.debug_stack()
+            except Exception:
+                pass
+            raise TransportError(
+                f"PyMTP list playlists failed: {exc}",
+                fatal=True,
+            ) from exc
+        out: list[DevicePlaylist] = []
+        for node in raw or []:
+            try:
+                tracks = tuple(
+                    int(x)
+                    for x in (getattr(node, "tracks", ()) or ())
+                    if int(x) > 0
+                )
+                out.append(
+                    DevicePlaylist(
+                        playlist_id=int(getattr(node, "playlist_id", 0) or 0),
+                        name=_decode(getattr(node, "name", "")),
+                        parent_id=int(getattr(node, "parent_id", 0) or 0),
+                        storage_id=int(getattr(node, "storage_id", 0) or 0),
+                        track_ids=tracks,
+                    )
+                )
+            except Exception:
+                logger.debug("skip bad playlist node", exc_info=True)
+        out = [p for p in out if p.playlist_id > 0]
+        logger.info("list_playlists count=%d", len(out))
+        return out
+
+    def create_playlist(
+        self,
+        name: str,
+        track_ids: list[int] | tuple[int, ...],
+        *,
+        parent_id: int = DEFAULT_PLAYLIST_FOLDER_ID,
+        storage_id: int | None = None,
+    ) -> int:
+        """Experimental: create MTP playlist; returns new playlist object id."""
+        clean = (name or "").strip()
+        if not clean:
+            raise ValueError("Playlist name must be non-empty")
+        ids = [int(x) for x in track_ids if int(x) > 0]
+        storage = int(self.storage_id if storage_id is None else storage_id)
+        parent = int(parent_id or DEFAULT_PLAYLIST_FOLDER_ID)
+        logger.info(
+            "create_playlist name=%r tracks=%d parent=%s storage=%s",
+            clean,
+            len(ids),
+            parent,
+            storage,
+        )
+        try:
+            new_id = self._mtp.create_new_playlist(
+                clean,
+                track_ids=ids,
+                parent_id=parent,
+                storage_id=storage,
+            )
+        except pymtp.NotConnected as exc:
+            raise TransportError(
+                "PyMTP create playlist failed: device not connected.",
+                fatal=True,
+            ) from exc
+        except pymtp.CommandFailed as exc:
+            try:
+                self._mtp.debug_stack()
+            except Exception:
+                pass
+            stack_text = _collect_errorstack(self._mtp)
+            detail = str(exc).strip() or "CommandFailed"
+            logger.error(
+                "PyMTP create_playlist failed name=%r detail=%s\n%s",
+                clean,
+                detail,
+                stack_text or "(no libmtp errorstack text)",
+            )
+            raise TransportError(
+                f"PyMTP create playlist failed ({detail}) for {clean!r}.",
+                fatal=True,
+            ) from exc
+        except Exception as exc:
+            raise TransportError(
+                f"PyMTP create playlist failed: {exc}",
+                fatal=True,
+            ) from exc
+        return int(new_id)
+
+    def update_playlist(
+        self,
+        playlist_id: int,
+        name: str,
+        track_ids: list[int] | tuple[int, ...],
+        *,
+        parent_id: int = DEFAULT_PLAYLIST_FOLDER_ID,
+        storage_id: int | None = None,
+    ) -> int:
+        """Experimental: replace track list on an existing MTP playlist."""
+        oid = int(playlist_id)
+        if oid <= 0:
+            raise ValueError(f"Invalid playlist id: {playlist_id}")
+        clean = (name or "").strip()
+        if not clean:
+            raise ValueError("Playlist name must be non-empty")
+        ids = [int(x) for x in track_ids if int(x) > 0]
+        storage = int(self.storage_id if storage_id is None else storage_id)
+        parent = int(parent_id or DEFAULT_PLAYLIST_FOLDER_ID)
+        logger.info(
+            "update_playlist id=%s name=%r tracks=%d",
+            oid,
+            clean,
+            len(ids),
+        )
+        try:
+            self._mtp.update_playlist(
+                oid,
+                clean,
+                track_ids=ids,
+                parent_id=parent,
+                storage_id=storage,
+            )
+        except pymtp.NotConnected as exc:
+            raise TransportError(
+                "PyMTP update playlist failed: device not connected.",
+                fatal=True,
+            ) from exc
+        except pymtp.CommandFailed as exc:
+            try:
+                self._mtp.debug_stack()
+            except Exception:
+                pass
+            stack_text = _collect_errorstack(self._mtp)
+            detail = str(exc).strip() or "CommandFailed"
+            logger.error(
+                "PyMTP update_playlist failed id=%s detail=%s\n%s",
+                oid,
+                detail,
+                stack_text or "(no libmtp errorstack text)",
+            )
+            raise TransportError(
+                f"PyMTP update playlist failed ({detail}) for id={oid}.",
+                fatal=True,
+            ) from exc
+        except Exception as exc:
+            raise TransportError(
+                f"PyMTP update playlist failed: {exc}",
+                fatal=True,
+            ) from exc
+        return oid
 
     def get_file_metadata(self, object_id: int) -> FileEntry:
         """Experimental: one-object metadata via patched get_file_metadata."""

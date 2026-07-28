@@ -67,10 +67,14 @@ assert ZEN_VISION_M_FOLDER_IDS[DEFAULT_MUSIC_FOLDER_ID] == "Music"
 # Fallback Send Video destinations (legacy map only).
 DEFAULT_VIDEO_FOLDER_ID = 120
 DEFAULT_TV_FOLDER_ID = 124
+# Legacy My Playlists parent (firmware may differ — prefer folder-name discovery).
+DEFAULT_PLAYLIST_FOLDER_ID = 104
 assert DEFAULT_VIDEO_FOLDER_ID in ZEN_VISION_M_FOLDER_IDS
 assert ZEN_VISION_M_FOLDER_IDS[DEFAULT_VIDEO_FOLDER_ID] == "Video"
 assert DEFAULT_TV_FOLDER_ID in ZEN_VISION_M_FOLDER_IDS
 assert ZEN_VISION_M_FOLDER_IDS[DEFAULT_TV_FOLDER_ID] == "TV"
+assert DEFAULT_PLAYLIST_FOLDER_ID in ZEN_VISION_M_FOLDER_IDS
+assert ZEN_VISION_M_FOLDER_IDS[DEFAULT_PLAYLIST_FOLDER_ID] == "My Playlists"
 
 # Storage Media on the ZEN Vision:M (mtp-detect: StorageID 0x00010001).
 # storage_id 0 makes get_suggested_storage_id fail after the bulk transfer.

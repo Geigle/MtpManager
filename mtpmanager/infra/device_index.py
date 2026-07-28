@@ -17,7 +17,7 @@ import hashlib
 import logging
 import re
 import sqlite3
-from collections.abc import Iterable, Sequence
+from collections.abc import Collection, Iterable, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -654,6 +654,69 @@ def guid_stems_on_device(
         return {str(r["guid"]) for r in rows if is_track_guid(str(r["guid"]))}
     finally:
         conn.close()
+
+
+def item_ids_for_guids(
+    serial: str,
+    guids: Collection[str] | Iterable[str],
+    *,
+    path: Path | None = None,
+) -> dict[str, int]:
+    """Map host track GUIDs → real MTP object ids on *serial*.
+
+    Only returns positive ``item_id`` values (synthetic/negative send stubs are
+    omitted — those cannot be used as playlist members). When multiple rows
+    exist for one GUID, prefer ``source='list'`` over ``send``, then the
+    largest item_id.
+    """
+    clean = [g for g in guids if is_track_guid(g)]
+    if not clean:
+        return {}
+    key = device_serial_key(serial=serial)
+    conn, _ = _open(path)
+    try:
+        # Fetch all candidate rows for this serial with real handles + guids.
+        rows = conn.execute(
+            "SELECT guid, item_id, source FROM device_files "
+            "WHERE serial = ? AND item_id > 0 "
+            "AND guid IS NOT NULL AND guid != ''",
+            (key,),
+        ).fetchall()
+        want = set(clean)
+        best: dict[str, tuple[int, int]] = {}  # guid → (rank, item_id)
+        for r in rows:
+            g = str(r["guid"] or "")
+            if g not in want or not is_track_guid(g):
+                continue
+            oid = int(r["item_id"] or 0)
+            if oid <= 0:
+                continue
+            src = str(r["source"] or "")
+            # Higher rank wins: list > send > other; then larger item_id.
+            rank = 2 if src == "list" else (1 if src == "send" else 0)
+            prev = best.get(g)
+            if prev is None or (rank, oid) > prev:
+                best[g] = (rank, oid)
+        return {g: oid for g, (_rank, oid) in best.items()}
+    except sqlite3.Error as e:
+        logger.warning("item_ids_for_guids failed: %s", e)
+        return {}
+    finally:
+        conn.close()
+
+
+def item_id_for_guid(
+    serial: str,
+    guid: str,
+    *,
+    path: Path | None = None,
+) -> int | None:
+    """Return a real MTP object id for *guid*, or None."""
+    if not is_track_guid(guid):
+        return None
+    hit = item_ids_for_guids(serial, [guid], path=path)
+    oid = hit.get(guid)
+    return int(oid) if oid and int(oid) > 0 else None
 
 
 def list_cached_files(

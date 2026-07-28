@@ -13,6 +13,12 @@ from mtpmanager.app import device_ops
 from mtpmanager.app import retail_ops
 from mtpmanager.app.artist_folders import ensure_album_folder, ensure_artist_folder
 from mtpmanager.app.cancellation import JobCancelled
+from mtpmanager.app.playlist_device import (
+    ordered_guids_from_tracks,
+    playlists_parent_id,
+    push_playlist_to_device,
+    resolve_track_object_ids,
+)
 from mtpmanager.app.scan_library import scan_library, scan_library_roots
 from mtpmanager.app.transfer import transfer_track, transfer_tracks
 from mtpmanager.app.transfer_queue import BatchTransferQueue
@@ -94,6 +100,17 @@ from mtpmanager.infra.library_index import (
     save_library_index,
     untrack_library_roots,
 )
+from mtpmanager.infra.playlists import (
+    append_tracks_to_playlist,
+    create_playlist,
+    delete_playlist,
+    get_playlist,
+    list_playlists,
+    remove_paths_from_playlist,
+    rename_playlist,
+    resolve_playlist_tracks,
+)
+from mtpmanager.ui.dialogs import ask_add_to_playlist
 from mtpmanager.infra.logging_setup import start_transfer_log, stop_transfer_log
 from mtpmanager.infra.mutagen_tags import read_metadata
 from mtpmanager.infra.pymtp_device import PymtpDevice
@@ -263,6 +280,13 @@ class AppController:
         self._playback_queue: list[Track] = []
         self._playback_index: int = -1
         self._playback_poll_after_id: str | None = None
+        # Host playlists (M3U in library index).
+        self._playlist_ids_by_name: dict[str, int] = {}
+        self._playlist_track_by_iid: dict[str, Track] = {}
+        self._current_playlist_id: int | None = None
+        # After track sync of kind=playlist: publish MTP playlist object.
+        # {name, guids, host_id} or None.
+        self._pending_device_playlist: dict | None = None
         self._wire()
         # Defer restore so mainloop can start before any index I/O.
         self.win.root.after(0, self._start_index_restore)
@@ -274,6 +298,7 @@ class AppController:
         w.root.protocol("WM_DELETE_WINDOW", self.on_app_close)
         w.set_library_menu_commands(
             on_manage_library=self.on_manage_library,
+            on_manage_playlists=self.on_manage_playlists,
         )
         w.set_transfer_menu_commands(
             on_sync_entire=self.action_entire_library,
@@ -336,10 +361,29 @@ class AppController:
             on_play_track=self.action_play_selected_tracks,
             on_play_artist_group=self.action_play_artist_group,
             on_play_album_group=self.action_play_album_group,
+            on_add_to_playlist=self.action_add_selected_to_playlist,
+            on_add_artist_to_playlist=self.action_add_artist_to_playlist,
+            on_add_album_to_playlist=self.action_add_album_to_playlist,
             on_exclude_file=self.action_exclude_file,
             on_exclude_folder=self.action_exclude_folder,
             on_exclude_group_folder=self.action_exclude_group_folder,
         )
+        w.set_playlist_tab_commands(
+            on_combo_selected=self.on_playlist_combo_selected,
+            on_new=self.on_playlist_new,
+            on_delete=self.on_playlist_delete,
+            on_rename=self.on_playlist_rename,
+            on_sync=self.action_sync_current_playlist,
+            on_remove_tracks=self.action_playlist_remove_selected,
+            on_play_track=self.action_playlist_play_selected,
+        )
+        try:
+            w.playlist_tree.bind("<Button-3>", w.popup_playlist_context)
+            w.playlist_tree.bind("<Button-2>", w.popup_playlist_context)
+        except Exception:
+            pass
+        # Load playlist dropdown after index is available (also on restore).
+        self.win.root.after(50, self._refresh_playlist_tab)
         w.set_prepare_context_menu(self._prepare_context_menu)
         w.set_prepare_device_context_menu(self._prepare_device_context_menu)
         w.set_device_context_commands(
@@ -1094,12 +1138,27 @@ class AppController:
         # Play This Track / Play These Tracks (audio only).
         # Index 6: after sync block + separator (label changes; do not key by label).
         try:
-            from mtpmanager.ui.window import CTX_PLAY_TRACK, CTX_PLAY_TRACKS
+            from mtpmanager.ui.window import (
+                CTX_ADD_TO_PLAYLIST,
+                CTX_ADD_TRACKS_TO_PLAYLIST,
+                CTX_PLAY_TRACK,
+                CTX_PLAY_TRACKS,
+            )
 
             play_label = CTX_PLAY_TRACKS if n_audio > 1 else CTX_PLAY_TRACK
             self.win.menu_track_ctx.entryconfig(
                 6,
                 label=play_label,
+                state=NORMAL if n_audio >= 1 else DISABLED,
+            )
+            add_label = (
+                CTX_ADD_TRACKS_TO_PLAYLIST
+                if n_audio > 1
+                else CTX_ADD_TO_PLAYLIST
+            )
+            self.win.menu_track_ctx.entryconfig(
+                7,
+                label=add_label,
                 state=NORMAL if n_audio >= 1 else DISABLED,
             )
         except Exception:
@@ -1117,6 +1176,9 @@ class AppController:
                 self.win.menu_artist_ctx.entryconfig(
                     2, label=f"Play All from {artist}"
                 )
+                self.win.menu_artist_ctx.entryconfig(
+                    3, label=f"Add All from {artist} to Playlist…"
+                )
             except Exception:
                 pass
         elif "group_directory" in tagset:
@@ -1131,6 +1193,9 @@ class AppController:
                 self.win.menu_album_ctx.entryconfig(
                     2, label=f"Play folder {folder}"
                 )
+                self.win.menu_album_ctx.entryconfig(
+                    3, label=f"Add folder {folder} to Playlist…"
+                )
             except Exception:
                 pass
         elif "group_album" in tagset:
@@ -1141,6 +1206,9 @@ class AppController:
             try:
                 self.win.menu_album_ctx.entryconfig(
                     2, label=f"Play Album {album}"
+                )
+                self.win.menu_album_ctx.entryconfig(
+                    3, label=f"Add Album {album} to Playlist…"
                 )
             except Exception:
                 pass
@@ -1553,6 +1621,444 @@ class AppController:
             path = self._playback_queue[self._playback_index].path
         iid = self._iid_by_path.get(path) if path else None
         self.win.set_playing_row(iid if self._audio_player.is_active else None)
+
+    # ------------------------------------------------------------------
+    # Host playlists (M3U in library index)
+    # ------------------------------------------------------------------
+
+    def on_manage_playlists(self) -> None:
+        """Library → Manage Playlists… focuses the Playlists tab."""
+        self.win.show_playlists_tab()
+        self._refresh_playlist_tab()
+
+    def _refresh_playlist_tab(self, *, keep_selection: bool = True) -> None:
+        """Reload playlist dropdown and current tree from the index DB."""
+        prev_name = ""
+        if keep_selection:
+            prev_name = (self.win.var_playlist_choice.get() or "").strip()
+        infos = list_playlists()
+        self._playlist_ids_by_name = {p.name: p.id for p in infos}
+        names = [p.name for p in infos]
+        selected = prev_name if prev_name in names else (names[0] if names else "")
+        self.win.set_playlist_combo_values(names, selected=selected)
+        if selected:
+            self._load_playlist_by_name(selected)
+        else:
+            self._current_playlist_id = None
+            self._playlist_track_by_iid.clear()
+            self.win.clear_playlist_tree()
+            try:
+                self.win.lbl_playlist_status.configure(text="No playlists")
+            except Exception:
+                pass
+
+    def on_playlist_combo_selected(self) -> None:
+        name = (self.win.var_playlist_choice.get() or "").strip()
+        if name:
+            self._load_playlist_by_name(name)
+
+    def _load_playlist_by_name(self, name: str) -> None:
+        pid = self._playlist_ids_by_name.get(name)
+        if pid is None:
+            return
+        pl = get_playlist(pid)
+        if pl is None:
+            self._refresh_playlist_tab(keep_selection=False)
+            return
+        self._current_playlist_id = pl.id
+        tracks = resolve_playlist_tracks(pl)
+        self._populate_playlist_tree(tracks)
+        n = len(tracks)
+        try:
+            self.win.lbl_playlist_status.configure(
+                text=f"{n} track{'s' if n != 1 else ''}"
+            )
+        except Exception:
+            pass
+
+    def _populate_playlist_tree(self, tracks: list[Track]) -> None:
+        self.win.clear_playlist_tree()
+        self._playlist_track_by_iid.clear()
+        tree = self.win.playlist_tree
+        for i, track in enumerate(tracks, start=1):
+            num, title, artist, album, year = iter_track_cells(track)
+            iid = f"pl:{i}:{track.path}"
+            tags = ["track"]
+            if not track.path or not os.path.isfile(track.path):
+                tags.append("dead")
+            tree.insert(
+                "",
+                "end",
+                iid=iid,
+                text=str(i),
+                values=(title, artist, album, year),
+                tags=tuple(tags),
+            )
+            self._playlist_track_by_iid[iid] = track
+
+    def on_playlist_new(self) -> None:
+        from mtpmanager.ui.dialogs import ask_text
+
+        name = ask_text(
+            self.win.root,
+            title="New Playlist",
+            prompt="Playlist name:",
+        )
+        if not name:
+            return
+        try:
+            pl = create_playlist(name)
+        except ValueError as e:
+            messagebox.showerror("Playlist", str(e))
+            return
+        except Exception as e:
+            messagebox.showerror("Playlist", f"Could not create playlist:\n{e}")
+            return
+        self._refresh_playlist_tab(keep_selection=False)
+        self.win.var_playlist_choice.set(pl.name)
+        self._load_playlist_by_name(pl.name)
+
+    def on_playlist_delete(self) -> None:
+        name = (self.win.var_playlist_choice.get() or "").strip()
+        pid = self._playlist_ids_by_name.get(name)
+        if pid is None:
+            return
+        if not messagebox.askyesno(
+            "Delete Playlist",
+            f"Delete playlist “{name}”?\n\nThis cannot be undone.",
+        ):
+            return
+        delete_playlist(pid)
+        self._current_playlist_id = None
+        self._refresh_playlist_tab(keep_selection=False)
+
+    def on_playlist_rename(self) -> None:
+        from mtpmanager.ui.dialogs import ask_text
+
+        name = (self.win.var_playlist_choice.get() or "").strip()
+        pid = self._playlist_ids_by_name.get(name)
+        if pid is None:
+            return
+        new_name = ask_text(
+            self.win.root,
+            title="Rename Playlist",
+            prompt="New name:",
+            initialvalue=name,
+        )
+        if not new_name or new_name == name:
+            return
+        try:
+            pl = rename_playlist(pid, new_name)
+        except ValueError as e:
+            messagebox.showerror("Playlist", str(e))
+            return
+        self._refresh_playlist_tab(keep_selection=False)
+        self.win.var_playlist_choice.set(pl.name)
+        self._load_playlist_by_name(pl.name)
+
+    def action_playlist_remove_selected(self) -> None:
+        pid = self._current_playlist_id
+        if pid is None:
+            return
+        try:
+            sel = list(self.win.playlist_tree.selection())
+        except Exception:
+            sel = []
+        paths = []
+        for iid in sel:
+            t = self._playlist_track_by_iid.get(iid)
+            if t and t.path:
+                paths.append(t.path)
+        if not paths:
+            messagebox.showinfo("Playlist", "Select track(s) to remove.")
+            return
+        try:
+            remove_paths_from_playlist(pid, paths)
+        except Exception as e:
+            messagebox.showerror("Playlist", f"Could not remove tracks:\n{e}")
+            return
+        name = (self.win.var_playlist_choice.get() or "").strip()
+        if name:
+            self._load_playlist_by_name(name)
+
+    def action_playlist_play_selected(self) -> None:
+        try:
+            sel = list(self.win.playlist_tree.selection())
+        except Exception:
+            sel = []
+        tracks: list[Track] = []
+        for iid in sel:
+            t = self._playlist_track_by_iid.get(iid)
+            if t is not None:
+                tracks.append(t)
+        if not tracks and self._current_playlist_id is not None:
+            # No selection: play whole playlist.
+            pl = get_playlist(self._current_playlist_id)
+            if pl is not None:
+                tracks = resolve_playlist_tracks(pl)
+        self._start_playback_queue(self._audio_tracks_only(tracks))
+
+    def action_sync_current_playlist(self) -> None:
+        """Sync playlist tracks, then recreate the playlist on-device (PyMTP)."""
+        pid = self._current_playlist_id
+        name = (self.win.var_playlist_choice.get() or "").strip() or "playlist"
+        if pid is None:
+            messagebox.showinfo("Playlist", "Select a playlist first.")
+            return
+        if not self._require_sync_ready():
+            return
+        pl = get_playlist(pid)
+        if pl is None:
+            messagebox.showwarning("Playlist", "Playlist not found.")
+            self._refresh_playlist_tab(keep_selection=False)
+            return
+        tracks = self._audio_tracks_only(resolve_playlist_tracks(pl))
+        existing = [t for t in tracks if t.path and os.path.isfile(t.path)]
+        missing = len(tracks) - len(existing)
+        if missing:
+            logger.info(
+                "Playlist sync: skipping %d missing file(s) in %r",
+                missing,
+                name,
+            )
+        if not existing:
+            messagebox.showinfo(
+                "Playlist",
+                "No playable audio files found in this playlist.",
+            )
+            return
+        guids = ordered_guids_from_tracks(existing)
+        if not guids:
+            messagebox.showwarning(
+                "Playlist",
+                "Playlist tracks have no host GUIDs yet.\n\n"
+                "Rescan the library so tracks are indexed, then try again.",
+            )
+            return
+        experimental = self.win.active_mode() == "experimental"
+        if not experimental:
+            messagebox.showinfo(
+                "Playlist",
+                "Tracks will transfer using Stable Mode.\n\n"
+                "On-device playlist objects require Experimental (PyMTP).\n"
+                "Uncheck Config → Stable Mode, Connect, then Sync playlist "
+                "again to create/update the playlist on the player.",
+            )
+        self._pending_device_playlist = {
+            "name": name,
+            "guids": list(guids),
+            "host_id": pid,
+            "publish": experimental,
+        }
+        self._transfer_many(
+            existing,
+            kind="playlist",
+            label=f"Playlist {name}",
+        )
+
+    def _clear_pending_device_playlist(self) -> None:
+        self._pending_device_playlist = None
+
+    def _publish_pending_device_playlist(self) -> None:
+        """After a successful playlist track sync, create/update MTP playlist."""
+        pending = self._pending_device_playlist
+        self._pending_device_playlist = None
+        if not pending or not pending.get("publish"):
+            return
+        if self.win.active_mode() != "experimental":
+            return
+        if not self.device.is_connected():
+            messagebox.showwarning(
+                "Playlist",
+                "Tracks transferred, but the device is not connected for "
+                "on-device playlist creation.\n\n"
+                "Connect in Experimental mode and Sync playlist again.",
+            )
+            return
+        name = str(pending.get("name") or "playlist")
+        guids = list(pending.get("guids") or [])
+        serial = self._device_serial or device_serial_key()
+
+        def work() -> object:
+            # Prefer real object ids; refresh listing if any GUID is unresolved.
+            _ids, missing = resolve_track_object_ids(serial, guids)
+            if missing:
+                logger.info(
+                    "Playlist publish: %d GUID(s) lack real item_id — "
+                    "refreshing device file list",
+                    len(missing),
+                )
+                try:
+                    self.win.root.after(
+                        0,
+                        lambda: self.win.set_progress_status(
+                            "Refreshing device index for playlist…"
+                        ),
+                    )
+                except Exception:
+                    pass
+                try:
+                    files = self.device.list_files()
+                    replace_device_listing(serial, files, source="list")
+                except Exception:
+                    logger.warning(
+                        "Playlist publish: list_files refresh failed",
+                        exc_info=True,
+                    )
+            parent = playlists_parent_id(self._folder_layout)
+            return push_playlist_to_device(
+                device=self.device,
+                serial=serial,
+                name=name,
+                guids_in_order=guids,
+                parent_id=parent,
+            )
+
+        def on_done(result) -> None:
+            try:
+                self.win.set_progress_status("")
+            except Exception:
+                pass
+            if result is None:
+                return
+            verb = "Created" if result.created else "Updated"
+            extra = ""
+            if result.missing_guid:
+                extra = (
+                    f"\n\n({result.missing_guid} track(s) omitted — "
+                    "no on-device object id yet.)"
+                )
+            messagebox.showinfo(
+                "Playlist on device",
+                f"{verb} on-device playlist “{result.name}” "
+                f"with {result.resolved} track(s).{extra}",
+            )
+            logger.info(
+                "Device playlist publish done id=%s created=%s tracks=%d",
+                result.playlist_id,
+                result.created,
+                result.resolved,
+            )
+
+        def on_error(exc: BaseException) -> None:
+            try:
+                self.win.set_progress_status("")
+            except Exception:
+                pass
+            logger.exception("Device playlist publish failed")
+            messagebox.showerror(
+                "Playlist on device",
+                "Tracks may have transferred, but creating/updating the "
+                f"on-device playlist failed:\n\n{exc}",
+            )
+
+        try:
+            self.win.set_progress_status(
+                f"Creating on-device playlist “{name}”…"
+            )
+        except Exception:
+            pass
+        self._bg.submit(
+            work,
+            on_done=on_done,
+            on_error=on_error,
+            name="device-playlist-publish",
+        )
+
+    def action_add_selected_to_playlist(self) -> None:
+        tracks = self._audio_tracks_only(
+            self._tracks_from_selected_iids_tree_order()
+        )
+        self._open_add_to_playlist(tracks)
+
+    def action_add_artist_to_playlist(self) -> None:
+        seed = self._context_group_seed
+        iid = self.win.selected_tree_iid() or ""
+        if seed is None and iid:
+            seed = self._group_seed_by_iid.get(iid)
+        tracks = self._audio_tracks_only(
+            self._tracks_from_iids_tree_order([iid] if iid else [])
+        )
+        if not tracks and seed is not None:
+            tracks = self._audio_tracks_only(
+                self.library.filter_by_artist(seed)
+            )
+        self._open_add_to_playlist(tracks)
+
+    def action_add_album_to_playlist(self) -> None:
+        seed = self._context_group_seed
+        iid = self.win.selected_tree_iid() or ""
+        if seed is None and iid:
+            seed = self._group_seed_by_iid.get(iid)
+        tracks = self._audio_tracks_only(
+            self._tracks_from_iids_tree_order([iid] if iid else [])
+        )
+        if not tracks and seed is not None:
+            tags = set()
+            try:
+                tree = self.win.active_library_tree()
+                tags = set(tree.item(iid, "tags") or ())
+            except Exception:
+                pass
+            if "group_directory" in tags:
+                tracks = self._audio_tracks_only(
+                    self.library.filter_by_directory(seed)
+                )
+            else:
+                tracks = self._audio_tracks_only(
+                    self.library.filter_by_album(seed)
+                )
+        self._open_add_to_playlist(tracks)
+
+    def _open_add_to_playlist(self, tracks: list[Track]) -> None:
+        if not tracks:
+            messagebox.showinfo(
+                "Playlist",
+                "No playable audio files in the selection.",
+            )
+            return
+        result = ask_add_to_playlist(
+            self.win.root,
+            candidate_tracks=tracks,
+            list_playlists=list_playlists,
+            create_playlist=create_playlist,
+            delete_playlist=delete_playlist,
+        )
+        if result is None:
+            return
+        if result.playlists_changed:
+            self._refresh_playlist_tab()
+        if result.playlist_id < 0:
+            return
+        try:
+            before = get_playlist(result.playlist_id)
+            before_n = len(before.entries()) if before else 0
+            pl = append_tracks_to_playlist(
+                result.playlist_id,
+                tracks,
+                skip_existing=result.skip_existing,
+            )
+            added_n = max(0, len(pl.entries()) - before_n)
+        except Exception as e:
+            messagebox.showerror("Playlist", f"Could not add tracks:\n{e}")
+            return
+        messagebox.showinfo(
+            "Playlist",
+            f"Added {added_n} track(s) to “{result.playlist_name}”"
+            + (
+                f" ({len(tracks) - added_n} already present)."
+                if added_n < len(tracks)
+                else "."
+            ),
+        )
+        # Refresh tab if that playlist is open (or always keep dropdown current).
+        self._refresh_playlist_tab()
+        if result.playlist_name:
+            try:
+                self.win.var_playlist_choice.set(result.playlist_name)
+                self._load_playlist_by_name(result.playlist_name)
+            except Exception:
+                pass
 
     def _sync_from_seed(self, seed: Track | None, *, kind: str) -> None:
         """Run filter_by_artist / filter_by_album / directory from a seed track."""
@@ -4707,8 +5213,14 @@ class AppController:
             self._finish_sync_job_success()
             self._end_transfer_job()
             logger.info("Background batch finished: succeeded=%s", succeeded)
+            # Phase 2 for playlist sync: MTP playlist object (Experimental).
+            if kind == "playlist" or (
+                self._pending_device_playlist is not None
+            ):
+                self._publish_pending_device_playlist()
 
         def on_error(exc: BaseException) -> None:
+            self._clear_pending_device_playlist()
             if isinstance(exc, JobCancelled):
                 self._finish_sync_job_cancelled(exc)
                 self._end_transfer_job()
