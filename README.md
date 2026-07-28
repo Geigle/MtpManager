@@ -3,7 +3,7 @@
 **MtpManager** is a small Tk desktop app for loading media onto picky MTP players—especially the **Creative ZEN Vision:M**—without fighting broken “media manager” stacks. It is still oriented around **durable send contracts** and dual transfer modes, not a full streaming library suite.
 
 ## Background
-I want to use an old Zen Vision:M, but it's MTP-only, which is a lovecraftian horror. Windows Media Player doesn't convert from FLAC, MTP support for old players is completely broken in all common apps, and older versions of WMP fail a DRM check for music I legally purchased. Gnomad2 almost did the trick, but it crashes too much, and I didn't spend my time fixing it because by the time that thought occurred to me, I was too deep into writting this Python tool.
+I want to use an old Zen Vision:M, but it's MTP-only, which is a lovecraftian horror. Windows Media Player doesn't convert from FLAC, MTP support for old players is completely broken in all common apps, and older versions of WMP fail a DRM check for music I legally purchased. Gnomad2 almost did the trick, but it crashes too much, and I didn't spend my time fixing it because by the time that thought occurred to me, I was too deep into writing this Python tool.
 
 ## What it does
 
@@ -17,7 +17,7 @@ I want to use an old Zen Vision:M, but it's MTP-only, which is a lovecraftian ho
 | **Playback** | Local listen via **ffplay** (library tracks, albums/artists, playlists, podcast episodes) with bottom-bar controls |
 | **Selection** | Left panel shows scrollable context for the current library / device / podcast selection |
 
-It is **not** a multi-device auto-discovery suite, a general-purpose media organizer, or a reimplementation of libmtp. Prefer the docs under `docs/` when changing send behavior.
+It is **not** a multi-device auto-discovery suite, a general-purpose media organizer, or a reimplementation of libmtp.
 
 ## Running
 
