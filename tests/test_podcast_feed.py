@@ -39,20 +39,51 @@ _SAMPLE_RSS = """<?xml version="1.0" encoding="UTF-8"?>
 </rss>
 """
 
+_DUAL_ENCLOSURE_RSS = """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Dual Show</title>
+    <item>
+      <title>Has both</title>
+      <guid>both-1</guid>
+      <enclosure url="https://cdn.example.com/ep.mp3" length="1" type="audio/mpeg"/>
+      <enclosure url="https://cdn.example.com/ep.mp4" length="99" type="video/mp4"/>
+    </item>
+  </channel>
+</rss>
+"""
+
 
 class PodcastFeedParseTests(unittest.TestCase):
-    def test_parse_rss_sorted_audio_only(self) -> None:
+    def test_parse_rss_includes_video(self) -> None:
         ch = parse_feed_xml(_SAMPLE_RSS)
         self.assertEqual(ch.title, "Test Show")
         self.assertEqual(ch.author, "Host Name")
         self.assertEqual(ch.image_url, "https://example.com/art.jpg")
-        self.assertEqual(len(ch.episodes), 2)
-        # Newest first
-        self.assertEqual(ch.episodes[0].feed_guid, "ep-2")
-        self.assertEqual(ch.episodes[1].feed_guid, "ep-1")
-        self.assertAlmostEqual(ch.episodes[0].duration_sec, 3723.0)
-        self.assertAlmostEqual(ch.episodes[1].duration_sec, 300.0)
-        self.assertTrue(ch.episodes[0].pub_date.startswith("2025-06-02"))
+        self.assertEqual(len(ch.episodes), 3)
+        # Newest first among dated items; video-only has no date so last-ish
+        by_guid = {e.feed_guid: e for e in ch.episodes}
+        self.assertIn("ep-2", by_guid)
+        self.assertIn("ep-1", by_guid)
+        self.assertIn("vid-1", by_guid)
+        self.assertFalse(by_guid["ep-2"].is_video)
+        self.assertTrue(by_guid["vid-1"].is_video)
+        self.assertEqual(
+            by_guid["vid-1"].enclosure_url, "https://cdn.example.com/v.mp4"
+        )
+        self.assertAlmostEqual(by_guid["ep-2"].duration_sec, 3723.0)
+        self.assertAlmostEqual(by_guid["ep-1"].duration_sec, 300.0)
+        self.assertTrue(by_guid["ep-2"].pub_date.startswith("2025-06-02"))
+
+    def test_dual_enclosure_prefers_audio_marks_video(self) -> None:
+        ch = parse_feed_xml(_DUAL_ENCLOSURE_RSS)
+        self.assertEqual(len(ch.episodes), 1)
+        ep = ch.episodes[0]
+        self.assertTrue(ep.is_video)
+        self.assertEqual(ep.enclosure_url, "https://cdn.example.com/ep.mp3")
+        self.assertEqual(ep.enclosure_type, "audio/mpeg")
+        self.assertEqual(ep.video_enclosure_url, "https://cdn.example.com/ep.mp4")
+        self.assertEqual(ep.video_enclosure_type, "video/mp4")
 
     def test_rejects_garbage(self) -> None:
         with self.assertRaises(ValueError):

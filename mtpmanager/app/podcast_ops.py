@@ -3,7 +3,6 @@
 # TODO(follow-up): OPML import/export
 # TODO(follow-up): auto-refresh on a timer
 # TODO(follow-up): Device → Podcasts inventory browser
-# TODO(follow-up): video podcasts
 # TODO(follow-up): per-show auto-download rules beyond “latest”
 """
 
@@ -13,9 +12,11 @@ import logging
 import os
 import urllib.request
 from collections.abc import Collection, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
 
+from mtpmanager.domain.library import is_video_file
 from mtpmanager.domain.models import Track, TrackMetadata
 from mtpmanager.domain.track_id import is_track_guid
 from mtpmanager.infra.podcast_feed import (
@@ -38,10 +39,31 @@ from mtpmanager.infra.podcast_index import (
     set_episode_local_path,
     upsert_episodes,
 )
+
 logger = logging.getLogger(__name__)
 
 INITIAL_EPISODE_LIMIT = 5
 MORE_EPISODE_STEP = 10
+
+
+@dataclass
+class PodcastVideoJob:
+    """Downloaded video enclosure ready to encode/send under ZENcast."""
+
+    episode: PodcastEpisode
+    podcast: Podcast
+    local_path: str
+
+
+@dataclass
+class PodcastSyncPrep:
+    """Result of preparing episodes for sync or playback."""
+
+    audio_tracks: list[Track] = field(default_factory=list)
+    video_jobs: list[PodcastVideoJob] = field(default_factory=list)
+
+    def is_empty(self) -> bool:
+        return not self.audio_tracks and not self.video_jobs
 
 
 def subscribe_feed(
@@ -126,24 +148,115 @@ def refresh_podcast(
     )
 
 
+def _enclosure_is_video(url: str, mime: str) -> bool:
+    m = (mime or "").lower()
+    if m.startswith("video/"):
+        return True
+    if m.startswith("audio/"):
+        return False
+    path = (urlparse(url).path or "").lower()
+    if path.endswith(
+        (".m4v", ".mov", ".webm", ".avi", ".mkv", ".wmv", ".mpg", ".mpeg", ".mp4")
+    ):
+        return not path.endswith((".m4a", ".mp3"))
+    return False
+
+
+def _guess_ext(url: str, mime: str) -> str:
+    m = (mime or "").lower()
+    if m.startswith("video/") or ("mp4" in m and "audio" not in m):
+        if "webm" in m:
+            return ".webm"
+        if "quicktime" in m or "mov" in m:
+            return ".mov"
+        if "avi" in m or "msvideo" in m:
+            return ".avi"
+        if "m4v" in m:
+            return ".m4v"
+        return ".mp4"
+    if "mpeg" in m or "mp3" in m:
+        return ".mp3"
+    if "m4a" in m or "aac" in m:
+        return ".m4a"
+    if "ogg" in m or "opus" in m:
+        return ".ogg"
+    path = urlparse(url).path.lower()
+    for ext in (
+        ".mp3",
+        ".m4a",
+        ".aac",
+        ".ogg",
+        ".opus",
+        ".mp4",
+        ".m4v",
+        ".mov",
+        ".webm",
+        ".avi",
+        ".mkv",
+        ".wmv",
+    ):
+        if path.endswith(ext):
+            return ext
+    return ".mp3"
+
+
 def download_episode(
     episode: PodcastEpisode,
     *,
     path: Path | None = None,
     data_dir: Path | None = None,
+    prefer_video: bool = False,
 ) -> PodcastEpisode:
-    """Ensure enclosure is on disk; update local_path. Returns refreshed episode."""
+    """Ensure enclosure is on disk; update local_path. Returns refreshed episode.
+
+    When *prefer_video* and a video enclosure URL exists, downloads that
+    instead of the primary (often audio) enclosure.
+    """
+    if prefer_video and (episode.video_enclosure_url or "").strip():
+        url = episode.video_enclosure_url.strip()
+        mime = episode.video_enclosure_type or ""
+    else:
+        url = (episode.enclosure_url or "").strip()
+        mime = episode.enclosure_type or ""
+        # If primary is already video, fine.
+        if prefer_video and not _enclosure_is_video(url, mime):
+            # No separate video URL; fall through to primary.
+            pass
+
     if episode.local_path and os.path.isfile(episode.local_path):
-        return episode
-    url = (episode.enclosure_url or "").strip()
+        # Reuse cache when it matches the requested media kind.
+        existing_is_video = is_video_file(episode.local_path)
+        want_video = prefer_video and (
+            bool(episode.video_enclosure_url)
+            or _enclosure_is_video(url, mime)
+            or bool(episode.is_video)
+        )
+        if want_video and existing_is_video:
+            return episode
+        if not want_video and not existing_is_video:
+            return episode
+
     if not url:
         raise ValueError("Episode has no enclosure URL")
     cache = episode_cache_dir(episode.podcast_id, data_dir=data_dir)
-    ext = _guess_ext(url, episode.enclosure_type)
+    ext = _guess_ext(url, mime)
     dest = cache / f"{episode.guid}{ext}"
+    # Separate video cache name when audio may already occupy {guid}.mp3.
+    if prefer_video and ext in (".mp3", ".m4a", ".aac", ".ogg", ".opus"):
+        dest = cache / f"{episode.guid}_video{ext}"
+    elif prefer_video:
+        dest = cache / f"{episode.guid}_video{ext}"
+
+    if dest.is_file() and dest.stat().st_size > 0:
+        set_episode_local_path(episode.id, str(dest), path=path)
+        refreshed = get_episode(episode.id, path=path)
+        if refreshed is not None:
+            return refreshed
+
     logger.info(
-        "Downloading podcast episode id=%s → %s",
+        "Downloading podcast episode id=%s prefer_video=%s → %s",
         episode.id,
+        prefer_video,
         dest,
     )
     req = urllib.request.Request(
@@ -158,6 +271,66 @@ def download_episode(
     refreshed = get_episode(episode.id, path=path)
     if refreshed is None:
         raise RuntimeError("episode missing after download")
+    return refreshed
+
+
+def ensure_episode_audio_file(
+    episode: PodcastEpisode,
+    *,
+    path: Path | None = None,
+    data_dir: Path | None = None,
+    target_format: str = "mp3",
+) -> PodcastEpisode:
+    """Download media and ensure a local audio file for play/sync.
+
+    Dual feeds: primary enclosure is already audio. Video-only: download
+    video then extract audio with ffmpeg into the episode cache.
+    """
+    fmt = (target_format or "mp3").lower().lstrip(".")
+    cache = episode_cache_dir(episode.podcast_id, data_dir=data_dir)
+    audio_dest = cache / f"{episode.guid}.{fmt}"
+
+    if audio_dest.is_file() and audio_dest.stat().st_size > 0:
+        if episode.local_path != str(audio_dest):
+            set_episode_local_path(episode.id, str(audio_dest), path=path)
+            refreshed = get_episode(episode.id, path=path)
+            if refreshed is not None:
+                return refreshed
+        return episode
+
+    ready = download_episode(
+        episode, path=path, data_dir=data_dir, prefer_video=False
+    )
+    local = ready.local_path or ""
+    if local and os.path.isfile(local) and not is_video_file(local):
+        return ready
+
+    # Video-only (or cached video): extract audio.
+    if not local or not os.path.isfile(local):
+        ready = download_episode(
+            episode, path=path, data_dir=data_dir, prefer_video=True
+        )
+        local = ready.local_path or ""
+    if not local or not os.path.isfile(local):
+        raise FileNotFoundError(f"No media to extract for episode {episode.id}")
+
+    if not is_video_file(local) and not _enclosure_is_video(
+        ready.enclosure_url, ready.enclosure_type
+    ):
+        return ready
+
+    from mtpmanager.infra.ffmpeg_transcode import FFmpegTranscoder
+
+    logger.info(
+        "Extracting audio from video podcast episode id=%s → %s",
+        episode.id,
+        audio_dest,
+    )
+    FFmpegTranscoder().extract_audio(local, str(audio_dest), target_format=fmt)
+    set_episode_local_path(episode.id, str(audio_dest), path=path)
+    refreshed = get_episode(episode.id, path=path)
+    if refreshed is None:
+        raise RuntimeError("episode missing after audio extract")
     return refreshed
 
 
@@ -205,28 +378,59 @@ def prepare_episodes_for_sync(
     *,
     path: Path | None = None,
     data_dir: Path | None = None,
-) -> list[Track]:
-    """Download missing enclosures and return Track list for transfer."""
-    out: list[Track] = []
+    allow_video: bool = False,
+    target_audio_format: str = "mp3",
+) -> PodcastSyncPrep:
+    """Download missing media; return audio tracks and optional video jobs.
+
+    When *allow_video* is False (default), always produce audio (extract from
+    video-only episodes). When True, video episodes become :class:`PodcastVideoJob`
+    entries for ZENcast video send (caller encodes XviD for ZEN Vision:M).
+    """
+    prep = PodcastSyncPrep()
     podcast_cache: dict[int, Podcast] = {}
     for ep in episodes:
         show = podcast_cache.get(ep.podcast_id)
         if show is None:
             show = get_podcast(ep.podcast_id, path=path)
             if show is None:
-                logger.warning("Podcast %s missing for episode %s", ep.podcast_id, ep.id)
+                logger.warning(
+                    "Podcast %s missing for episode %s", ep.podcast_id, ep.id
+                )
                 continue
             podcast_cache[ep.podcast_id] = show
         try:
-            ready = download_episode(ep, path=path, data_dir=data_dir)
-            out.append(episode_as_track(ready, show))
+            use_video = bool(allow_video) and bool(
+                ep.is_video
+                or ep.video_enclosure_url
+                or _enclosure_is_video(ep.enclosure_url, ep.enclosure_type)
+            )
+            if use_video:
+                ready = download_episode(
+                    ep, path=path, data_dir=data_dir, prefer_video=True
+                )
+                if not ready.local_path or not os.path.isfile(ready.local_path):
+                    raise FileNotFoundError("video download missing")
+                prep.video_jobs.append(
+                    PodcastVideoJob(
+                        episode=ready, podcast=show, local_path=ready.local_path
+                    )
+                )
+            else:
+                ready = ensure_episode_audio_file(
+                    ep,
+                    path=path,
+                    data_dir=data_dir,
+                    target_format=target_audio_format,
+                )
+                prep.audio_tracks.append(episode_as_track(ready, show))
         except Exception:
             logger.exception(
                 "Failed to prepare episode id=%s title=%r",
                 ep.id,
                 ep.title,
             )
-    return out
+    return prep
 
 
 def sanitize_show_folder_name(title: str) -> str:
@@ -272,16 +476,178 @@ def ensure_podcast_show_folder(
     return new_id
 
 
-def _guess_ext(url: str, mime: str) -> str:
-    m = (mime or "").lower()
-    if "mpeg" in m or "mp3" in m:
-        return ".mp3"
-    if "m4a" in m or "mp4" in m or "aac" in m:
-        return ".m4a"
-    if "ogg" in m or "opus" in m:
-        return ".ogg"
-    path = urlparse(url).path.lower()
-    for ext in (".mp3", ".m4a", ".aac", ".ogg", ".opus"):
-        if path.endswith(ext):
-            return ext
-    return ".mp3"
+@dataclass(frozen=True)
+class PodcastVideoSendResult:
+    """Result of sending a video podcast under ZENcast (title-style ObjectFileName)."""
+
+    object_id: int
+    parent_id: int
+    remote_basename: str
+    guid: str = ""  # host index only — never the wire ObjectFileName
+
+
+def podcast_video_object_basename(
+    episode_title: str,
+    *,
+    container_ext: str,
+) -> str:
+    """Sanitized episode title + extension for ObjectFileName (no GUID)."""
+    from mtpmanager.infra.remote_naming import MAX_REMOTE_BASENAME, sanitize_component
+
+    ext = container_ext if container_ext.startswith(".") else f".{container_ext}"
+    if ext == ".":
+        ext = ".avi"
+    body_max = max(8, MAX_REMOTE_BASENAME - len(ext))
+    stem = sanitize_component((episode_title or "Episode").strip() or "Episode", body_max)
+    basename = f"{stem}{ext}"
+    if len(basename) > MAX_REMOTE_BASENAME:
+        stem_max = max(1, MAX_REMOTE_BASENAME - len(ext))
+        stem = sanitize_component(stem, stem_max)
+        basename = f"{stem}{ext}"
+    return basename
+
+
+def send_podcast_video_to_zencast(
+    transport,
+    job: PodcastVideoJob,
+    *,
+    parent_id: int,
+    encode_profile=None,
+    encode_for_device: bool = True,
+    on_progress=None,
+) -> PodcastVideoSendResult:
+    """Encode (default XviD on ZEN) and send video under the podcast parent.
+
+    ObjectFileName is the **episode title** (+ container ext), not a host GUID.
+    *parent_id* must be ZENcast / Podcasts (or an experimental show subfolder).
+    Do **not** pass *guid* into ``send_track``: both transports force Music
+    when *guid* is set, which would bypass the podcast folder.
+
+    Host GUID is still returned for device-index skip-if-present only.
+    Temp encodes are cleaned up.
+    """
+    from mtpmanager.infra.ffmpeg_video import (
+        cleanup_video_temp,
+        convert_video_for_profile,
+        default_temp_video_path,
+        video_matches_encode_profile,
+    )
+    from mtpmanager.infra.remote_naming import split_remote_path
+
+    def _emit(kind: str, *args) -> None:
+        if on_progress is None:
+            return
+        try:
+            on_progress(kind, *args)
+        except Exception:
+            logger.debug("podcast video progress failed", exc_info=True)
+
+    src = job.local_path
+    if not src or not os.path.isfile(src):
+        raise FileNotFoundError(f"Podcast video missing: {src!r}")
+
+    parent = int(parent_id)
+    if parent <= 0:
+        raise ValueError(f"podcast parent_id must be positive, got {parent}")
+
+    send_path = src
+    temp_path: str | None = None
+    ep = job.episode
+    show = job.podcast
+    title = (ep.title or "Episode").strip() or "Episode"
+    meta = TrackMetadata(
+        artist=(show.author or show.title or "Podcast").strip() or "Podcast",
+        albumartist=(show.title or "Podcast").strip() or "Podcast",
+        album=(show.title or "Podcast").strip() or "Podcast",
+        title=title,
+        genre="Podcast",
+        date=(ep.pub_date or "")[:10],
+        length_sec=float(ep.duration_sec or 0),
+        tracknumber=str(ep.episode_index or "01"),
+    )
+    host_guid = ep.guid if is_track_guid(ep.guid) else ""
+
+    try:
+        if encode_for_device and encode_profile is not None:
+            if video_matches_encode_profile(src, encode_profile):
+                logger.info(
+                    "Podcast video already matches profile %s — skip encode",
+                    encode_profile.id,
+                )
+                _emit("status", "already device-compatible — skipping encode")
+            else:
+                _emit("phase", "transcode")
+                _emit("progress", 0, 100, "encoding podcast video…")
+                temp_path = default_temp_video_path(encode_profile)
+
+                def _enc_progress(done: float, total: float, msg: str) -> None:
+                    if total and total > 0:
+                        pct = int(min(85, max(0, (done / total) * 85)))
+                        _emit("progress", pct, 100, msg)
+                    else:
+                        _emit("status", msg)
+
+                send_path = convert_video_for_profile(
+                    src,
+                    encode_profile,
+                    dest_path=temp_path,
+                    on_progress=_enc_progress,
+                )
+                _emit("progress", 85, 100, "encode complete — sending…")
+
+        # Container for ObjectFileName: encode profile or source extension.
+        if encode_for_device and encode_profile is not None:
+            ext = f".{encode_profile.container.lstrip('.')}"
+        else:
+            _, src_ext = os.path.splitext(send_path)
+            ext = src_ext or ".avi"
+        preferred = podcast_video_object_basename(title, container_ext=ext)
+
+        _emit("phase", "send")
+        _emit("status", "sending podcast video to ZENcast…")
+        _emit("progress", 90, 100, "sending…")
+        # guid=None so parent_id is honored (guid mode forces Music folder).
+        object_id = transport.send_track(
+            send_path,
+            meta,
+            parent_id=parent,
+            guid=None,
+            preferred_basename=preferred,
+        )
+        # Resolve the wire basename the same way the transport does.
+        from mtpmanager.infra.remote_naming import build_remote_path
+
+        remote = build_remote_path(
+            meta,
+            ext,
+            music_folder_id=parent,
+            guid=None,
+            preferred_basename=preferred,
+        )
+        wire_parent, remote_base = split_remote_path(remote)
+        logger.info(
+            "Podcast video sent parent=%s (requested=%s) remote=%s title=%r "
+            "guid_index=%s object_id=%s",
+            wire_parent,
+            parent,
+            remote_base,
+            title,
+            host_guid or "—",
+            object_id,
+        )
+        if int(wire_parent) != parent:
+            logger.warning(
+                "Podcast video parent mismatch: requested %s, wire path used %s",
+                parent,
+                wire_parent,
+            )
+        _emit("progress", 100, 100, "done")
+        return PodcastVideoSendResult(
+            object_id=int(object_id or 0),
+            parent_id=int(wire_parent),
+            remote_basename=remote_base,
+            guid=host_guid,
+        )
+    finally:
+        if temp_path:
+            cleanup_video_temp(temp_path)

@@ -26,6 +26,7 @@ from mtpmanager.app.podcast_ops import (
     pick_latest_not_on_device,
     prepare_episodes_for_sync,
     refresh_podcast,
+    send_podcast_video_to_zencast,
     subscribe_feed,
 )
 from mtpmanager.app.scan_library import scan_library, scan_library_roots
@@ -307,6 +308,9 @@ class AppController:
         self._podcast_ids: list[int] = []
         self._podcast_episode_by_iid: dict[str, int] = {}
         self._selected_podcast_id: int | None = None
+        # After video podcast send completes, optional audio batch to start.
+        self._pending_podcast_audio_after_video: list | None = None
+        self._pending_podcast_audio_label: str = ""
         self._wire()
         # Defer restore so mainloop can start before any index I/O.
         self.win.root.after(0, self._start_index_restore)
@@ -335,6 +339,7 @@ class AppController:
             on_artist_folders_toggle=self.on_artist_folders_toggle,
             on_album_folders_toggle=self.on_album_folders_toggle,
             on_podcast_folders_toggle=self.on_podcast_folders_toggle,
+            on_allow_video_podcasts_toggle=self.on_allow_video_podcasts_toggle,
         )
         artist_on = bool(self._config.store_tracks_in_artist_folder)
         album_on = bool(self._config.store_tracks_in_album_folder) and artist_on
@@ -342,6 +347,9 @@ class AppController:
         w.var_album_folders.set(album_on)
         w.var_podcast_folders.set(
             bool(self._config.store_podcasts_in_show_folders)
+        )
+        w.var_allow_video_podcasts.set(
+            bool(self._config.allow_video_podcasts_to_sync)
         )
         w.set_album_folders_menu_enabled(artist_on)
         w.set_podcast_tab_commands(
@@ -694,6 +702,18 @@ class AppController:
             return
         logger.info("Config store_podcasts_in_show_folders=%s", enabled)
 
+    def on_allow_video_podcasts_toggle(self) -> None:
+        """Config → Allow video podcasts to Sync."""
+        enabled = bool(self.win.var_allow_video_podcasts.get())
+        self._config.allow_video_podcasts_to_sync = enabled
+        try:
+            save_app_config(self._config)
+        except OSError as e:
+            logger.exception("Failed to save allow_video_podcasts_to_sync")
+            messagebox.showerror("Config", f"Could not save settings:\n{e}")
+            return
+        logger.info("Config allow_video_podcasts_to_sync=%s", enabled)
+
     # ------------------------------------------------------------------
     # Podcasts tab
     # ------------------------------------------------------------------
@@ -706,6 +726,15 @@ class AppController:
             lb.delete(0, "end")
             for p in shows:
                 label = (p.title or p.feed_url or f"Podcast {p.id}").strip()
+                # Mark shows that have any video episode in the index.
+                try:
+                    has_video = any(
+                        ep.is_video for ep in list_episodes(p.id, limit=50)
+                    )
+                except Exception:
+                    has_video = False
+                if has_video:
+                    label = f"▶ {label}"
                 lb.insert("end", label)
         except Exception:
             logger.debug("refresh podcast list failed", exc_info=True)
@@ -774,12 +803,16 @@ class AppController:
                 status = "Downloaded"
             else:
                 status = "New"
+            if ep.is_video:
+                status = f"{status} · Video"
             iid = f"pe:{ep.id}"
+            tags = ("video_episode",) if ep.is_video else ()
             tree.insert(
                 "",
                 "end",
                 iid=iid,
                 values=(date, ep.title or "Untitled", dur, status),
+                tags=tags,
             )
             self._podcast_episode_by_iid[iid] = ep.id
         title = (show.title if show else "") or "Podcast"
@@ -856,11 +889,20 @@ class AppController:
                 else None
             )
             if ep is not None:
+                if ep.is_video and ep.video_enclosure_url and ep.enclosure_url:
+                    media = "Audio + Video"
+                elif ep.is_video:
+                    media = "Video"
+                else:
+                    media = "Audio"
                 lines = [
                     ep.title or "Untitled episode",
                     f"Show: {(show.title if show else '') or '—'}",
                     f"Published: {(ep.pub_date or '—')[:19]}",
+                    f"Media: {media}",
                 ]
+                if ep.enclosure_type:
+                    lines.append(f"Enclosure: {ep.enclosure_type}")
                 if ep.duration_sec:
                     lines.append(f"Duration: {int(ep.duration_sec)}s")
                 if ep.description:
@@ -1160,14 +1202,20 @@ class AppController:
         self.win.set_progress_status("Downloading podcast media for playback…")
 
         def work():
-            return prepare_episodes_for_sync(episodes)
+            # Playback always prefers audio (extract from video-only if needed).
+            return prepare_episodes_for_sync(
+                episodes,
+                allow_video=False,
+                target_audio_format=self._target_format(),
+            )
 
-        def on_done(tracks) -> None:
+        def on_done(prep) -> None:
             self.win.set_progress_status("")
             try:
                 self.win.lbl_podcast_status.configure(text="")
             except Exception:
                 pass
+            tracks = list(getattr(prep, "audio_tracks", None) or [])
             if not tracks:
                 messagebox.showwarning(
                     "Playback",
@@ -1197,15 +1245,22 @@ class AppController:
 
     def _sync_podcast_episodes(self, episodes: list, *, label: str) -> None:
         """Download enclosures on a worker, then transfer under ZENcast."""
+        allow_video = bool(self._config.allow_video_podcasts_to_sync)
         self.win.lbl_podcast_status.configure(text="Preparing episodes…")
         self.win.set_progress_status("Downloading podcast media…")
 
         def work():
-            return prepare_episodes_for_sync(episodes)
+            return prepare_episodes_for_sync(
+                episodes,
+                allow_video=allow_video,
+                target_audio_format=self._target_format(),
+            )
 
-        def on_done(tracks) -> None:
+        def on_done(prep) -> None:
             self.win.set_progress_status("")
-            if not tracks:
+            audio = list(getattr(prep, "audio_tracks", None) or [])
+            video_jobs = list(getattr(prep, "video_jobs", None) or [])
+            if not audio and not video_jobs:
                 messagebox.showwarning(
                     "Podcast",
                     "No episodes could be prepared for transfer "
@@ -1214,11 +1269,20 @@ class AppController:
                 return
             if self._selected_podcast_id is not None:
                 self._load_podcast_episodes(self._selected_podcast_id)
-            self._transfer_many(
-                tracks,
-                kind="podcast",
-                label=label,
-            )
+            # Prefer video first when both: encode+send is a short exclusive
+            # device job; audio batch can follow after (or alone).
+            if video_jobs and not audio:
+                self._start_podcast_video_sync(video_jobs, label=label)
+                return
+            if video_jobs and audio:
+                # Video first (XviD → ZENcast); audio batch chains on success.
+                self._pending_podcast_audio_after_video = audio
+                self._pending_podcast_audio_label = f"{label} (audio)"
+                self._start_podcast_video_sync(
+                    video_jobs, label=f"{label} (video)"
+                )
+                return
+            self._transfer_many(audio, kind="podcast", label=label)
 
         def on_error(exc: BaseException) -> None:
             self.win.set_progress_status("")
@@ -1228,6 +1292,207 @@ class AppController:
 
         self._bg.submit(
             work, on_done=on_done, on_error=on_error, name="podcast-prepare"
+        )
+
+    def _podcast_video_encode_profile(self):
+        """Default XviD preset for ZEN Vision:M when sending video podcasts."""
+        profile = self._active_profile
+        if profile is None:
+            return None
+        opts = getattr(profile, "video_options", None)
+        if opts is None:
+            return None
+        preset = opts.default_preset()
+        return preset
+
+    def _start_podcast_video_sync(self, video_jobs: list, *, label: str) -> None:
+        """Encode (XviD default on ZEN) and send video podcasts under ZENcast."""
+        if not video_jobs:
+            return
+        if not self._require_sync_ready():
+            return
+        # Avoid stacking on an in-flight audio podcast batch.
+        if self._transfer_busy or self._bg.busy:
+            messagebox.showinfo(
+                "Podcast",
+                "Another transfer is still running.\n\n"
+                "Finish or cancel it, then sync the video episode(s) again.",
+            )
+            return
+
+        transport = self._transport()
+        parent = self._podcast_folder_id()
+        podcast_folders = bool(self._config.store_podcasts_in_show_folders)
+        experimental = self.win.active_mode() == "experimental"
+        encode_profile = self._podcast_video_encode_profile()
+        encode_for_device = encode_profile is not None
+        jobs = list(video_jobs)
+        serial = self._device_serial or device_serial_key()
+        from mtpmanager.infra.remote_naming import DEFAULT_STORAGE_ID
+
+        def work(device):
+            _ = device
+            gen = self._bg.generation
+            report = self._bg.progress_callback(gen)
+            show_cache: dict[str, int] = {}
+            results = []
+            total = len(jobs)
+            for i, job in enumerate(jobs):
+                if self._should_cancel_job():
+                    raise JobCancelled("Podcast video sync cancelled")
+                dest_parent = parent
+                if podcast_folders and experimental:
+                    from mtpmanager.app.podcast_ops import ensure_podcast_show_folder
+
+                    dest_parent = ensure_podcast_show_folder(
+                        self.device,
+                        job.podcast.title or "Podcast",
+                        podcast_parent_id=parent,
+                        folder_cache=show_cache,
+                    )
+
+                def on_progress(kind: str, *args, _i=i, _t=total) -> None:
+                    if kind == "status" and args and _t > 1:
+                        report("status", f"({_i + 1}/{_t}) {args[0]}")
+                        return
+                    if kind == "phase" and _t > 1:
+                        report(kind, *args)
+                        report(
+                            "status",
+                            f"Podcast video {_i + 1}/{_t}: "
+                            f"{jobs[_i].episode.title or jobs[_i].local_path}",
+                        )
+                        return
+                    report(kind, *args)
+
+                if total > 1:
+                    report(
+                        "status",
+                        f"Podcast video {i + 1}/{total}: "
+                        f"{job.episode.title or os.path.basename(job.local_path)}",
+                    )
+                logger.info(
+                    "Podcast video sync → parent_id=%s (ZENcast/show) "
+                    "title=%r guid_index=%s",
+                    dest_parent,
+                    job.episode.title,
+                    job.episode.guid,
+                )
+                send_result = send_podcast_video_to_zencast(
+                    transport,
+                    job,
+                    parent_id=int(dest_parent),
+                    encode_profile=encode_profile,
+                    encode_for_device=encode_for_device,
+                    on_progress=on_progress,
+                )
+                # ObjectFileName = episode title (not GUID); GUID only in host index.
+                results.append(
+                    {
+                        "job": job,
+                        "object_id": int(send_result.object_id or 0),
+                        "parent_id": int(send_result.parent_id),
+                        "remote_name": send_result.remote_basename,
+                        "guid": send_result.guid or job.episode.guid,
+                    }
+                )
+            return results
+
+        def on_ui_event(kind: str, *rest) -> None:
+            if kind == "phase":
+                phase = str(rest[0]) if rest else ""
+                if phase == "transcode":
+                    try:
+                        self.win.progress.configure(mode="determinate")
+                        self.win.progress["value"] = 0
+                    except Exception:
+                        pass
+                    self.win.set_progress_status("Encoding podcast video…")
+                elif phase == "send":
+                    self.win.set_progress_status("Sending podcast video…")
+                return
+            if kind == "progress":
+                if len(rest) >= 3:
+                    done, total, msg = int(rest[0]), int(rest[1]), str(rest[2])
+                    try:
+                        self.win.progress.configure(mode="determinate")
+                        if total > 0:
+                            self.win.progress["value"] = max(
+                                0, min(100, int(round(100 * done / total)))
+                            )
+                    except Exception:
+                        pass
+                    if msg:
+                        self.win.set_progress_status(msg)
+                return
+            if kind == "status":
+                if rest:
+                    self.win.set_progress_status(str(rest[0]))
+                return
+            self._on_transfer_ui_event(kind, *rest)
+
+        def on_success(results) -> None:
+            for row in results or []:
+                job = row["job"]
+                try:
+                    record_send(
+                        serial,
+                        remote_name=row["remote_name"],
+                        guid=row.get("guid") or job.episode.guid,
+                        item_id=int(row["object_id"] or 0) or None,
+                        parent_id=int(row["parent_id"]),
+                        storage_id=DEFAULT_STORAGE_ID,
+                    )
+                    logger.info(
+                        "Podcast video indexed parent=%s remote=%s guid=%s",
+                        row["parent_id"],
+                        row["remote_name"],
+                        row.get("guid") or job.episode.guid,
+                    )
+                except Exception:
+                    logger.debug(
+                        "device_index record_send after podcast video failed",
+                        exc_info=True,
+                    )
+            try:
+                self.win.lbl_podcast_status.configure(text="")
+            except Exception:
+                pass
+            if self._selected_podcast_id is not None:
+                self._load_podcast_episodes(self._selected_podcast_id)
+            n = len(results or [])
+            encode_note = ""
+            if encode_for_device and encode_profile is not None:
+                encode_note = f"\nEncode: {encode_profile.display_name}"
+            pending_audio = self._pending_podcast_audio_after_video
+            pending_label = self._pending_podcast_audio_label or "Podcast audio"
+            self._pending_podcast_audio_after_video = None
+            self._pending_podcast_audio_label = ""
+            if pending_audio:
+                messagebox.showinfo(
+                    "Podcast",
+                    f"Sent {n} video episode(s) to ZENcast."
+                    f"{encode_note}\n\n"
+                    f"Starting {len(pending_audio)} audio episode(s)…",
+                )
+                self._transfer_many(
+                    pending_audio, kind="podcast", label=pending_label
+                )
+            else:
+                messagebox.showinfo(
+                    "Podcast",
+                    f"Sent {n} video episode(s) to ZENcast."
+                    f"{encode_note}",
+                )
+
+        self._run_device_bg(
+            title="Podcast video",
+            name="podcast-video-sync",
+            work=work,
+            on_success=on_success,
+            busy_message=label or "encoding/sending podcast video…",
+            on_progress=on_ui_event,
+            progress_mode="determinate",
         )
 
     def _clear_artist_album_folder_prefs(self, *, reason: str) -> None:

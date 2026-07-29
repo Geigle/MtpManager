@@ -3,7 +3,6 @@
 # TODO(follow-up): OPML import/export
 # TODO(follow-up): auto-refresh on a timer
 # TODO(follow-up): Device → Podcasts inventory browser
-# TODO(follow-up): video podcasts
 # TODO(follow-up): per-show auto-download rules beyond “latest”
 """
 
@@ -55,6 +54,10 @@ class PodcastEpisode:
     local_path: str = ""
     episode_index: int = 0
     season: int = 0
+    # True when the feed item has a video enclosure (may still prefer audio).
+    is_video: bool = False
+    video_enclosure_url: str = ""
+    video_enclosure_type: str = ""
     created_at: str = ""
     updated_at: str = ""
 
@@ -113,6 +116,9 @@ def ensure_podcasts_schema(conn: sqlite3.Connection) -> None:
           local_path TEXT NOT NULL DEFAULT '',
           episode_index INTEGER NOT NULL DEFAULT 0,
           season INTEGER NOT NULL DEFAULT 0,
+          is_video INTEGER NOT NULL DEFAULT 0,
+          video_enclosure_url TEXT NOT NULL DEFAULT '',
+          video_enclosure_type TEXT NOT NULL DEFAULT '',
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL,
           FOREIGN KEY (podcast_id) REFERENCES podcasts(id) ON DELETE CASCADE,
@@ -124,6 +130,38 @@ def ensure_podcasts_schema(conn: sqlite3.Connection) -> None:
           ON podcast_episodes(guid);
         """
     )
+    _migrate_episode_video_columns(conn)
+
+
+def _migrate_episode_video_columns(conn: sqlite3.Connection) -> None:
+    """Add video columns on DBs created before video-podcast support."""
+    try:
+        cols = {
+            str(r[1])
+            for r in conn.execute("PRAGMA table_info(podcast_episodes)").fetchall()
+        }
+    except sqlite3.Error:
+        return
+    alters: list[str] = []
+    if "is_video" not in cols:
+        alters.append(
+            "ALTER TABLE podcast_episodes ADD COLUMN is_video INTEGER NOT NULL DEFAULT 0"
+        )
+    if "video_enclosure_url" not in cols:
+        alters.append(
+            "ALTER TABLE podcast_episodes ADD COLUMN "
+            "video_enclosure_url TEXT NOT NULL DEFAULT ''"
+        )
+    if "video_enclosure_type" not in cols:
+        alters.append(
+            "ALTER TABLE podcast_episodes ADD COLUMN "
+            "video_enclosure_type TEXT NOT NULL DEFAULT ''"
+        )
+    for sql in alters:
+        try:
+            conn.execute(sql)
+        except sqlite3.Error as e:
+            logger.debug("podcast episode column migrate skipped: %s", e)
 
 
 def _open(path: Path | None = None) -> tuple[sqlite3.Connection, Path]:
@@ -151,6 +189,14 @@ def _podcast_from_row(row: sqlite3.Row, *, episode_count: int = 0) -> Podcast:
 
 
 def _episode_from_row(row: sqlite3.Row) -> PodcastEpisode:
+    keys = set(row.keys())
+    is_video = False
+    if "is_video" in keys:
+        is_video = bool(int(row["is_video"] or 0))
+    video_url = str(row["video_enclosure_url"] or "") if "video_enclosure_url" in keys else ""
+    video_type = (
+        str(row["video_enclosure_type"] or "") if "video_enclosure_type" in keys else ""
+    )
     return PodcastEpisode(
         id=int(row["id"]),
         podcast_id=int(row["podcast_id"]),
@@ -166,6 +212,9 @@ def _episode_from_row(row: sqlite3.Row) -> PodcastEpisode:
         local_path=str(row["local_path"] or ""),
         episode_index=int(row["episode_index"] or 0),
         season=int(row["season"] or 0),
+        is_video=is_video,
+        video_enclosure_url=video_url,
+        video_enclosure_type=video_type,
         created_at=str(row["created_at"] or ""),
         updated_at=str(row["updated_at"] or ""),
     )
@@ -419,7 +468,8 @@ def upsert_episodes(
     """Insert new episodes (by feed_guid); do not overwrite existing local_path.
 
     Each dict may include: feed_guid, title, description, pub_date, duration_sec,
-    enclosure_url, enclosure_type, enclosure_bytes, episode_index, season.
+    enclosure_url, enclosure_type, enclosure_bytes, episode_index, season,
+    is_video, video_enclosure_url, video_enclosure_type.
     Returns number of newly inserted rows.
     """
     pid = int(podcast_id)
@@ -433,6 +483,9 @@ def upsert_episodes(
                 feed_guid = str(raw.get("feed_guid") or "").strip()
                 if not feed_guid:
                     continue
+                is_video = 1 if raw.get("is_video") else 0
+                video_url = str(raw.get("video_enclosure_url") or "")
+                video_type = str(raw.get("video_enclosure_type") or "")
                 existing = conn.execute(
                     "SELECT id, guid FROM podcast_episodes "
                     "WHERE podcast_id = ? AND feed_guid = ?",
@@ -452,6 +505,9 @@ def upsert_episodes(
                           enclosure_bytes = CASE WHEN ? > 0 THEN ? ELSE enclosure_bytes END,
                           episode_index = CASE WHEN ? > 0 THEN ? ELSE episode_index END,
                           season = CASE WHEN ? > 0 THEN ? ELSE season END,
+                          is_video = ?,
+                          video_enclosure_url = CASE WHEN ? != '' THEN ? ELSE video_enclosure_url END,
+                          video_enclosure_type = CASE WHEN ? != '' THEN ? ELSE video_enclosure_type END,
                           updated_at = ?
                         WHERE id = ?
                         """,
@@ -474,6 +530,11 @@ def upsert_episodes(
                             int(raw.get("episode_index") or 0),
                             int(raw.get("season") or 0),
                             int(raw.get("season") or 0),
+                            is_video,
+                            video_url,
+                            video_url,
+                            video_type,
+                            video_type,
                             now,
                             int(existing["id"]),
                         ),
@@ -485,8 +546,10 @@ def upsert_episodes(
                     INSERT INTO podcast_episodes (
                       podcast_id, guid, feed_guid, title, description, pub_date,
                       duration_sec, enclosure_url, enclosure_type, enclosure_bytes,
-                      local_path, episode_index, season, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?)
+                      local_path, episode_index, season,
+                      is_video, video_enclosure_url, video_enclosure_type,
+                      created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         pid,
@@ -501,6 +564,9 @@ def upsert_episodes(
                         int(raw.get("enclosure_bytes") or 0),
                         int(raw.get("episode_index") or 0),
                         int(raw.get("season") or 0),
+                        is_video,
+                        video_url,
+                        video_type,
                         now,
                         now,
                     ),

@@ -108,7 +108,11 @@ MENU_STABLE_MODE = "Stable Mode"
 MENU_ARTIST_FOLDERS = "Store tracks in artist folder (experimental)"
 MENU_ALBUM_FOLDERS = "Store tracks in album folder (experimental)"
 MENU_PODCAST_FOLDERS = "Store Podcasts in Identifiable Folders (experimental)"
+MENU_ALLOW_VIDEO_PODCASTS = "Allow video podcasts to Sync"
 MENU_CONFIG = "Config…"
+
+# Video podcast episode row (teal / blue-green; Tk Treeview has no gradient outline).
+BG_VIDEO_PODCAST = "#c5e8e6"
 
 # Podcasts tab
 CTX_PODCAST_SYNC_LATEST = "Sync Latest"
@@ -403,6 +407,7 @@ class MainWindow:
         self.var_artist_folders = BooleanVar(value=False)
         self.var_album_folders = BooleanVar(value=False)
         self.var_podcast_folders = BooleanVar(value=False)
+        self.var_allow_video_podcasts = BooleanVar(value=False)
         self.menu_config = Menu(self.menubar, tearoff=0)
         self.menubar.add_cascade(label="Config", menu=self.menu_config)
         self.menu_config.add_checkbutton(
@@ -427,6 +432,12 @@ class MainWindow:
         self.menu_config.add_checkbutton(
             label=MENU_PODCAST_FOLDERS,
             variable=self.var_podcast_folders,
+            onvalue=True,
+            offvalue=False,
+        )
+        self.menu_config.add_checkbutton(
+            label=MENU_ALLOW_VIDEO_PODCASTS,
+            variable=self.var_allow_video_podcasts,
             onvalue=True,
             offvalue=False,
         )
@@ -824,6 +835,10 @@ class MainWindow:
         self.podcast_episode_tree.column("title", width=320, minwidth=120, stretch=True)
         self.podcast_episode_tree.column(
             "duration", width=72, minwidth=56, stretch=False
+        )
+        # Teal fill marks video (or dual) episodes — Treeview cannot draw borders.
+        self.podcast_episode_tree.tag_configure(
+            "video_episode", background=BG_VIDEO_PODCAST
         )
         self.podcast_episode_tree.column(
             "status", width=90, minwidth=70, stretch=False
@@ -1370,6 +1385,7 @@ class MainWindow:
         on_artist_folders_toggle=None,
         on_album_folders_toggle=None,
         on_podcast_folders_toggle=None,
+        on_allow_video_podcasts_toggle=None,
     ) -> None:
         self.menu_config.entryconfig(MENU_CONFIG, command=on_config)
         if on_stable_mode_toggle is not None:
@@ -1387,6 +1403,11 @@ class MainWindow:
         if on_podcast_folders_toggle is not None:
             self.menu_config.entryconfig(
                 MENU_PODCAST_FOLDERS, command=on_podcast_folders_toggle
+            )
+        if on_allow_video_podcasts_toggle is not None:
+            self.menu_config.entryconfig(
+                MENU_ALLOW_VIDEO_PODCASTS,
+                command=on_allow_video_podcasts_toggle,
             )
 
     def set_podcast_tab_commands(

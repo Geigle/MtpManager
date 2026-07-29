@@ -40,6 +40,30 @@ _AUDIO_TYPES = (
     "x-m4a",
 )
 
+_VIDEO_MIME_NEEDLES = (
+    "video/",
+    "mp4",
+    "m4v",
+    "quicktime",
+    "webm",
+    "x-msvideo",
+    "x-m4v",
+    "avi",
+    "mpeg",
+    "x-matroska",
+)
+
+_VIDEO_EXTS = (
+    ".m4v",
+    ".mov",
+    ".webm",
+    ".avi",
+    ".mkv",
+    ".wmv",
+    ".mpg",
+    ".mpeg",
+)
+
 
 @dataclass
 class FeedEpisode:
@@ -53,6 +77,10 @@ class FeedEpisode:
     enclosure_bytes: int = 0
     episode_index: int = 0
     season: int = 0
+    # True when the item has a video enclosure (even if primary is audio).
+    is_video: bool = False
+    video_enclosure_url: str = ""
+    video_enclosure_type: str = ""
 
 
 @dataclass
@@ -214,26 +242,39 @@ def _parse_rss_item(item: Element) -> FeedEpisode | None:
     pub_raw = _child_text(item, ("pubdate", "date", "published"))
     pub_date = _normalize_pub_date(pub_raw)
     feed_guid = _child_text(item, ("guid", "id"))
-    enclosure_url = ""
-    enclosure_type = ""
-    enclosure_bytes = 0
+    audio_url = ""
+    audio_type = ""
+    audio_bytes = 0
+    video_url = ""
+    video_type = ""
+    video_bytes = 0
     duration_sec = 0.0
     episode_index = 0
     season = 0
 
+    def _consider(url: str, typ: str, length: str) -> None:
+        nonlocal audio_url, audio_type, audio_bytes, video_url, video_type, video_bytes
+        if not url:
+            return
+        try:
+            nbytes = int(float(length or "0"))
+        except (TypeError, ValueError):
+            nbytes = 0
+        if _looks_audio(url, typ):
+            if not audio_url:
+                audio_url, audio_type, audio_bytes = url, typ, nbytes
+        elif _looks_video(url, typ):
+            if not video_url:
+                video_url, video_type, video_bytes = url, typ, nbytes
+
     for child in item:
         loc = _local(child.tag).lower()
         if loc == "enclosure":
-            url = (child.get("url") or "").strip()
-            typ = (child.get("type") or "").strip()
-            length = child.get("length") or "0"
-            if url and _looks_audio(url, typ):
-                enclosure_url = url
-                enclosure_type = typ
-                try:
-                    enclosure_bytes = int(float(length))
-                except (TypeError, ValueError):
-                    enclosure_bytes = 0
+            _consider(
+                (child.get("url") or "").strip(),
+                (child.get("type") or "").strip(),
+                child.get("length") or "0",
+            )
         if loc == "duration":
             duration_sec = _parse_duration(child.text or "")
         if loc == "episode":
@@ -249,18 +290,38 @@ def _parse_rss_item(item: Element) -> FeedEpisode | None:
         if loc == "content" and not description:
             description = (child.text or "").strip()
 
-    if not enclosure_url:
-        # media:content
-        for child in item:
-            if _local(child.tag).lower() in ("content", "group"):
-                url = (child.get("url") or "").strip()
-                typ = (child.get("type") or "").strip()
-                if url and _looks_audio(url, typ):
-                    enclosure_url = url
-                    enclosure_type = typ
-                    break
+    # media:content / media:group children (when enclosure missing or dual).
+    for child in item:
+        if _local(child.tag).lower() in ("content", "group"):
+            if _local(child.tag).lower() == "group":
+                for sub in child:
+                    if _local(sub.tag).lower() == "content":
+                        _consider(
+                            (sub.get("url") or "").strip(),
+                            (sub.get("type") or "").strip(),
+                            sub.get("fileSize") or sub.get("length") or "0",
+                        )
+            else:
+                _consider(
+                    (child.get("url") or "").strip(),
+                    (child.get("type") or "").strip(),
+                    child.get("fileSize") or child.get("length") or "0",
+                )
 
-    if not enclosure_url:
+    # Primary enclosure: prefer audio for download/sync default; fall back to video.
+    if audio_url:
+        enclosure_url, enclosure_type, enclosure_bytes = (
+            audio_url,
+            audio_type,
+            audio_bytes,
+        )
+    elif video_url:
+        enclosure_url, enclosure_type, enclosure_bytes = (
+            video_url,
+            video_type,
+            video_bytes,
+        )
+    else:
         return None
     if not feed_guid:
         feed_guid = enclosure_url
@@ -275,6 +336,9 @@ def _parse_rss_item(item: Element) -> FeedEpisode | None:
         enclosure_bytes=enclosure_bytes,
         episode_index=episode_index,
         season=season,
+        is_video=bool(video_url),
+        video_enclosure_url=video_url,
+        video_enclosure_type=video_type,
     )
 
 
@@ -304,7 +368,7 @@ def _parse_atom(root: Element) -> FeedChannel:
     episodes.sort(key=lambda e: (e.pub_date or "", e.feed_guid), reverse=True)
     if not episodes:
         raise ValueError(
-            "Atom feed has no audio enclosures "
+            "Atom feed has no media enclosures "
             "(only basic Atom enclosure links are supported)"
         )
     return FeedChannel(
@@ -322,9 +386,12 @@ def _parse_atom_entry(entry: Element) -> FeedEpisode | None:
     pub_raw = _child_text(entry, ("published", "updated"))
     pub_date = _normalize_pub_date(pub_raw)
     feed_guid = _child_text(entry, ("id",))
-    enclosure_url = ""
-    enclosure_type = ""
-    enclosure_bytes = 0
+    audio_url = ""
+    audio_type = ""
+    audio_bytes = 0
+    video_url = ""
+    video_type = ""
+    video_bytes = 0
     for child in entry:
         if _local(child.tag).lower() != "link":
             continue
@@ -332,15 +399,31 @@ def _parse_atom_entry(entry: Element) -> FeedEpisode | None:
         href = (child.get("href") or "").strip()
         typ = (child.get("type") or "").strip()
         length = child.get("length") or "0"
-        if rel == "enclosure" and href and _looks_audio(href, typ):
-            enclosure_url = href
-            enclosure_type = typ
-            try:
-                enclosure_bytes = int(float(length))
-            except (TypeError, ValueError):
-                enclosure_bytes = 0
-            break
-    if not enclosure_url:
+        if rel != "enclosure" or not href:
+            continue
+        try:
+            nbytes = int(float(length))
+        except (TypeError, ValueError):
+            nbytes = 0
+        if _looks_audio(href, typ):
+            if not audio_url:
+                audio_url, audio_type, audio_bytes = href, typ, nbytes
+        elif _looks_video(href, typ):
+            if not video_url:
+                video_url, video_type, video_bytes = href, typ, nbytes
+    if audio_url:
+        enclosure_url, enclosure_type, enclosure_bytes = (
+            audio_url,
+            audio_type,
+            audio_bytes,
+        )
+    elif video_url:
+        enclosure_url, enclosure_type, enclosure_bytes = (
+            video_url,
+            video_type,
+            video_bytes,
+        )
+    else:
         return None
     if not feed_guid:
         feed_guid = enclosure_url
@@ -352,22 +435,49 @@ def _parse_atom_entry(entry: Element) -> FeedEpisode | None:
         enclosure_url=enclosure_url,
         enclosure_type=enclosure_type,
         enclosure_bytes=enclosure_bytes,
+        is_video=bool(video_url),
+        video_enclosure_url=video_url,
+        video_enclosure_type=video_type,
     )
 
 
 def _looks_audio(url: str, mime: str) -> bool:
     m = (mime or "").lower()
     u = (url or "").lower().split("?", 1)[0]
-    if any(t in m for t in _AUDIO_TYPES):
-        return True
+    if m.startswith("video/"):
+        return False
     if m.startswith("audio/"):
         return True
-    if u.endswith((".mp3", ".m4a", ".aac", ".ogg", ".opus", ".mp4")):
-        # .mp4 might be video — allow if no mime or audio-ish
-        if u.endswith(".mp4") and m and not m.startswith("audio/"):
-            return False
+    if any(t in m for t in _AUDIO_TYPES):
+        return True
+    if u.endswith((".mp3", ".m4a", ".aac", ".ogg", ".opus")):
+        return True
+    # Bare .mp4 is ambiguous — only treat as audio with an audio mime.
+    if u.endswith(".mp4") and m.startswith("audio/"):
         return True
     return False
+
+
+def _looks_video(url: str, mime: str) -> bool:
+    """True when enclosure looks like video (not pure audio)."""
+    m = (mime or "").lower()
+    u = (url or "").lower().split("?", 1)[0]
+    if m.startswith("audio/"):
+        return False
+    if m.startswith("video/"):
+        return True
+    if m and any(t in m for t in _VIDEO_MIME_NEEDLES):
+        return True
+    if u.endswith(_VIDEO_EXTS):
+        return True
+    # .mp4 without audio mime → treat as video (video podcasts often omit type).
+    if u.endswith(".mp4"):
+        return True
+    return False
+
+
+def _looks_media(url: str, mime: str) -> bool:
+    return _looks_audio(url, mime) or _looks_video(url, mime)
 
 
 def _parse_duration(raw: str) -> float:
@@ -437,4 +547,7 @@ def episode_to_row_dict(ep: FeedEpisode) -> dict[str, Any]:
         "enclosure_bytes": ep.enclosure_bytes,
         "episode_index": ep.episode_index,
         "season": ep.season,
+        "is_video": bool(ep.is_video),
+        "video_enclosure_url": ep.video_enclosure_url or "",
+        "video_enclosure_type": ep.video_enclosure_type or "",
     }
