@@ -38,6 +38,9 @@ class AppConfig:
     # When True, video podcast episodes sync as video (XviD on ZEN) under ZENcast.
     # Default off: video-only items extract audio; dual feeds prefer audio enclosure.
     allow_video_podcasts_to_sync: bool = False
+    # When True (default), keep enclosure/encode files under data/podcasts/.
+    # When False, delete local copies after a successful sync of that episode.
+    keep_downloaded_podcasts: bool = True
     version: int = CONFIG_VERSION
 
     def normalized_send_format(self) -> str:
@@ -103,6 +106,9 @@ def load_app_config(*, path: Path | None = None) -> AppConfig:
         allow_video_podcasts_to_sync=_as_bool(
             raw.get("allow_video_podcasts_to_sync"), False
         ),
+        keep_downloaded_podcasts=_as_bool(
+            raw.get("keep_downloaded_podcasts"), True
+        ),
         version=int(raw.get("version", CONFIG_VERSION) or CONFIG_VERSION),
     )
     cfg.send_format = cfg.normalized_send_format()
@@ -131,6 +137,7 @@ def save_app_config(config: AppConfig, *, path: Path | None = None) -> Path:
         "allow_video_podcasts_to_sync": bool(
             config.allow_video_podcasts_to_sync
         ),
+        "keep_downloaded_podcasts": bool(config.keep_downloaded_podcasts),
     }
     text = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
     tmp = dest.with_suffix(dest.suffix + ".tmp")

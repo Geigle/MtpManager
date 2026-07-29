@@ -7,13 +7,16 @@ import unittest
 from mtpmanager.domain.device_media import (
     apply_track_info,
     enrich_refs_from_host,
+    expand_podcast_parent_ids,
     guid_stems_from_files,
     is_placeholder_tag,
     looks_like_music,
+    looks_like_podcast,
     looks_like_track,
     looks_like_video,
     merge_track_refs,
     music_refs_from_files,
+    podcast_refs_from_files,
     ref_tags_look_placeholder,
     refs_needing_device_tags,
     resolve_device_tracks_for_display,
@@ -172,6 +175,74 @@ class LooksLikeVideoTests(unittest.TestCase):
         self.assertFalse(
             looks_like_video(_file(6, "audio.mp4", filetype=6, parent_id=100))
         )
+
+    def test_rejects_zencast_video(self) -> None:
+        # Podcast video lives under ZENcast — Device → Podcasts, not Video.
+        self.assertFalse(
+            looks_like_video(
+                _file(7, "Episode.avi", filetype=9, parent_id=128)
+            )
+        )
+        self.assertFalse(
+            looks_like_video(
+                _file(8, "ep.mp4", filetype=0, parent_id=200),
+                podcast_parents=frozenset({128, 200}),
+            )
+        )
+
+
+class LooksLikePodcastTests(unittest.TestCase):
+    def test_accepts_audio_and_video_under_zencast(self) -> None:
+        self.assertTrue(
+            looks_like_podcast(_file(1, "a.mp3", filetype=2, parent_id=128))
+        )
+        self.assertTrue(
+            looks_like_podcast(
+                _file(2, "Episode.avi", filetype=9, parent_id=128)
+            )
+        )
+
+    def test_rejects_music_and_video_folders(self) -> None:
+        self.assertFalse(
+            looks_like_podcast(_file(1, "a.mp3", filetype=2, parent_id=100))
+        )
+        self.assertFalse(
+            looks_like_podcast(
+                _file(2, "clip.avi", filetype=9, parent_id=120)
+            )
+        )
+
+    def test_show_folder_descendant(self) -> None:
+        parents = frozenset({128, 500})  # 500 = show folder under ZENcast
+        self.assertTrue(
+            looks_like_podcast(
+                _file(3, "ep.mp3", filetype=2, parent_id=500),
+                podcast_parents=parents,
+            )
+        )
+
+
+class ExpandPodcastParentsTests(unittest.TestCase):
+    def test_includes_descendants(self) -> None:
+        # 128 ZENcast → 500 show → 501 nested
+        folder_parents = {500: 128, 501: 500, 120: 0}
+        got = expand_podcast_parent_ids(128, folder_parents)
+        self.assertIn(128, got)
+        self.assertIn(500, got)
+        self.assertIn(501, got)
+        self.assertNotIn(120, got)
+
+
+class PodcastRefsFromFilesTests(unittest.TestCase):
+    def test_filters_to_zencast(self) -> None:
+        files = [
+            _file(10, "a.mp3", filetype=2, parent_id=100),
+            _file(11, "pod.mp3", filetype=2, parent_id=128),
+            _file(12, "Episode.avi", filetype=9, parent_id=128),
+            _file(13, "movie.avi", filetype=9, parent_id=120),
+        ]
+        refs = podcast_refs_from_files(files)
+        self.assertEqual([r.item_id for r in refs], [12, 11])
 
 
 class VideoRefsFromFilesTests(unittest.TestCase):

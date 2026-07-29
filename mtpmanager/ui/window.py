@@ -109,6 +109,9 @@ MENU_ARTIST_FOLDERS = "Store tracks in artist folder (experimental)"
 MENU_ALBUM_FOLDERS = "Store tracks in album folder (experimental)"
 MENU_PODCAST_FOLDERS = "Store Podcasts in Identifiable Folders (experimental)"
 MENU_ALLOW_VIDEO_PODCASTS = "Allow video podcasts to Sync"
+MENU_KEEP_DOWNLOADED_PODCASTS = "Keep downloaded podcasts"
+MENU_CLEAR_DOWNLOADED_PODCASTS = "Clear downloaded podcasts…"
+MENU_REVEAL_PODCAST_DOWNLOADS = "Reveal podcast downloads folder"
 MENU_CONFIG = "Config…"
 
 # Video podcast episode row (teal / blue-green; Tk Treeview has no gradient outline).
@@ -119,6 +122,7 @@ CTX_PODCAST_SYNC_LATEST = "Sync Latest"
 CTX_PODCAST_EPISODE_SYNC = "Sync Episodes Now"
 CTX_PODCAST_PLAY_EPISODE = "Play This Episode"
 CTX_PODCAST_PLAY_EPISODES = "Play These Episodes"
+CTX_PODCAST_REVEAL_DOWNLOAD = "Reveal Download in Finder"
 
 # Device menu (PyMTP / default)
 MENU_CONNECT = "Connect"
@@ -408,6 +412,7 @@ class MainWindow:
         self.var_album_folders = BooleanVar(value=False)
         self.var_podcast_folders = BooleanVar(value=False)
         self.var_allow_video_podcasts = BooleanVar(value=False)
+        self.var_keep_downloaded_podcasts = BooleanVar(value=True)
         self.menu_config = Menu(self.menubar, tearoff=0)
         self.menubar.add_cascade(label="Config", menu=self.menu_config)
         self.menu_config.add_checkbutton(
@@ -441,6 +446,14 @@ class MainWindow:
             onvalue=True,
             offvalue=False,
         )
+        self.menu_config.add_checkbutton(
+            label=MENU_KEEP_DOWNLOADED_PODCASTS,
+            variable=self.var_keep_downloaded_podcasts,
+            onvalue=True,
+            offvalue=False,
+        )
+        self.menu_config.add_command(label=MENU_REVEAL_PODCAST_DOWNLOADS)
+        self.menu_config.add_command(label=MENU_CLEAR_DOWNLOADED_PODCASTS)
         self.menu_config.add_separator()
         self.menu_config.add_command(label=MENU_CONFIG)
 
@@ -484,6 +497,10 @@ class MainWindow:
         self.menu_podcast_episode_ctx = Menu(self.root, tearoff=0)
         self.menu_podcast_episode_ctx.add_command(label=CTX_PODCAST_PLAY_EPISODE)
         self.menu_podcast_episode_ctx.add_command(label=CTX_PODCAST_EPISODE_SYNC)
+        self.menu_podcast_episode_ctx.add_separator()
+        self.menu_podcast_episode_ctx.add_command(
+            label=CTX_PODCAST_REVEAL_DOWNLOAD, state=DISABLED
+        )
 
         # Device on-media context menus (delete / pull).
         self.menu_device_track_ctx = Menu(self.root, tearoff=0)
@@ -886,7 +903,6 @@ class MainWindow:
         pl_tree_frame.pack(side=TOP, fill=BOTH, expand=True)
 
         # Device tab: nested notebook by media category.
-        # Music + Video + Audiobooks; Podcasts deferred.
         self.device_notebook = ttk.Notebook(self.device_tab)
         self.device_notebook.pack(side=TOP, fill=BOTH, expand=True)
 
@@ -907,6 +923,9 @@ class MainWindow:
 
         dab_tree_frame = Frame(self.device_audiobooks_tab)
         dab_tree_frame.pack(fill=BOTH, expand=True)
+
+        dp_tree_frame = Frame(self.device_podcasts_tab)
+        dp_tree_frame.pack(fill=BOTH, expand=True)
 
         yscroll = Scrollbar(tree_frame)
         yscroll.pack(side=RIGHT, fill=Y)
@@ -1168,6 +1187,44 @@ class MainWindow:
             "year", width=56, minwidth=40, stretch=False
         )
 
+        # Device podcasts tree (ZENcast / show folder → episodes; audio + video).
+        dp_yscroll = Scrollbar(dp_tree_frame)
+        dp_yscroll.pack(side=RIGHT, fill=Y)
+        dp_xscroll = Scrollbar(dp_tree_frame, orient="horizontal")
+        dp_xscroll.pack(side=BOTTOM, fill=X)
+
+        self.device_podcasts_tree = ttk.Treeview(
+            dp_tree_frame,
+            columns=TREE_COLS,
+            show="tree headings",
+            selectmode="extended",
+            yscrollcommand=dp_yscroll.set,
+            xscrollcommand=dp_xscroll.set,
+        )
+        self.device_podcasts_tree.pack(side=LEFT, fill=BOTH, expand=True)
+        dp_yscroll.config(command=self.device_podcasts_tree.yview)
+        dp_xscroll.config(command=self.device_podcasts_tree.xview)
+
+        self.device_podcasts_tree.heading("#0", text="#", anchor="w")
+        self.device_podcasts_tree.heading("title", text="Title", anchor="w")
+        self.device_podcasts_tree.heading("artist", text="Show", anchor="w")
+        self.device_podcasts_tree.heading("album", text="Album", anchor="w")
+        self.device_podcasts_tree.heading("year", text="Year", anchor="w")
+        self.device_podcasts_tree.column(
+            "#0",
+            width=self._thumb_size + 28,
+            minwidth=self._thumb_size + 20,
+            stretch=False,
+        )
+        self.device_podcasts_tree.column(
+            "title", width=280, minwidth=120, stretch=True
+        )
+        self.device_podcasts_tree.column("artist", width=140, minwidth=60)
+        self.device_podcasts_tree.column("album", width=140, minwidth=60)
+        self.device_podcasts_tree.column(
+            "year", width=56, minwidth=40, stretch=False
+        )
+
         # Group headers bold (label lives in Title values[0]); transfer tags tint rows.
         self.tree.tag_configure("group", font=("", 11, "bold"))
         self.tree.tag_configure("group_artist", font=("", 12, "bold"))
@@ -1217,6 +1274,14 @@ class MainWindow:
             "group_artist", font=("", 12, "bold")
         )
         self.device_audiobooks_tree.tag_configure("dead", foreground=_DEAD_TRACK_FG)
+        self.device_podcasts_tree.tag_configure("group", font=("", 11, "bold"))
+        self.device_podcasts_tree.tag_configure(
+            "group_folder", font=("", 12, "bold")
+        )
+        self.device_podcasts_tree.tag_configure("dead", foreground=_DEAD_TRACK_FG)
+        self.device_podcasts_tree.tag_configure(
+            "video_episode", background=BG_VIDEO_PODCAST
+        )
 
         # Callbacks set by controller for column-header sort / context menus.
         self._on_sort_heading = None
@@ -1386,6 +1451,9 @@ class MainWindow:
         on_album_folders_toggle=None,
         on_podcast_folders_toggle=None,
         on_allow_video_podcasts_toggle=None,
+        on_keep_downloaded_podcasts_toggle=None,
+        on_clear_downloaded_podcasts=None,
+        on_reveal_podcast_downloads=None,
     ) -> None:
         self.menu_config.entryconfig(MENU_CONFIG, command=on_config)
         if on_stable_mode_toggle is not None:
@@ -1409,6 +1477,21 @@ class MainWindow:
                 MENU_ALLOW_VIDEO_PODCASTS,
                 command=on_allow_video_podcasts_toggle,
             )
+        if on_keep_downloaded_podcasts_toggle is not None:
+            self.menu_config.entryconfig(
+                MENU_KEEP_DOWNLOADED_PODCASTS,
+                command=on_keep_downloaded_podcasts_toggle,
+            )
+        if on_reveal_podcast_downloads is not None:
+            self.menu_config.entryconfig(
+                MENU_REVEAL_PODCAST_DOWNLOADS,
+                command=on_reveal_podcast_downloads,
+            )
+        if on_clear_downloaded_podcasts is not None:
+            self.menu_config.entryconfig(
+                MENU_CLEAR_DOWNLOADED_PODCASTS,
+                command=on_clear_downloaded_podcasts,
+            )
 
     def set_podcast_tab_commands(
         self,
@@ -1423,6 +1506,7 @@ class MainWindow:
         on_show_sync=None,
         on_episode_sync=None,
         on_episode_play=None,
+        on_episode_reveal_download=None,
     ) -> None:
         if on_add is not None:
             self.btn_podcast_add.configure(command=on_add)
@@ -1453,6 +1537,11 @@ class MainWindow:
             # Index 1: Sync N Episodes Now.
             self.menu_podcast_episode_ctx.entryconfig(
                 1, command=on_episode_sync
+            )
+        if on_episode_reveal_download is not None:
+            self.menu_podcast_episode_ctx.entryconfig(
+                CTX_PODCAST_REVEAL_DOWNLOAD,
+                command=on_episode_reveal_download,
             )
 
     def popup_podcast_show_context(self, event) -> str | None:
@@ -2136,6 +2225,15 @@ class MainWindow:
         except Exception:
             pass
 
+    def clear_device_podcasts_tree(self) -> None:
+        """Clear Device → Podcasts tree."""
+        try:
+            self.device_podcasts_tree.delete(
+                *self.device_podcasts_tree.get_children()
+            )
+        except Exception:
+            pass
+
     def album_art_photo_from_disk(
         self,
         track_path: str,
@@ -2228,11 +2326,12 @@ class MainWindow:
         return (self.tree, self.videos_tree, self.audiobooks_tree)
 
     def device_media_trees(self):
-        """All on-device Treeviews (Music, Video, Audiobooks)."""
+        """All on-device Treeviews (Music, Video, Audiobooks, Podcasts)."""
         return (
             self.device_tree,
             self.device_video_tree,
             self.device_audiobooks_tree,
+            self.device_podcasts_tree,
         )
 
     def active_device_tree(self):
@@ -2246,6 +2345,8 @@ class MainWindow:
                 return self.device_video_tree
             if current == str(self.device_audiobooks_tab):
                 return self.device_audiobooks_tree
+            if current == str(self.device_podcasts_tab):
+                return self.device_podcasts_tree
         except Exception:
             pass
         return self.device_tree

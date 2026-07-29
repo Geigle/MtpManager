@@ -440,6 +440,28 @@ def get_episode(episode_id: int, *, path: Path | None = None) -> PodcastEpisode 
             conn.close()
 
 
+def get_episode_by_guid(
+    guid: str, *, path: Path | None = None
+) -> PodcastEpisode | None:
+    """Lookup episode by host 32-hex GUID (ObjectFileName stem for audio)."""
+    g = (guid or "").strip().lower()
+    if not g or not is_track_guid(g):
+        return None
+    conn: sqlite3.Connection | None = None
+    try:
+        conn, _ = _open(path)
+        row = conn.execute(
+            "SELECT * FROM podcast_episodes WHERE guid = ?", (g,)
+        ).fetchone()
+        return _episode_from_row(row) if row is not None else None
+    except sqlite3.Error as e:
+        logger.warning("get_episode_by_guid failed: %s", e)
+        return None
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 def known_feed_guids(
     podcast_id: int, *, path: Path | None = None
 ) -> set[str]:
@@ -619,3 +641,32 @@ def episode_cache_dir(
     dest = base / "podcasts" / str(int(podcast_id))
     dest.mkdir(parents=True, exist_ok=True)
     return dest
+
+
+def podcasts_cache_root(*, data_dir: Path | None = None) -> Path:
+    """Root directory for all podcast downloads (``…/podcasts/``)."""
+    from mtpmanager.infra.app_paths import default_data_dir
+
+    base = data_dir if data_dir is not None else default_data_dir()
+    return base / "podcasts"
+
+
+def clear_all_episode_local_paths(*, path: Path | None = None) -> int:
+    """Set every episode ``local_path`` to empty. Returns rows updated."""
+    now = _utc_now()
+    conn: sqlite3.Connection | None = None
+    try:
+        conn, _ = _open(path)
+        with conn:
+            cur = conn.execute(
+                "UPDATE podcast_episodes SET local_path = '', updated_at = ? "
+                "WHERE local_path != ''",
+                (now,),
+            )
+            return int(cur.rowcount or 0)
+    except sqlite3.Error as e:
+        logger.warning("clear_all_episode_local_paths failed: %s", e)
+        return 0
+    finally:
+        if conn is not None:
+            conn.close()

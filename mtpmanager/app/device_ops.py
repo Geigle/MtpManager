@@ -1136,6 +1136,10 @@ def prepare_and_send_video(
     name (see :func:`send_video`); callers record it in the host device index.
     *preferred_basename* overrides the host filename when set (extension may
     still follow the encode container).
+
+    *allowed_parents*: when set, parent must be in that set (Video/TV for
+    library Send Video). When ``None``, any positive parent is accepted
+    (e.g. ZENcast for podcast video).
     """
     from mtpmanager.domain.device_profile import VideoEncodePreset
     from mtpmanager.infra.ffmpeg_video import (

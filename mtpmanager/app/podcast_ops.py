@@ -27,6 +27,7 @@ from mtpmanager.infra.podcast_feed import (
 from mtpmanager.infra.podcast_index import (
     Podcast,
     PodcastEpisode,
+    clear_all_episode_local_paths,
     create_or_update_podcast,
     episode_cache_dir,
     get_episode,
@@ -36,6 +37,7 @@ from mtpmanager.infra.podcast_index import (
     list_episodes,
     list_podcasts,
     normalize_feed_url,
+    podcasts_cache_root,
     set_episode_local_path,
     upsert_episodes,
 )
@@ -433,6 +435,93 @@ def prepare_episodes_for_sync(
     return prep
 
 
+def clear_downloaded_podcasts(
+    *,
+    path: Path | None = None,
+    data_dir: Path | None = None,
+) -> dict[str, int | str]:
+    """Delete all files under the podcasts cache and clear ``local_path`` rows.
+
+    Returns ``{files, bytes, rows_cleared, root}``.
+    """
+    root = podcasts_cache_root(data_dir=data_dir)
+    files_removed = 0
+    bytes_removed = 0
+    if root.is_dir():
+        for dirpath, _dirnames, filenames in os.walk(root, topdown=False):
+            for name in filenames:
+                fp = Path(dirpath) / name
+                try:
+                    size = int(fp.stat().st_size)
+                except OSError:
+                    size = 0
+                try:
+                    fp.unlink()
+                    files_removed += 1
+                    bytes_removed += size
+                except OSError as e:
+                    logger.warning("Could not delete podcast cache file %s: %s", fp, e)
+            # Remove empty show dirs
+            try:
+                Path(dirpath).rmdir()
+            except OSError:
+                pass
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    rows = clear_all_episode_local_paths(path=path)
+    logger.info(
+        "Cleared podcast downloads: files=%s bytes=%s db_rows=%s root=%s",
+        files_removed,
+        bytes_removed,
+        rows,
+        root,
+    )
+    return {
+        "files": files_removed,
+        "bytes": bytes_removed,
+        "rows_cleared": rows,
+        "root": str(root),
+    }
+
+
+def discard_episode_local_files(
+    episode: PodcastEpisode,
+    *,
+    path: Path | None = None,
+    data_dir: Path | None = None,
+) -> None:
+    """Delete known local media for one episode and clear ``local_path``.
+
+    Used when Config → Keep downloaded podcasts is off (after successful sync).
+    """
+    cache = episode_cache_dir(episode.podcast_id, data_dir=data_dir)
+    candidates: list[Path] = []
+    if episode.local_path:
+        candidates.append(Path(episode.local_path))
+    if episode.guid:
+        try:
+            for p in cache.glob(f"{episode.guid}*"):
+                if p.is_file():
+                    candidates.append(p)
+        except OSError:
+            pass
+    seen: set[str] = set()
+    for p in candidates:
+        key = str(p)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            if p.is_file():
+                p.unlink()
+                logger.info("Discarded podcast download %s", p)
+        except OSError as e:
+            logger.warning("Could not discard podcast file %s: %s", p, e)
+    set_episode_local_path(episode.id, "", path=path)
+
+
 def sanitize_show_folder_name(title: str) -> str:
     """Safe single path component for experimental show folders."""
     from mtpmanager.infra.remote_naming import MAX_REMOTE_BASENAME, sanitize_component
@@ -515,32 +604,22 @@ def send_podcast_video_to_zencast(
     encode_profile=None,
     encode_for_device: bool = True,
     on_progress=None,
+    keep_download: bool = True,
 ) -> PodcastVideoSendResult:
-    """Encode (default XviD on ZEN) and send video under the podcast parent.
+    """Encode and send podcast video via the same path as library Send Video.
 
-    ObjectFileName is the **episode title** (+ container ext), not a host GUID.
-    *parent_id* must be ZENcast / Podcasts (or an experimental show subfolder).
-    Do **not** pass *guid* into ``send_track``: both transports force Music
-    when *guid* is set, which would bypass the podcast folder.
+    Uses :func:`~mtpmanager.app.device_ops.prepare_and_send_video` so the
+    XviD filter chain, skip-if-compatible, and ``send_video`` wire path match
+    library Video tab sync. Only differences:
 
-    Host GUID is still returned for device-index skip-if-present only.
-    Temp encodes are cleaned up.
+    - *parent_id* is ZENcast / show folder (``allowed_parents=None``).
+    - ObjectFileName is the episode title (+ container).
+    - Optional durable ``{guid}_device.avi`` when *keep_download* is on.
+
+    Host GUID is returned for device-index skip-if-present only (never wire).
     """
-    from mtpmanager.infra.ffmpeg_video import (
-        cleanup_video_temp,
-        convert_video_for_profile,
-        default_temp_video_path,
-        video_matches_encode_profile,
-    )
-    from mtpmanager.infra.remote_naming import split_remote_path
-
-    def _emit(kind: str, *args) -> None:
-        if on_progress is None:
-            return
-        try:
-            on_progress(kind, *args)
-        except Exception:
-            logger.debug("podcast video progress failed", exc_info=True)
+    from mtpmanager.app.device_ops import prepare_and_send_video
+    from mtpmanager.infra.ffmpeg_video import convert_video_for_profile
 
     src = job.local_path
     if not src or not os.path.isfile(src):
@@ -550,104 +629,81 @@ def send_podcast_video_to_zencast(
     if parent <= 0:
         raise ValueError(f"podcast parent_id must be positive, got {parent}")
 
-    send_path = src
-    temp_path: str | None = None
     ep = job.episode
-    show = job.podcast
     title = (ep.title or "Episode").strip() or "Episode"
-    meta = TrackMetadata(
-        artist=(show.author or show.title or "Podcast").strip() or "Podcast",
-        albumartist=(show.title or "Podcast").strip() or "Podcast",
-        album=(show.title or "Podcast").strip() or "Podcast",
-        title=title,
-        genre="Podcast",
-        date=(ep.pub_date or "")[:10],
-        length_sec=float(ep.duration_sec or 0),
-        tracknumber=str(ep.episode_index or "01"),
-    )
     host_guid = ep.guid if is_track_guid(ep.guid) else ""
 
-    try:
-        if encode_for_device and encode_profile is not None:
-            if video_matches_encode_profile(src, encode_profile):
-                logger.info(
-                    "Podcast video already matches profile %s — skip encode",
-                    encode_profile.id,
-                )
-                _emit("status", "already device-compatible — skipping encode")
-            else:
-                _emit("phase", "transcode")
-                _emit("progress", 0, 100, "encoding podcast video…")
-                temp_path = default_temp_video_path(encode_profile)
+    do_encode = bool(encode_for_device and encode_profile is not None)
+    send_src = src
+    # When keeping downloads, encode once into the cache so the kept file is
+    # exactly what we send (same convert_video_for_profile as library).
+    if do_encode and keep_download and host_guid:
+        cont = encode_profile.container.lstrip(".")
+        kept = episode_cache_dir(ep.podcast_id) / f"{host_guid}_device.{cont}"
 
-                def _enc_progress(done: float, total: float, msg: str) -> None:
-                    if total and total > 0:
-                        pct = int(min(85, max(0, (done / total) * 85)))
-                        _emit("progress", pct, 100, msg)
-                    else:
-                        _emit("status", msg)
+        def _enc_progress(done: float, total: float, msg: str) -> None:
+            if on_progress is None:
+                return
+            try:
+                if total and total > 0:
+                    pct = int(min(85, max(0, (done / total) * 85)))
+                    on_progress("progress", pct, 100, msg)
+                else:
+                    on_progress("status", msg)
+            except Exception:
+                logger.debug("podcast video progress failed", exc_info=True)
 
-                send_path = convert_video_for_profile(
-                    src,
-                    encode_profile,
-                    dest_path=temp_path,
-                    on_progress=_enc_progress,
-                )
-                _emit("progress", 85, 100, "encode complete — sending…")
-
-        # Container for ObjectFileName: encode profile or source extension.
-        if encode_for_device and encode_profile is not None:
-            ext = f".{encode_profile.container.lstrip('.')}"
-        else:
-            _, src_ext = os.path.splitext(send_path)
-            ext = src_ext or ".avi"
-        preferred = podcast_video_object_basename(title, container_ext=ext)
-
-        _emit("phase", "send")
-        _emit("status", "sending podcast video to ZENcast…")
-        _emit("progress", 90, 100, "sending…")
-        # guid=None so parent_id is honored (guid mode forces Music folder).
-        object_id = transport.send_track(
-            send_path,
-            meta,
-            parent_id=parent,
-            guid=None,
-            preferred_basename=preferred,
+        if on_progress is not None:
+            try:
+                on_progress("phase", "transcode")
+                on_progress("progress", 0, 100, "encoding podcast video…")
+            except Exception:
+                pass
+        convert_video_for_profile(
+            src,
+            encode_profile,
+            dest_path=str(kept),
+            on_progress=_enc_progress,
         )
-        # Resolve the wire basename the same way the transport does.
-        from mtpmanager.infra.remote_naming import build_remote_path
-
-        remote = build_remote_path(
-            meta,
-            ext,
-            music_folder_id=parent,
-            guid=None,
-            preferred_basename=preferred,
-        )
-        wire_parent, remote_base = split_remote_path(remote)
         logger.info(
-            "Podcast video sent parent=%s (requested=%s) remote=%s title=%r "
-            "guid_index=%s object_id=%s",
-            wire_parent,
-            parent,
-            remote_base,
-            title,
-            host_guid or "—",
-            object_id,
+            "Podcast video device encode kept for inspect: %s (source=%s)",
+            kept,
+            src,
         )
-        if int(wire_parent) != parent:
-            logger.warning(
-                "Podcast video parent mismatch: requested %s, wire path used %s",
-                parent,
-                wire_parent,
-            )
-        _emit("progress", 100, 100, "done")
-        return PodcastVideoSendResult(
-            object_id=int(object_id or 0),
-            parent_id=int(wire_parent),
-            remote_basename=remote_base,
-            guid=host_guid,
-        )
-    finally:
-        if temp_path:
-            cleanup_video_temp(temp_path)
+        send_src = str(kept)
+        do_encode = False  # already XviD-padded; send as-is like library skip
+
+    if encode_for_device and encode_profile is not None:
+        ext = f".{encode_profile.container.lstrip('.')}"
+    else:
+        _, src_ext = os.path.splitext(send_src)
+        ext = src_ext or ".avi"
+    preferred = podcast_video_object_basename(title, container_ext=ext)
+
+    logger.info(
+        "Podcast video → prepare_and_send_video parent=%s title=%r "
+        "src=%s encode=%s guid_index=%s",
+        parent,
+        title,
+        send_src,
+        do_encode,
+        host_guid or "—",
+    )
+    result = prepare_and_send_video(
+        transport,
+        send_src,
+        parent_id=parent,
+        encode_profile=encode_profile,
+        encode_for_device=do_encode,
+        on_progress=on_progress,
+        title=title,
+        preferred_basename=preferred,
+        guid=host_guid or None,
+        allowed_parents=None,  # ZENcast / show folder — not Video/TV only
+    )
+    return PodcastVideoSendResult(
+        object_id=int(result.object_id or 0),
+        parent_id=int(result.parent_id),
+        remote_basename=result.remote_basename,
+        guid=host_guid,
+    )

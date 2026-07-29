@@ -203,6 +203,10 @@ def video_matches_encode_profile(
         return False
     if w <= 0 or h <= 0 or (w % 16) or (h % 16):
         return False
+    # Must match the device frame (e.g. 640×480). Do not skip re-encode for
+    # same-codec files at a different storage size (e.g. 720×480 XviD).
+    if w != int(profile.width) or h != int(profile.height):
+        return False
 
     if str(a.get("codec_name") or "").casefold() != profile.probe_audio_codec.casefold():
         return False
@@ -221,15 +225,28 @@ def _vf_filter(
     *,
     force_fps: float | None = None,
 ) -> str:
-    """Build the video filter chain.
+    """Build the video filter chain for device frame geometry.
+
+    Full picture (no crop), storage pixels:
+
+    1. ``setsar=1`` — scale uses width×height only.
+    2. ``scale=W:H:force_original_aspect_ratio=decrease`` — shrink so the
+       whole frame fits inside the device box (both axes together).
+    3. ``pad=W:H`` — letter/pillar-box to the device resolution.
+    4. ``setsar=1`` — square-pixel wire file.
+
+    Example: 720×480 → ~640×426, pad to 640×480.
 
     *force_fps*: when set (source above profile.max_fps), insert ``fps=…``.
-    When None, source frame rate is left unchanged (25, 29.97, etc.).
     """
     w, h = int(profile.width), int(profile.height)
     parts = [
-        f"scale={w}:{h}:force_original_aspect_ratio=decrease",
-        f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2",
+        "setsar=1",
+        (
+            f"scale={w}:{h}:force_original_aspect_ratio=decrease:"
+            f"force_divisible_by=2"
+        ),
+        f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=black",
         "setsar=1",
     ]
     if force_fps is not None and force_fps > 0:

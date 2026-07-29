@@ -172,6 +172,16 @@ class DeviceFolderLayout:
             out.update({DEFAULT_VIDEO_FOLDER_ID, DEFAULT_TV_FOLDER_ID})
         return frozenset(out)
 
+    @property
+    def podcast_id(self) -> int:
+        """ZENcast / Podcasts folder id (legacy 128 when unknown)."""
+        from mtpmanager.infra.remote_naming import ZEN_VISION_M_FOLDER_NAMES
+
+        rid = self.roles.get(FolderRole.PODCAST)
+        if rid is not None and int(rid) > 0:
+            return int(rid)
+        return int(ZEN_VISION_M_FOLDER_NAMES.get("zencast", 128))
+
     def non_music_parent_ids(self) -> frozenset[int]:
         """Parents that should not appear on Device → Music."""
         music = self.music_id
@@ -308,7 +318,12 @@ def resolve_device_folder_layout(
         roles[role] = scored[0][1]
 
     # Fill missing critical roles from fallback so sends still have a parent.
-    for role in (FolderRole.MUSIC, FolderRole.VIDEO, FolderRole.TV):
+    for role in (
+        FolderRole.MUSIC,
+        FolderRole.VIDEO,
+        FolderRole.TV,
+        FolderRole.PODCAST,
+    ):
         if role not in roles:
             fb = base.roles.get(role)
             if fb is not None:

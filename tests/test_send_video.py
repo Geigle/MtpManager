@@ -403,12 +403,28 @@ class VideoEncodeProfileProbeTests(unittest.TestCase):
         self.assertIn("640:480", vf)
         self.assertNotIn("fps=", vf)
         self.assertIn("yuv420p", vf)
+        # Fit storage pixels proportionally, then pad (not stretch-to-fill).
+        self.assertIn("force_original_aspect_ratio=decrease", vf)
+        self.assertIn("pad=640:480", vf)
+        # SAR cleared *before* scale so height shrinks with width from iw/ih.
+        self.assertTrue(
+            vf.startswith("setsar=1,scale=") or ",setsar=1,scale=" in f",{vf}"
+        )
+        self.assertLess(vf.index("setsar=1"), vf.index("scale="))
 
     def test_vf_filter_caps_when_force_fps(self) -> None:
         from mtpmanager.infra.ffmpeg_video import _vf_filter
 
         vf = _vf_filter(ZEN_VISION_M_VIDEO, force_fps=30.0)
         self.assertIn("fps=30", vf)
+
+    def test_vf_filter_default_uses_decrease(self) -> None:
+        from mtpmanager.infra.ffmpeg_video import _vf_filter
+
+        vf = _vf_filter(ZEN_VISION_M_VIDEO)
+        self.assertIn("force_original_aspect_ratio=decrease", vf)
+        self.assertIn("pad=640:480", vf)
+        self.assertNotIn("crop=", vf)
 
     def test_output_fps_for_source(self) -> None:
         from mtpmanager.infra.ffmpeg_video import output_fps_for_source

@@ -26,6 +26,7 @@ class AppConfigTests(unittest.TestCase):
             self.assertFalse(cfg.always_show_playback_controls)
             self.assertFalse(cfg.store_podcasts_in_show_folders)
             self.assertFalse(cfg.allow_video_podcasts_to_sync)
+            self.assertTrue(cfg.keep_downloaded_podcasts)
             self.assertEqual(cfg.active_mode(), "experimental")
 
     def test_round_trip(self) -> None:
@@ -40,6 +41,7 @@ class AppConfigTests(unittest.TestCase):
                     show_broken_video_presets=True,
                     always_show_playback_controls=True,
                     allow_video_podcasts_to_sync=True,
+                    keep_downloaded_podcasts=False,
                 ),
                 path=dest,
             )
@@ -51,6 +53,7 @@ class AppConfigTests(unittest.TestCase):
             self.assertTrue(loaded.show_broken_video_presets)
             self.assertTrue(loaded.always_show_playback_controls)
             self.assertTrue(loaded.allow_video_podcasts_to_sync)
+            self.assertFalse(loaded.keep_downloaded_podcasts)
             self.assertEqual(loaded.active_mode(), "stable")
             data = json.loads(dest.read_text(encoding="utf-8"))
             self.assertEqual(data["send_format"], "wma")
@@ -60,6 +63,7 @@ class AppConfigTests(unittest.TestCase):
             self.assertTrue(data["show_broken_video_presets"])
             self.assertTrue(data["always_show_playback_controls"])
             self.assertTrue(data["allow_video_podcasts_to_sync"])
+            self.assertFalse(data["keep_downloaded_podcasts"])
 
     def test_album_folder_requires_artist_folder(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
