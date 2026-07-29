@@ -771,9 +771,32 @@ def list_cached_video_refs(
     serial: str,
     *,
     path: Path | None = None,
+    podcast_parents: frozenset[int] | None = None,
 ) -> list[DeviceTrackRef]:
-    """Video-only track refs from cache (Device tab → Video)."""
-    return video_refs_from_files(list_cached_files(serial, path=path))
+    """Video-only track refs from cache (Device tab → Video).
+
+    *podcast_parents* excludes ZENcast/show-folder objects (those belong on
+    Device → Podcasts).
+    """
+    return video_refs_from_files(
+        list_cached_files(serial, path=path),
+        podcast_parents=podcast_parents,
+    )
+
+
+def list_cached_podcast_refs(
+    serial: str,
+    *,
+    path: Path | None = None,
+    podcast_parents: frozenset[int] | None = None,
+) -> list[DeviceTrackRef]:
+    """Podcast media refs from cache (Device tab → Podcasts / ZENcast)."""
+    from mtpmanager.domain.device_media import podcast_refs_from_files
+
+    return podcast_refs_from_files(
+        list_cached_files(serial, path=path),
+        podcast_parents=podcast_parents,
+    )
 
 
 def device_list_is_complete(

@@ -67,6 +67,47 @@ class FFmpegTranscoder:
         logger.info("Done converting %s", src_path)
         return output_file
 
+    def extract_audio(
+        self,
+        src_path: str,
+        dest_path: str,
+        *,
+        target_format: str = "mp3",
+    ) -> str:
+        """Demux/encode audio only from a media file (e.g. video podcast).
+
+        Writes *dest_path* and returns it. Always re-encodes (does not
+        short-circuit on source extension).
+        """
+        target_format = (target_format or "mp3").lower().lstrip(".")
+        if target_format == "wma":
+            output_details: dict = {"vn": None, "codec:a": "wmav2"}
+        elif target_format == "wav":
+            output_details = {"vn": None, "codec:a": "pcm_s16le"}
+        else:
+            output_details = {"vn": None, "qscale:a": "0"}
+
+        parent = os.path.dirname(dest_path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        if os.path.exists(dest_path):
+            try:
+                os.remove(dest_path)
+            except OSError:
+                pass
+
+        logger.info("Extracting audio %s → %s", src_path, dest_path)
+        ffmpeg = FFmpeg().input(src_path).output(dest_path, output_details)
+        try:
+            ffmpeg.execute()
+        except Exception as e:
+            logger.error("FFMPEG audio extract failed: %s", e)
+            raise
+        if not os.path.isfile(dest_path):
+            raise RuntimeError(f"ffmpeg produced no audio for {src_path}")
+        logger.info("Done extracting audio → %s", dest_path)
+        return dest_path
+
     def cleanup(self, path: str | None) -> None:
         if not path:
             return

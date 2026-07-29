@@ -403,12 +403,28 @@ class VideoEncodeProfileProbeTests(unittest.TestCase):
         self.assertIn("640:480", vf)
         self.assertNotIn("fps=", vf)
         self.assertIn("yuv420p", vf)
+        # Fit storage pixels proportionally, then pad (not stretch-to-fill).
+        self.assertIn("force_original_aspect_ratio=decrease", vf)
+        self.assertIn("pad=640:480", vf)
+        # SAR cleared *before* scale so height shrinks with width from iw/ih.
+        self.assertTrue(
+            vf.startswith("setsar=1,scale=") or ",setsar=1,scale=" in f",{vf}"
+        )
+        self.assertLess(vf.index("setsar=1"), vf.index("scale="))
 
     def test_vf_filter_caps_when_force_fps(self) -> None:
         from mtpmanager.infra.ffmpeg_video import _vf_filter
 
         vf = _vf_filter(ZEN_VISION_M_VIDEO, force_fps=30.0)
         self.assertIn("fps=30", vf)
+
+    def test_vf_filter_default_uses_decrease(self) -> None:
+        from mtpmanager.infra.ffmpeg_video import _vf_filter
+
+        vf = _vf_filter(ZEN_VISION_M_VIDEO)
+        self.assertIn("force_original_aspect_ratio=decrease", vf)
+        self.assertIn("pad=640:480", vf)
+        self.assertNotIn("crop=", vf)
 
     def test_output_fps_for_source(self) -> None:
         from mtpmanager.infra.ffmpeg_video import output_fps_for_source
@@ -455,6 +471,226 @@ class VideoEncodeProfileProbeTests(unittest.TestCase):
         self.assertEqual(opts["vtag"], "XVID")
         self.assertEqual(opts["qscale:v"], "5")
         self.assertIn("fps=30", opts["vf"])
+
+
+class AudioStillVideoEncodeTests(unittest.TestCase):
+    """Live ffmpeg: audio + black/still → device AVI (experimental podcast path)."""
+
+    @staticmethod
+    def _have_ffmpeg() -> bool:
+        import shutil
+
+        return bool(shutil.which("ffmpeg") and shutil.which("ffprobe"))
+
+    def test_audio_still_black_produces_video_with_audio(self) -> None:
+        if not self._have_ffmpeg():
+            self.skipTest("ffmpeg/ffprobe not on PATH")
+        import subprocess
+
+        from mtpmanager.infra.ffmpeg_video import (
+            convert_audio_still_to_video_for_profile,
+            probe_media,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            audio = Path(tmp) / "tone.mp3"
+            # ~2s mono MP3 via lavfi.
+            subprocess.run(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "sine=frequency=440:duration=2",
+                    "-c:a",
+                    "libmp3lame",
+                    "-b:a",
+                    "128k",
+                    str(audio),
+                ],
+                check=True,
+                capture_output=True,
+            )
+            dest = Path(tmp) / "still.avi"
+            out = convert_audio_still_to_video_for_profile(
+                str(audio),
+                ZEN_AVI_XVID_MP3,
+                image_path=None,
+                dest_path=str(dest),
+                still_fps=2.0,
+                width=128,
+                height=96,
+            )
+            self.assertEqual(out, str(dest))
+            self.assertTrue(dest.is_file())
+            audio_size = audio.stat().st_size
+            out_size = dest.stat().st_size
+            # Still track should not dominate: overhead modest vs audio.
+            self.assertGreater(out_size, audio_size)
+            # ZVM-proven small frame + 2 fps should stay under 5× audio for 2s.
+            self.assertLess(out_size, audio_size * 5)
+
+            data = probe_media(str(dest))
+            streams = data.get("streams") or []
+            kinds = {s.get("codec_type") for s in streams}
+            self.assertIn("video", kinds)
+            self.assertIn("audio", kinds)
+            vs = [s for s in streams if s.get("codec_type") == "video"]
+            self.assertEqual(int(vs[0].get("width") or 0), 128)
+            self.assertEqual(int(vs[0].get("height") or 0), 96)
+            self.assertEqual(
+                str(vs[0].get("codec_tag_string") or "").upper(), "XVID"
+            )
+            r_fps = str(vs[0].get("r_frame_rate") or "")
+            self.assertTrue(
+                r_fps in ("2/1", "2") or r_fps.startswith("2"),
+                f"expected ~2 fps, got {r_fps!r}",
+            )
+
+    def test_audio_still_with_image(self) -> None:
+        if not self._have_ffmpeg():
+            self.skipTest("ffmpeg/ffprobe not on PATH")
+        import subprocess
+
+        from mtpmanager.infra.ffmpeg_video import (
+            convert_audio_still_to_video_for_profile,
+            probe_media,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            audio = Path(tmp) / "tone.mp3"
+            img = Path(tmp) / "art.png"
+            subprocess.run(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "sine=frequency=880:duration=1.5",
+                    "-c:a",
+                    "libmp3lame",
+                    "-b:a",
+                    "96k",
+                    str(audio),
+                ],
+                check=True,
+                capture_output=True,
+            )
+            # Solid color still (no Pillow required).
+            subprocess.run(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "color=c=blue:s=320x240:d=0.1",
+                    "-frames:v",
+                    "1",
+                    str(img),
+                ],
+                check=True,
+                capture_output=True,
+            )
+            dest = Path(tmp) / "art_still.avi"
+            convert_audio_still_to_video_for_profile(
+                str(audio),
+                ZEN_AVI_XVID_MP3,
+                image_path=str(img),
+                dest_path=str(dest),
+                still_fps=2.0,
+                width=128,
+                height=96,
+            )
+            data = probe_media(str(dest))
+            vs = [
+                s
+                for s in (data.get("streams") or [])
+                if s.get("codec_type") == "video"
+            ]
+            self.assertEqual(int(vs[0].get("width") or 0), 128)
+            self.assertEqual(int(vs[0].get("height") or 0), 96)
+            r_fps = str(vs[0].get("r_frame_rate") or "")
+            self.assertTrue(
+                r_fps in ("2/1", "2") or r_fps.startswith("2"),
+                f"expected ~2 fps, got {r_fps!r}",
+            )
+
+
+class PodcastAudioAsVideoSendTests(unittest.TestCase):
+    def test_send_still_job_uses_audio_still_convert(self) -> None:
+        from mtpmanager.app.podcast_ops import (
+            PodcastVideoJob,
+            send_podcast_video_to_zencast,
+        )
+        from mtpmanager.domain.track_id import new_track_guid
+        from mtpmanager.infra.podcast_index import Podcast, PodcastEpisode
+
+        with tempfile.TemporaryDirectory() as tmp:
+            audio = Path(tmp) / "ep.mp3"
+            audio.write_bytes(b"fake-audio")
+            guid = new_track_guid()
+            ep = PodcastEpisode(
+                id=1,
+                podcast_id=9,
+                guid=guid,
+                feed_guid="fg",
+                title="Still Ep",
+                local_path=str(audio),
+            )
+            show = Podcast(
+                id=9,
+                feed_url="https://example.com/rss",
+                title="Show",
+            )
+            job = PodcastVideoJob(
+                episode=ep,
+                podcast=show,
+                local_path=str(audio),
+                from_audio_still=True,
+                image_path="",
+            )
+            transport = _FakeTransport()
+            encoded = Path(tmp) / "VIDEO_TRANSCODE_still.avi"
+            encoded.write_bytes(b"enc-avi")
+
+            with patch(
+                "mtpmanager.infra.ffmpeg_video.convert_audio_still_to_video_for_profile",
+                return_value=str(encoded),
+            ) as still_conv, patch(
+                "mtpmanager.infra.ffmpeg_video.default_temp_video_path",
+                return_value=str(encoded),
+            ), patch(
+                "mtpmanager.infra.ffmpeg_video.cleanup_video_temp"
+            ), patch(
+                "mtpmanager.app.device_ops.prepare_and_send_video",
+                return_value=SendVideoResult(
+                    object_id=99,
+                    parent_id=128,
+                    remote_basename="Still Ep.avi",
+                    path=str(encoded),
+                    source_path=str(encoded),
+                    encoded=False,
+                ),
+            ) as prep:
+                result = send_podcast_video_to_zencast(
+                    transport,
+                    job,
+                    parent_id=128,
+                    encode_profile=ZEN_AVI_XVID_MP3,
+                    encode_for_device=True,
+                    keep_download=False,
+                )
+            still_conv.assert_called_once()
+            self.assertEqual(still_conv.call_args.args[0], str(audio))
+            prep.assert_called_once()
+            # prepare receives the encoded AVI, not the raw audio.
+            self.assertEqual(prep.call_args.args[1], str(encoded))
+            self.assertFalse(prep.call_args.kwargs.get("encode_for_device"))
+            self.assertEqual(result.object_id, 99)
+            self.assertEqual(result.parent_id, 128)
 
 
 if __name__ == "__main__":

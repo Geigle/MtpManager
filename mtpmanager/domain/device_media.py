@@ -129,8 +129,18 @@ VIDEO_PARENT_IDS = frozenset(
     }
 )
 
+# Device → Podcasts / ZENcast (legacy defaults; prefer live layout + descendants).
+PODCAST_PARENT_IDS = frozenset(
+    {
+        128,  # ZENcast (Music-100 map)
+        116,  # ZENcast (Music-88 map)
+    }
+)
+
 # Extra container extensions often used for video under Video/TV (not in VIDEO_EXTS).
 _VIDEO_FOLDER_EXTS = VIDEO_EXTS + (".mp4", ".m4v")
+# Podcasts may hold audio *or* video (XviD under ZENcast).
+_PODCAST_MEDIA_EXTS = MUSIC_EXTS + VIDEO_EXTS + (".mp4", ".m4v", ".webm", ".mkv")
 
 
 def looks_like_track(entry: object) -> bool:
@@ -210,19 +220,32 @@ def music_refs_from_files(
     return _sort_track_refs(result)
 
 
-def looks_like_video(entry: object) -> bool:
+def looks_like_video(
+    entry: object,
+    *,
+    podcast_parents: frozenset[int] | None = None,
+) -> bool:
     """True when a listed object is likely video for the Device → Video tab.
 
     Matches video filetypes/extensions, plus media containers under the ZEN
     Video (120) / TV (124) folders (e.g. ``.mp4`` sent via Send Video).
+
+    Objects under ZENcast / Podcasts (including show subfolders) are **not**
+    Video-tab items — they belong on Device → Podcasts even when the
+    container is AVI/XviD.
     """
+    parent = int(getattr(entry, "parent_id", 0) or 0)
+    pod_parents = (
+        podcast_parents if podcast_parents is not None else PODCAST_PARENT_IDS
+    )
+    if parent in pod_parents:
+        return False
     ft = int(getattr(entry, "filetype", 0) or 0)
     if ft in VIDEO_FILETYPES:
         return True
     name = (getattr(entry, "name", None) or "").strip().lower()
     if any(name.endswith(ext) for ext in VIDEO_EXTS):
         return True
-    parent = int(getattr(entry, "parent_id", 0) or 0)
     if parent in VIDEO_PARENT_IDS and any(
         name.endswith(ext) for ext in _VIDEO_FOLDER_EXTS
     ):
@@ -232,14 +255,117 @@ def looks_like_video(entry: object) -> bool:
 
 def video_refs_from_files(
     files: Sequence[FileEntry] | Iterable[FileEntry],
+    *,
+    podcast_parents: frozenset[int] | None = None,
 ) -> list[DeviceTrackRef]:
     """Video-only track refs for the Device tab Video tree (ids/names only)."""
     result: list[DeviceTrackRef] = []
     for entry in files:
-        if not looks_like_video(entry):
+        if not looks_like_video(entry, podcast_parents=podcast_parents):
             continue
         result.append(_ref_from_file_entry(entry))
     return _sort_track_refs(result)
+
+
+def looks_like_podcast(
+    entry: object,
+    *,
+    podcast_parents: frozenset[int] | None = None,
+) -> bool:
+    """True when a listed object is under ZENcast / Podcasts (audio or video).
+
+    *podcast_parents* should include the podcast root and any experimental
+    show-folder descendants when known from a live folder list.
+    """
+    parent = int(getattr(entry, "parent_id", 0) or 0)
+    parents = podcast_parents if podcast_parents is not None else PODCAST_PARENT_IDS
+    if parent not in parents:
+        return False
+    ft = int(getattr(entry, "filetype", 0) or 0)
+    if ft in TRACK_FILETYPES:
+        return True
+    name = (getattr(entry, "name", None) or "").strip().lower()
+    if any(name.endswith(ext) for ext in _PODCAST_MEDIA_EXTS):
+        return True
+    return looks_like_track(entry)
+
+
+def podcast_refs_from_files(
+    files: Sequence[FileEntry] | Iterable[FileEntry],
+    *,
+    podcast_parents: frozenset[int] | None = None,
+) -> list[DeviceTrackRef]:
+    """Podcast track refs for Device → Podcasts (ZENcast tree; ids/names only)."""
+    result: list[DeviceTrackRef] = []
+    for entry in files:
+        if not looks_like_podcast(entry, podcast_parents=podcast_parents):
+            continue
+        result.append(_ref_from_file_entry(entry))
+    return _sort_track_refs(result)
+
+
+def expand_podcast_parent_ids(
+    podcast_root: int,
+    folder_parent_by_id: Mapping[int, int] | None = None,
+    *,
+    extra_roots: Iterable[int] | None = None,
+) -> frozenset[int]:
+    """Podcast root plus descendant folder ids (experimental show folders).
+
+    *folder_parent_by_id* maps folder_id → parent_id from a live list_folders.
+    Without it, only *podcast_root* and *extra_roots* (legacy ZENcast ids) are
+    returned.
+    """
+    roots: set[int] = set()
+    if int(podcast_root or 0) > 0:
+        roots.add(int(podcast_root))
+    for r in extra_roots or ():
+        if int(r or 0) > 0:
+            roots.add(int(r))
+    roots |= set(PODCAST_PARENT_IDS)
+    if not folder_parent_by_id:
+        return frozenset(roots)
+    # Walk children until fixed point (shallow trees on ZEN).
+    out = set(roots)
+    changed = True
+    while changed:
+        changed = False
+        for fid, pid in folder_parent_by_id.items():
+            fid_i, pid_i = int(fid or 0), int(pid or 0)
+            if fid_i <= 0 or fid_i in out:
+                continue
+            if pid_i in out:
+                out.add(fid_i)
+                changed = True
+    return frozenset(out)
+
+
+def podcast_folder_label(
+    parent_id: int,
+    *,
+    layout=None,
+    podcast_root: int | None = None,
+) -> str:
+    """Human label for a podcast object parent (ZENcast / show folder / Other)."""
+    pid = int(parent_id or 0)
+    if layout is not None:
+        try:
+            from mtpmanager.domain.device_folders import FolderRole
+
+            role = layout.role_for_id(pid)
+            if role is FolderRole.PODCAST:
+                return layout.name_for(pid) or "ZENcast"
+            name = layout.name_for(pid)
+            if name:
+                return name
+        except Exception:
+            pass
+    root = int(podcast_root or 0)
+    if root > 0 and pid == root:
+        return "ZENcast"
+    if pid in PODCAST_PARENT_IDS:
+        return "ZENcast"
+    return "Other"
 
 
 def video_folder_label(

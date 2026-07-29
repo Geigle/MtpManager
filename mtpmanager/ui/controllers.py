@@ -22,10 +22,13 @@ from mtpmanager.app.playlist_device import (
 from mtpmanager.app.podcast_ops import (
     INITIAL_EPISODE_LIMIT,
     MORE_EPISODE_STEP,
+    clear_downloaded_podcasts,
+    discard_episode_local_files,
     load_more_episodes,
     pick_latest_not_on_device,
     prepare_episodes_for_sync,
     refresh_podcast,
+    send_podcast_video_to_zencast,
     subscribe_feed,
 )
 from mtpmanager.app.scan_library import scan_library, scan_library_roots
@@ -64,8 +67,10 @@ from mtpmanager.domain.device_folders import (
 from mtpmanager.domain.device_media import (
     apply_host_meta,
     enrich_refs_from_host,
+    expand_podcast_parent_ids,
     looks_like_music,
     looks_like_track,
+    podcast_folder_label,
     ref_tags_look_placeholder,
     refs_needing_device_tags,
     resolve_device_tracks_for_display,
@@ -91,6 +96,7 @@ from mtpmanager.infra.device_index import (
     device_serial_key,
     guid_stems_on_device,
     list_cached_music_refs,
+    list_cached_podcast_refs,
     list_cached_video_refs,
     record_send,
     remove_by_item_id,
@@ -259,9 +265,11 @@ class AppController:
         self._device_music_refs: list[DeviceTrackRef] = []
         self._device_video_refs: list[DeviceTrackRef] = []
         self._device_audiobook_refs: list[DeviceTrackRef] = []
+        self._device_podcast_refs: list[DeviceTrackRef] = []
         self._device_track_by_iid: dict[str, Track] = {}
         self._device_video_track_by_iid: dict[str, Track] = {}
         self._device_audiobook_track_by_iid: dict[str, Track] = {}
+        self._device_podcast_track_by_iid: dict[str, Track] = {}
         self._device_tree_refresh_after_id: str | None = None
         self._device_context_tree = None
         self._device_context_row: str | None = None
@@ -271,8 +279,11 @@ class AppController:
         self._file_meta_probe_inflight = False
         # Live Music/Video/TV folder ids from list_folders name match.
         self._folder_layout: DeviceFolderLayout = legacy_zen_vision_m_layout()
+        # folder_id → parent_id from last list_folders (podcast show folders).
+        self._folder_parent_by_id: dict[int, int] = {}
         self._device_video_populate_after_id: str | None = None
         self._device_audiobook_populate_after_id: str | None = None
+        self._device_podcast_populate_after_id: str | None = None
         self._audiobooks_populate_after_id: str | None = None
         self._videos_populate_after_id: str | None = None
         # Roots for the in-flight scan (toolbar path while busy_message updates).
@@ -307,6 +318,9 @@ class AppController:
         self._podcast_ids: list[int] = []
         self._podcast_episode_by_iid: dict[str, int] = {}
         self._selected_podcast_id: int | None = None
+        # After video podcast send completes, optional audio batch to start.
+        self._pending_podcast_audio_after_video: list | None = None
+        self._pending_podcast_audio_label: str = ""
         self._wire()
         # Defer restore so mainloop can start before any index I/O.
         self.win.root.after(0, self._start_index_restore)
@@ -335,6 +349,11 @@ class AppController:
             on_artist_folders_toggle=self.on_artist_folders_toggle,
             on_album_folders_toggle=self.on_album_folders_toggle,
             on_podcast_folders_toggle=self.on_podcast_folders_toggle,
+            on_allow_video_podcasts_toggle=self.on_allow_video_podcasts_toggle,
+            on_audio_podcasts_as_video_toggle=self.on_audio_podcasts_as_video_toggle,
+            on_keep_downloaded_podcasts_toggle=self.on_keep_downloaded_podcasts_toggle,
+            on_clear_downloaded_podcasts=self.on_clear_downloaded_podcasts,
+            on_reveal_podcast_downloads=self.on_reveal_podcast_downloads,
         )
         artist_on = bool(self._config.store_tracks_in_artist_folder)
         album_on = bool(self._config.store_tracks_in_album_folder) and artist_on
@@ -342,6 +361,15 @@ class AppController:
         w.var_album_folders.set(album_on)
         w.var_podcast_folders.set(
             bool(self._config.store_podcasts_in_show_folders)
+        )
+        w.var_allow_video_podcasts.set(
+            bool(self._config.allow_video_podcasts_to_sync)
+        )
+        w.var_audio_podcasts_as_video.set(
+            bool(self._config.sync_audio_podcasts_as_video)
+        )
+        w.var_keep_downloaded_podcasts.set(
+            bool(self._config.keep_downloaded_podcasts)
         )
         w.set_album_folders_menu_enabled(artist_on)
         w.set_podcast_tab_commands(
@@ -355,6 +383,7 @@ class AppController:
             on_show_sync=self.on_podcast_sync_latest_selected,
             on_episode_sync=self.on_podcast_sync_episodes_selected,
             on_episode_play=self.on_podcast_play_episodes_selected,
+            on_episode_reveal_download=self.on_podcast_reveal_download,
         )
         try:
             w.podcast_show_list.bind(
@@ -694,6 +723,176 @@ class AppController:
             return
         logger.info("Config store_podcasts_in_show_folders=%s", enabled)
 
+    def on_allow_video_podcasts_toggle(self) -> None:
+        """Config → Allow video podcasts to Sync."""
+        enabled = bool(self.win.var_allow_video_podcasts.get())
+        self._config.allow_video_podcasts_to_sync = enabled
+        try:
+            save_app_config(self._config)
+        except OSError as e:
+            logger.exception("Failed to save allow_video_podcasts_to_sync")
+            messagebox.showerror("Config", f"Could not save settings:\n{e}")
+            return
+        logger.info("Config allow_video_podcasts_to_sync=%s", enabled)
+
+    def on_audio_podcasts_as_video_toggle(self) -> None:
+        """Config → Sync Audio Podcasts as Video (experimental)."""
+        enabled = bool(self.win.var_audio_podcasts_as_video.get())
+        if enabled:
+            messagebox.showinfo(
+                "Audio podcasts as video",
+                "When enabled, audio episodes are encoded as still-image "
+                "XviD plus the episode audio, then sent under ZENcast.\n\n"
+                "ZVM: audio-only podcasts often land under Music (genre "
+                "Podcast); only video appears in ZENcast.\n\n"
+                "Defaults (device-proven): 2 fps · 128×96 (~+9% vs audio). "
+                "1 fps failed. Tune in config.json:\n"
+                "  audio_podcast_still_fps\n"
+                "  audio_podcast_still_width / _height\n\n"
+                "Re-sync rebuilds *_device.avi.",
+            )
+        self._config.sync_audio_podcasts_as_video = enabled
+        try:
+            save_app_config(self._config)
+        except OSError as e:
+            logger.exception("Failed to save sync_audio_podcasts_as_video")
+            messagebox.showerror("Config", f"Could not save settings:\n{e}")
+            return
+        logger.info("Config sync_audio_podcasts_as_video=%s", enabled)
+
+    def on_keep_downloaded_podcasts_toggle(self) -> None:
+        """Config → Keep downloaded podcasts."""
+        enabled = bool(self.win.var_keep_downloaded_podcasts.get())
+        self._config.keep_downloaded_podcasts = enabled
+        try:
+            save_app_config(self._config)
+        except OSError as e:
+            logger.exception("Failed to save keep_downloaded_podcasts")
+            messagebox.showerror("Config", f"Could not save settings:\n{e}")
+            return
+        logger.info("Config keep_downloaded_podcasts=%s", enabled)
+
+    def on_reveal_podcast_downloads(self) -> None:
+        """Config → Reveal podcast downloads folder (Finder / file manager)."""
+        from mtpmanager.infra.podcast_index import podcasts_cache_root
+
+        root = podcasts_cache_root()
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            messagebox.showerror(
+                "Podcast downloads", f"Could not open cache folder:\n{e}"
+            )
+            return
+        self._reveal_path_in_os(str(root), is_directory=True)
+
+    def on_clear_downloaded_podcasts(self) -> None:
+        """Config → Clear downloaded podcasts…"""
+        from mtpmanager.infra.podcast_index import podcasts_cache_root
+
+        root = podcasts_cache_root()
+        if not messagebox.askyesno(
+            "Clear downloaded podcasts",
+            "Delete all cached podcast media on this computer?\n\n"
+            f"Folder:\n{root}\n\n"
+            "Episode index and device files are not removed — only local "
+            "downloads (and any kept device-encoded copies).",
+        ):
+            return
+        try:
+            result = clear_downloaded_podcasts()
+        except Exception as e:
+            logger.exception("clear_downloaded_podcasts failed")
+            messagebox.showerror(
+                "Clear downloaded podcasts", f"Could not clear cache:\n{e}"
+            )
+            return
+        if self._selected_podcast_id is not None:
+            self._load_podcast_episodes(self._selected_podcast_id)
+        messagebox.showinfo(
+            "Clear downloaded podcasts",
+            f"Removed {result.get('files', 0)} file(s) "
+            f"({int(result.get('bytes', 0) or 0) // 1024} KiB).\n"
+            f"Cleared {result.get('rows_cleared', 0)} episode path(s).\n\n"
+            f"{result.get('root', root)}",
+        )
+
+    def _reveal_path_in_os(self, path: str, *, is_directory: bool = False) -> None:
+        """Open Finder (macOS) / explorer / xdg-open for *path*."""
+        import subprocess
+        import sys
+
+        target = path
+        if not target or not os.path.exists(target):
+            messagebox.showinfo(
+                "Reveal",
+                "That path is not on disk yet.\n\n"
+                "Play or Sync the episode first (with Keep downloaded "
+                "podcasts enabled), or use Config → Reveal podcast downloads "
+                "folder.",
+            )
+            return
+        try:
+            if sys.platform == "darwin":
+                if is_directory:
+                    subprocess.run(["open", target], check=False)
+                else:
+                    # Reveal file in Finder
+                    subprocess.run(["open", "-R", target], check=False)
+            elif sys.platform.startswith("win"):
+                if is_directory:
+                    os.startfile(target)  # type: ignore[attr-defined]
+                else:
+                    subprocess.run(
+                        ["explorer", "/select,", target], check=False
+                    )
+            else:
+                subprocess.run(
+                    ["xdg-open", target if is_directory else os.path.dirname(target) or target],
+                    check=False,
+                )
+        except Exception as e:
+            logger.exception("reveal path failed")
+            messagebox.showerror("Reveal", f"Could not open path:\n{e}")
+
+    def on_podcast_reveal_download(self) -> None:
+        """Episode context → Reveal Download in Finder."""
+        eids = self._selected_episode_ids()
+        if not eids:
+            messagebox.showinfo("Reveal", "Select an episode first.")
+            return
+        ep = get_episode(eids[0])
+        if ep is None:
+            return
+        path = (ep.local_path or "").strip()
+        if path and os.path.isfile(path):
+            self._reveal_path_in_os(path, is_directory=False)
+            return
+        # Prefer any on-disk media for this guid (source video, encode, audio).
+        from mtpmanager.infra.podcast_index import episode_cache_dir
+
+        cache = episode_cache_dir(ep.podcast_id)
+        hits: list[str] = []
+        if ep.guid:
+            try:
+                hits = sorted(
+                    str(p) for p in cache.glob(f"{ep.guid}*") if p.is_file()
+                )
+            except OSError:
+                hits = []
+        if hits:
+            # Prefer video source over audio extract for inspect.
+            prefer = [h for h in hits if h.endswith(("_video.mp4", ".mp4", ".m4v", ".avi"))]
+            self._reveal_path_in_os((prefer or hits)[0], is_directory=False)
+            return
+        messagebox.showinfo(
+            "Reveal",
+            "No local download for this episode yet.\n\n"
+            "Play or Sync it first (Config → Keep downloaded podcasts is "
+            f"{'on' if self._config.keep_downloaded_podcasts else 'off'}).\n\n"
+            f"Cache folder:\n{cache}",
+        )
+
     # ------------------------------------------------------------------
     # Podcasts tab
     # ------------------------------------------------------------------
@@ -706,6 +905,15 @@ class AppController:
             lb.delete(0, "end")
             for p in shows:
                 label = (p.title or p.feed_url or f"Podcast {p.id}").strip()
+                # Mark shows that have any video episode in the index.
+                try:
+                    has_video = any(
+                        ep.is_video for ep in list_episodes(p.id, limit=50)
+                    )
+                except Exception:
+                    has_video = False
+                if has_video:
+                    label = f"▶ {label}"
                 lb.insert("end", label)
         except Exception:
             logger.debug("refresh podcast list failed", exc_info=True)
@@ -774,12 +982,16 @@ class AppController:
                 status = "Downloaded"
             else:
                 status = "New"
+            if ep.is_video:
+                status = f"{status} · Video"
             iid = f"pe:{ep.id}"
+            tags = ("video_episode",) if ep.is_video else ()
             tree.insert(
                 "",
                 "end",
                 iid=iid,
                 values=(date, ep.title or "Untitled", dur, status),
+                tags=tags,
             )
             self._podcast_episode_by_iid[iid] = ep.id
         title = (show.title if show else "") or "Podcast"
@@ -821,6 +1033,7 @@ class AppController:
             from mtpmanager.ui.window import (
                 CTX_PODCAST_PLAY_EPISODE,
                 CTX_PODCAST_PLAY_EPISODES,
+                CTX_PODCAST_REVEAL_DOWNLOAD,
             )
 
             play_label = (
@@ -836,6 +1049,28 @@ class AppController:
                 self.win.menu_podcast_episode_ctx.entryconfig(
                     1, label="Sync Episodes Now"
                 )
+            # Reveal is useful when any selected episode has on-disk media.
+            can_reveal = False
+            for eid in self._selected_episode_ids()[:1]:
+                ep = get_episode(eid)
+                if ep is None:
+                    continue
+                if ep.local_path and os.path.isfile(ep.local_path):
+                    can_reveal = True
+                    break
+                if ep.guid:
+                    from mtpmanager.infra.podcast_index import episode_cache_dir
+
+                    cache = episode_cache_dir(ep.podcast_id)
+                    try:
+                        if any(cache.glob(f"{ep.guid}*")):
+                            can_reveal = True
+                    except OSError:
+                        pass
+            self.win.menu_podcast_episode_ctx.entryconfig(
+                CTX_PODCAST_REVEAL_DOWNLOAD,
+                state=NORMAL if can_reveal else DISABLED,
+            )
         except Exception:
             pass
 
@@ -856,20 +1091,55 @@ class AppController:
                 else None
             )
             if ep is not None:
+                if ep.is_video and ep.video_enclosure_url and ep.enclosure_url:
+                    media = "Audio + Video"
+                elif ep.is_video:
+                    media = "Video"
+                else:
+                    media = "Audio"
                 lines = [
                     ep.title or "Untitled episode",
                     f"Show: {(show.title if show else '') or '—'}",
                     f"Published: {(ep.pub_date or '—')[:19]}",
+                    f"Media: {media}",
                 ]
+                if ep.enclosure_type:
+                    lines.append(f"Enclosure: {ep.enclosure_type}")
                 if ep.duration_sec:
                     lines.append(f"Duration: {int(ep.duration_sec)}s")
+                local = (ep.local_path or "").strip()
+                if local and os.path.isfile(local):
+                    lines.append(f"Downloaded: {local}")
+                elif local:
+                    lines.append(f"Downloaded: {local} (missing)")
+                else:
+                    # List sibling cache files for this guid (source video, encode).
+                    from mtpmanager.infra.podcast_index import episode_cache_dir
+
+                    cache = episode_cache_dir(ep.podcast_id)
+                    extras: list[str] = []
+                    if ep.guid:
+                        try:
+                            extras = sorted(
+                                p.name
+                                for p in cache.glob(f"{ep.guid}*")
+                                if p.is_file()
+                            )
+                        except OSError:
+                            extras = []
+                    if extras:
+                        lines.append(f"Cache files: {', '.join(extras)}")
+                        lines.append(f"Cache dir: {cache}")
+                    else:
+                        lines.append("Downloaded: (not on disk)")
                 if ep.description:
                     desc = ep.description
                     if len(desc) > 600:
                         desc = desc[:600] + "…"
                     lines.append("")
                     lines.append(desc)
-                self.win.set_context_detail("\n".join(lines), path=ep.enclosure_url)
+                detail_path = local if local and os.path.isfile(local) else ep.enclosure_url
+                self.win.set_context_detail("\n".join(lines), path=detail_path)
                 return
         if self._selected_podcast_id is not None:
             show = get_podcast(self._selected_podcast_id)
@@ -1160,14 +1430,20 @@ class AppController:
         self.win.set_progress_status("Downloading podcast media for playback…")
 
         def work():
-            return prepare_episodes_for_sync(episodes)
+            # Playback always prefers audio (extract from video-only if needed).
+            return prepare_episodes_for_sync(
+                episodes,
+                allow_video=False,
+                target_audio_format=self._target_format(),
+            )
 
-        def on_done(tracks) -> None:
+        def on_done(prep) -> None:
             self.win.set_progress_status("")
             try:
                 self.win.lbl_podcast_status.configure(text="")
             except Exception:
                 pass
+            tracks = list(getattr(prep, "audio_tracks", None) or [])
             if not tracks:
                 messagebox.showwarning(
                     "Playback",
@@ -1197,15 +1473,24 @@ class AppController:
 
     def _sync_podcast_episodes(self, episodes: list, *, label: str) -> None:
         """Download enclosures on a worker, then transfer under ZENcast."""
+        allow_video = bool(self._config.allow_video_podcasts_to_sync)
+        audio_as_video = bool(self._config.sync_audio_podcasts_as_video)
         self.win.lbl_podcast_status.configure(text="Preparing episodes…")
         self.win.set_progress_status("Downloading podcast media…")
 
         def work():
-            return prepare_episodes_for_sync(episodes)
+            return prepare_episodes_for_sync(
+                episodes,
+                allow_video=allow_video,
+                audio_as_video=audio_as_video,
+                target_audio_format=self._target_format(),
+            )
 
-        def on_done(tracks) -> None:
+        def on_done(prep) -> None:
             self.win.set_progress_status("")
-            if not tracks:
+            audio = list(getattr(prep, "audio_tracks", None) or [])
+            video_jobs = list(getattr(prep, "video_jobs", None) or [])
+            if not audio and not video_jobs:
                 messagebox.showwarning(
                     "Podcast",
                     "No episodes could be prepared for transfer "
@@ -1214,11 +1499,20 @@ class AppController:
                 return
             if self._selected_podcast_id is not None:
                 self._load_podcast_episodes(self._selected_podcast_id)
-            self._transfer_many(
-                tracks,
-                kind="podcast",
-                label=label,
-            )
+            # Prefer video first when both: encode+send is a short exclusive
+            # device job; audio batch can follow after (or alone).
+            if video_jobs and not audio:
+                self._start_podcast_video_sync(video_jobs, label=label)
+                return
+            if video_jobs and audio:
+                # Video first (XviD → ZENcast); audio batch chains on success.
+                self._pending_podcast_audio_after_video = audio
+                self._pending_podcast_audio_label = f"{label} (audio)"
+                self._start_podcast_video_sync(
+                    video_jobs, label=f"{label} (video)"
+                )
+                return
+            self._transfer_many(audio, kind="podcast", label=label)
 
         def on_error(exc: BaseException) -> None:
             self.win.set_progress_status("")
@@ -1228,6 +1522,230 @@ class AppController:
 
         self._bg.submit(
             work, on_done=on_done, on_error=on_error, name="podcast-prepare"
+        )
+
+    def _podcast_video_encode_profile(self):
+        """Default XviD preset for ZEN Vision:M when sending video podcasts."""
+        profile = self._active_profile
+        if profile is None:
+            return None
+        opts = getattr(profile, "video_options", None)
+        if opts is None:
+            return None
+        preset = opts.default_preset()
+        return preset
+
+    def _start_podcast_video_sync(self, video_jobs: list, *, label: str) -> None:
+        """Encode (XviD default on ZEN) and send video podcasts under ZENcast."""
+        if not video_jobs:
+            return
+        if not self._require_sync_ready():
+            return
+        # Avoid stacking on an in-flight audio podcast batch.
+        if self._transfer_busy or self._bg.busy:
+            messagebox.showinfo(
+                "Podcast",
+                "Another transfer is still running.\n\n"
+                "Finish or cancel it, then sync the video episode(s) again.",
+            )
+            return
+
+        transport = self._transport()
+        parent = self._podcast_folder_id()
+        podcast_folders = bool(self._config.store_podcasts_in_show_folders)
+        experimental = self.win.active_mode() == "experimental"
+        encode_profile = self._podcast_video_encode_profile()
+        encode_for_device = encode_profile is not None
+        # Still-from-audio jobs require a device video profile (XviD on ZEN).
+        if any(getattr(j, "from_audio_still", False) for j in video_jobs):
+            if encode_profile is None:
+                messagebox.showerror(
+                    "Podcast",
+                    "Sync Audio Podcasts as Video needs a device video "
+                    "encode profile (Creative ZEN Vision:M).\n\n"
+                    "Connect the device or pick the ZEN profile, then try again.",
+                )
+                return
+            encode_for_device = True
+        jobs = list(video_jobs)
+        serial = self._device_serial or device_serial_key()
+        from mtpmanager.infra.remote_naming import DEFAULT_STORAGE_ID
+
+        def work(device):
+            _ = device
+            gen = self._bg.generation
+            report = self._bg.progress_callback(gen)
+            show_cache: dict[str, int] = {}
+            results = []
+            total = len(jobs)
+            for i, job in enumerate(jobs):
+                if self._should_cancel_job():
+                    raise JobCancelled("Podcast video sync cancelled")
+                dest_parent = parent
+                if podcast_folders and experimental:
+                    from mtpmanager.app.podcast_ops import ensure_podcast_show_folder
+
+                    dest_parent = ensure_podcast_show_folder(
+                        self.device,
+                        job.podcast.title or "Podcast",
+                        podcast_parent_id=parent,
+                        folder_cache=show_cache,
+                    )
+
+                def on_progress(kind: str, *args, _i=i, _t=total) -> None:
+                    if kind == "status" and args and _t > 1:
+                        report("status", f"({_i + 1}/{_t}) {args[0]}")
+                        return
+                    if kind == "phase" and _t > 1:
+                        report(kind, *args)
+                        report(
+                            "status",
+                            f"Podcast video {_i + 1}/{_t}: "
+                            f"{jobs[_i].episode.title or jobs[_i].local_path}",
+                        )
+                        return
+                    report(kind, *args)
+
+                if total > 1:
+                    report(
+                        "status",
+                        f"Podcast video {i + 1}/{total}: "
+                        f"{job.episode.title or os.path.basename(job.local_path)}",
+                    )
+                logger.info(
+                    "Podcast video sync → parent_id=%s (ZENcast/show) "
+                    "title=%r guid_index=%s",
+                    dest_parent,
+                    job.episode.title,
+                    job.episode.guid,
+                )
+                send_result = send_podcast_video_to_zencast(
+                    transport,
+                    job,
+                    parent_id=int(dest_parent),
+                    encode_profile=encode_profile,
+                    encode_for_device=encode_for_device,
+                    on_progress=on_progress,
+                    keep_download=bool(self._config.keep_downloaded_podcasts),
+                    still_fps=float(self._config.audio_podcast_still_fps),
+                    still_width=int(self._config.audio_podcast_still_width),
+                    still_height=int(self._config.audio_podcast_still_height),
+                )
+                if not self._config.keep_downloaded_podcasts:
+                    try:
+                        discard_episode_local_files(job.episode)
+                    except Exception:
+                        logger.debug(
+                            "discard podcast download after video send failed",
+                            exc_info=True,
+                        )
+                # ObjectFileName = episode title (not GUID); GUID only in host index.
+                results.append(
+                    {
+                        "job": job,
+                        "object_id": int(send_result.object_id or 0),
+                        "parent_id": int(send_result.parent_id),
+                        "remote_name": send_result.remote_basename,
+                        "guid": send_result.guid or job.episode.guid,
+                    }
+                )
+            return results
+
+        def on_ui_event(kind: str, *rest) -> None:
+            if kind == "phase":
+                phase = str(rest[0]) if rest else ""
+                if phase == "transcode":
+                    try:
+                        self.win.progress.configure(mode="determinate")
+                        self.win.progress["value"] = 0
+                    except Exception:
+                        pass
+                    self.win.set_progress_status("Encoding podcast video…")
+                elif phase == "send":
+                    self.win.set_progress_status("Sending podcast video…")
+                return
+            if kind == "progress":
+                if len(rest) >= 3:
+                    done, total, msg = int(rest[0]), int(rest[1]), str(rest[2])
+                    try:
+                        self.win.progress.configure(mode="determinate")
+                        if total > 0:
+                            self.win.progress["value"] = max(
+                                0, min(100, int(round(100 * done / total)))
+                            )
+                    except Exception:
+                        pass
+                    if msg:
+                        self.win.set_progress_status(msg)
+                return
+            if kind == "status":
+                if rest:
+                    self.win.set_progress_status(str(rest[0]))
+                return
+            self._on_transfer_ui_event(kind, *rest)
+
+        def on_success(results) -> None:
+            for row in results or []:
+                job = row["job"]
+                try:
+                    record_send(
+                        serial,
+                        remote_name=row["remote_name"],
+                        guid=row.get("guid") or job.episode.guid,
+                        item_id=int(row["object_id"] or 0) or None,
+                        parent_id=int(row["parent_id"]),
+                        storage_id=DEFAULT_STORAGE_ID,
+                    )
+                    logger.info(
+                        "Podcast video indexed parent=%s remote=%s guid=%s",
+                        row["parent_id"],
+                        row["remote_name"],
+                        row.get("guid") or job.episode.guid,
+                    )
+                except Exception:
+                    logger.debug(
+                        "device_index record_send after podcast video failed",
+                        exc_info=True,
+                    )
+            try:
+                self.win.lbl_podcast_status.configure(text="")
+            except Exception:
+                pass
+            if self._selected_podcast_id is not None:
+                self._load_podcast_episodes(self._selected_podcast_id)
+            n = len(results or [])
+            encode_note = ""
+            if encode_for_device and encode_profile is not None:
+                encode_note = f"\nEncode: {encode_profile.display_name}"
+            pending_audio = self._pending_podcast_audio_after_video
+            pending_label = self._pending_podcast_audio_label or "Podcast audio"
+            self._pending_podcast_audio_after_video = None
+            self._pending_podcast_audio_label = ""
+            if pending_audio:
+                messagebox.showinfo(
+                    "Podcast",
+                    f"Sent {n} video episode(s) to ZENcast."
+                    f"{encode_note}\n\n"
+                    f"Starting {len(pending_audio)} audio episode(s)…",
+                )
+                self._transfer_many(
+                    pending_audio, kind="podcast", label=pending_label
+                )
+            else:
+                messagebox.showinfo(
+                    "Podcast",
+                    f"Sent {n} video episode(s) to ZENcast."
+                    f"{encode_note}",
+                )
+
+        self._run_device_bg(
+            title="Podcast video",
+            name="podcast-video-sync",
+            work=work,
+            on_success=on_success,
+            busy_message=label or "encoding/sending podcast video…",
+            on_progress=on_ui_event,
+            progress_mode="determinate",
         )
 
     def _clear_artist_album_folder_prefs(self, *, reason: str) -> None:
@@ -2861,6 +3379,14 @@ class AppController:
                 pass
             self._device_audiobook_populate_after_id = None
 
+    def _cancel_device_podcast_populate(self) -> None:
+        if self._device_podcast_populate_after_id is not None:
+            try:
+                self.win.root.after_cancel(self._device_podcast_populate_after_id)
+            except Exception:
+                pass
+            self._device_podcast_populate_after_id = None
+
     def _track_iid(self, track: Track) -> str:
         # Paths are unique; avoid characters Treeview rejects in iids.
         return "t:" + track.path.replace("\\", "/")
@@ -2873,6 +3399,17 @@ class AppController:
 
     def _device_audiobook_track_iid(self, track: Track) -> str:
         return "dab:" + track.path.replace("\\", "/")
+
+    def _device_podcast_track_iid(self, track: Track) -> str:
+        return "dp:" + track.path.replace("\\", "/")
+
+    def _podcast_parent_ids(self) -> frozenset[int]:
+        """ZENcast root + experimental show-folder descendants."""
+        layout = self._folder_layout_or_legacy()
+        return expand_podcast_parent_ids(
+            layout.podcast_id,
+            self._folder_parent_by_id or None,
+        )
 
     @staticmethod
     def _host_path_for_device_track(track: Track) -> str:
@@ -2971,6 +3508,38 @@ class AppController:
             open=False,
         )
         self._device_video_track_by_iid[iid] = track
+
+    def _insert_device_podcast_row(self, parent: str, track: Track) -> None:
+        num, title, artist, album, year = iter_track_cells(track)
+        iid = self._device_podcast_track_iid(track)
+        if self.win.device_podcasts_tree.exists(iid):
+            iid = f"{iid}#{id(track)}"
+        tags: tuple[str, ...] = ("track", "podcast")
+        # Video containers under ZENcast get the same teal hint as host tab.
+        from mtpmanager.domain.library import is_video_file
+
+        obj_name = ""
+        oid = self._item_id_from_device_track(track)
+        if oid is not None:
+            ref = self._device_refs_by_item_id().get(oid)
+            if ref is not None:
+                obj_name = (ref.name or "").strip()
+        if not obj_name:
+            parts = (track.path or "").split(":", 2)
+            if len(parts) >= 3:
+                obj_name = os.path.basename(parts[2])
+        if is_video_file(obj_name):
+            tags = tags + ("video_episode",)
+        self.win.device_podcasts_tree.insert(
+            parent,
+            "end",
+            iid=iid,
+            text=num,
+            values=(title, artist, album, year),
+            tags=tags,
+            open=False,
+        )
+        self._device_podcast_track_by_iid[iid] = track
 
     def _insert_device_audiobook_row(self, parent: str, track: Track) -> None:
         num, title, artist, album, year = iter_track_cells(track)
@@ -3349,10 +3918,11 @@ class AppController:
         run_chunk(0)
 
     def _clear_device_media_trees(self) -> None:
-        """Drop Device → Music/Video/Audiobooks trees and in-memory maps."""
+        """Drop Device → Music/Video/Audiobooks/Podcasts trees and maps."""
         self._cancel_device_populate()
         self._cancel_device_video_populate()
         self._cancel_device_audiobook_populate()
+        self._cancel_device_podcast_populate()
         if self._device_tree_refresh_after_id is not None:
             try:
                 self.win.root.after_cancel(self._device_tree_refresh_after_id)
@@ -3363,12 +3933,15 @@ class AppController:
         self.win.clear_device_track_tree()
         self.win.clear_device_video_tree()
         self.win.clear_device_audiobooks_tree()
+        self.win.clear_device_podcasts_tree()
         self._device_track_by_iid.clear()
         self._device_video_track_by_iid.clear()
         self._device_audiobook_track_by_iid.clear()
+        self._device_podcast_track_by_iid.clear()
         self._device_music_refs = []
         self._device_video_refs = []
         self._device_audiobook_refs = []
+        self._device_podcast_refs = []
         self._device_pending_album_art = []
 
     # Back-compat alias used by older call sites / mental model.
@@ -3429,18 +4002,21 @@ class AppController:
         return music, audiobooks
 
     def _refresh_device_media_trees(self, *, enrich_missing_tags: bool = True) -> None:
-        """Rebuild Device → Music / Video / Audiobooks from durable index.
+        """Rebuild Device → Music / Video / Audiobooks / Podcasts from index.
 
         Music/Audiobooks: GUID basename → host library tags, then device tags,
         then filename. Audiobooks are audio objects whose genre is Audiobook
-        (host or device tags). Video: device tags then filename. When
-        *enrich_missing_tags* is True, objects still missing titles are filled
-        via ``get_track_metadata`` after the USB quiet window.
+        (host or device tags). Video: Video/TV parents only (not ZENcast).
+        Podcasts: ZENcast (+ show subfolders). When *enrich_missing_tags* is
+        True, objects still missing titles are filled via
+        ``get_track_metadata`` after the USB quiet window.
         """
         serial = self._device_serial
         if not serial:
             self._clear_device_media_trees()
             return
+
+        podcast_parents = self._podcast_parent_ids()
 
         # --- Audio (Music + Audiobooks) ---
         try:
@@ -3458,9 +4034,11 @@ class AppController:
         self._rebuild_device_music_tree(music_refs, audio_by_guid)
         self._rebuild_device_audiobooks_tree(audiobook_refs, audio_by_guid)
 
-        # --- Video ---
+        # --- Video (exclude ZENcast / podcast parents) ---
         try:
-            video_refs = list_cached_video_refs(serial)
+            video_refs = list_cached_video_refs(
+                serial, podcast_parents=podcast_parents
+            )
         except Exception:
             logger.warning("list_cached_video_refs failed", exc_info=True)
             video_refs = []
@@ -3471,14 +4049,33 @@ class AppController:
         self._device_video_refs = list(video_refs)
         self._rebuild_device_video_tree(video_refs, video_by_guid)
 
+        # --- Podcasts (ZENcast + show folders; audio and video) ---
+        try:
+            podcast_refs = list_cached_podcast_refs(
+                serial, podcast_parents=podcast_parents
+            )
+        except Exception:
+            logger.warning("list_cached_podcast_refs failed", exc_info=True)
+            podcast_refs = []
+        podcast_by_guid = self._host_tracks_by_guid_for_refs(podcast_refs)
+        podcast_refs = enrich_refs_from_host(podcast_refs, podcast_by_guid)
+        self._device_podcast_refs = list(podcast_refs)
+        self._rebuild_device_podcasts_tree(podcast_refs, podcast_by_guid)
+
         if enrich_missing_tags:
             need_music = refs_needing_device_tags(music_refs, audio_by_guid)
             need_ab = refs_needing_device_tags(audiobook_refs, audio_by_guid)
             need_video = refs_needing_device_tags(video_refs, video_by_guid)
+            need_pod = refs_needing_device_tags(podcast_refs, podcast_by_guid)
             # Deduplicate by item_id (same object should not appear twice).
             seen: set[int] = set()
             need: list[DeviceTrackRef] = []
-            for ref in list(need_music) + list(need_ab) + list(need_video):
+            for ref in (
+                list(need_music)
+                + list(need_ab)
+                + list(need_video)
+                + list(need_pod)
+            ):
                 oid = int(ref.item_id or 0)
                 if oid <= 0 or oid in seen:
                     continue
@@ -3505,9 +4102,20 @@ class AppController:
                         self._device_video_refs,
                         self._host_tracks_by_guid_for_refs(self._device_video_refs),
                     )
+                    still_pod = refs_needing_device_tags(
+                        self._device_podcast_refs,
+                        self._host_tracks_by_guid_for_refs(
+                            self._device_podcast_refs
+                        ),
+                    )
                     still_seen: set[int] = set()
                     still: list[DeviceTrackRef] = []
-                    for ref in list(still_music) + list(still_ab) + list(still_video):
+                    for ref in (
+                        list(still_music)
+                        + list(still_ab)
+                        + list(still_video)
+                        + list(still_pod)
+                    ):
                         oid = int(ref.item_id or 0)
                         if oid <= 0 or oid in still_seen:
                             continue
@@ -3799,6 +4407,95 @@ class AppController:
 
         run_chunk(0)
 
+    def _rebuild_device_podcasts_tree(
+        self,
+        refs: list[DeviceTrackRef],
+        by_guid: dict[str, Track] | None = None,
+    ) -> None:
+        """Chunked Treeview insert for Device → Podcasts (folder → episodes)."""
+        self._cancel_device_podcast_populate()
+        self.win.clear_device_podcasts_tree()
+        self._device_podcast_track_by_iid.clear()
+
+        if by_guid is None:
+            by_guid = self._host_tracks_by_guid_for_refs(refs)
+        if not refs:
+            return
+
+        by_folder: dict[int, list[DeviceTrackRef]] = {}
+        for ref in refs:
+            pid = int(ref.parent_id or 0)
+            by_folder.setdefault(pid, []).append(ref)
+
+        layout = self._folder_layout_or_legacy()
+        podcast_root = layout.podcast_id
+
+        def folder_sort_key(pid: int) -> tuple:
+            if pid == podcast_root:
+                return (0, pid)
+            return (1, (layout.name_for(pid) or "").casefold(), pid)
+
+        ops: list = []
+        for pid in sorted(by_folder.keys(), key=folder_sort_key):
+            folder_refs = by_folder[pid]
+            folder_iid = f"dp:folder:{pid}"
+            label = podcast_folder_label(
+                pid, layout=layout, podcast_root=podcast_root
+            )
+            ops.append(
+                (
+                    "group",
+                    "",
+                    folder_iid,
+                    label,
+                    ("group", "group_folder"),
+                )
+            )
+            display = resolve_device_tracks_for_display(folder_refs, by_guid)
+            paired = list(zip(folder_refs, display))
+            paired.sort(
+                key=lambda pair: (
+                    (pair[1].meta.title or "").casefold(),
+                    (pair[0].name or "").casefold(),
+                    int(pair[0].item_id or 0),
+                )
+            )
+            for _ref, track in paired:
+                ops.append(("track", folder_iid, track))
+
+        chunks = fibonacci_chunk_bounds(len(ops))
+        if not chunks:
+            return
+
+        def run_chunk(chunk_i: int) -> None:
+            self._device_podcast_populate_after_id = None
+            start, end = chunks[chunk_i]
+            tree = self.win.device_podcasts_tree
+            for i in range(start, end):
+                op = ops[i]
+                if op[0] == "group":
+                    _, parent, iid, label, tags = op
+                    if not tree.exists(iid):
+                        tree.insert(
+                            parent,
+                            "end",
+                            iid=iid,
+                            text="",
+                            values=(label, "", "", ""),
+                            tags=tags,
+                            open=True,
+                        )
+                else:
+                    _, parent, track = op
+                    self._insert_device_podcast_row(parent, track)
+            nxt = chunk_i + 1
+            if nxt < len(chunks):
+                self._device_podcast_populate_after_id = self.win.root.after(
+                    1, lambda i=nxt: run_chunk(i)
+                )
+
+        run_chunk(0)
+
     def _start_device_background_album_art(self) -> None:
         pending = list(self._device_pending_album_art)
         if not pending:
@@ -3883,6 +4580,7 @@ class AppController:
             music_merged = _merge(self._device_music_refs)
             ab_merged = _merge(self._device_audiobook_refs)
             video_merged = _merge(self._device_video_refs)
+            podcast_merged = _merge(self._device_podcast_refs)
             # Re-partition audio after tags (genre may have arrived).
             audio_merged = list(music_merged) + list(ab_merged)
             audio_by_guid = self._host_tracks_by_guid_for_refs(audio_merged)
@@ -3892,11 +4590,14 @@ class AppController:
             self._device_music_refs = music_merged
             self._device_audiobook_refs = ab_merged
             self._device_video_refs = video_merged
+            self._device_podcast_refs = podcast_merged
             video_by_guid = self._host_tracks_by_guid_for_refs(video_merged)
+            podcast_by_guid = self._host_tracks_by_guid_for_refs(podcast_merged)
             # Do not re-trigger enrich after this pass.
             self._rebuild_device_music_tree(music_merged, audio_by_guid)
             self._rebuild_device_audiobooks_tree(ab_merged, audio_by_guid)
             self._rebuild_device_video_tree(video_merged, video_by_guid)
+            self._rebuild_device_podcasts_tree(podcast_merged, podcast_by_guid)
             logger.info(
                 "Device media tags enriched updated=%s failed=%s aborted=%s",
                 result.updated,
@@ -4381,12 +5082,21 @@ class AppController:
         device = self.device
 
         def work():
-            # Folders first (cheap): name → Music/Video/TV object ids for this
-            # firmware, then full file listing for the durable inventory.
-            layout = device_ops.resolve_folder_layout(device)
+            # Folders first (cheap): name → Music/Video/TV/ZENcast object ids
+            # for this firmware, parent map for podcast show folders, then
+            # full file listing for the durable inventory.
+            folders = device_ops.list_folders(device)
+            from mtpmanager.domain.device_folders import resolve_device_folder_layout
+
+            layout = resolve_device_folder_layout(folders)
+            parent_map = {
+                int(f.folder_id): int(f.parent_id or 0)
+                for f in (folders or [])
+                if int(getattr(f, "folder_id", 0) or 0) > 0
+            }
             files = device_ops.list_files(device)
             n = replace_device_listing(serial, files, source="list")
-            return {"layout": layout, "files": n}
+            return {"layout": layout, "folder_parents": parent_map, "files": n}
 
         def on_done(result) -> None:
             self._device_index_seed_inflight = False
@@ -4399,15 +5109,22 @@ class AppController:
             if isinstance(result, dict):
                 layout = result.get("layout")
                 n = int(result.get("files") or 0)
+                parents = result.get("folder_parents") or {}
+                if isinstance(parents, dict):
+                    self._folder_parent_by_id = {
+                        int(k): int(v) for k, v in parents.items()
+                    }
             if layout is not None:
                 self._apply_folder_layout(layout)
             logger.info(
-                "Device index seeded serial=%s files=%s music_folder=%s",
+                "Device index seeded serial=%s files=%s music_folder=%s "
+                "podcast_folder=%s",
                 serial,
                 n,
                 self._music_folder_id(),
+                self._podcast_folder_id(),
             )
-            # Populate Device → Music (GUID join; optional tag enrich after quiet).
+            # Populate Device media trees (GUID join; optional tag enrich).
             self._refresh_device_music_tree(enrich_missing_tags=True)
 
         def on_error(exc: BaseException) -> None:
@@ -5609,11 +6326,14 @@ class AppController:
             return
         serial = self._device_serial or device_serial_key()
         _, ext = os.path.splitext(send_path)
-        music_parent = self._music_folder_id()
+        # Podcast audio uses ZENcast parent; music uses Music folder.
+        job = self._active_sync_job
+        is_podcast = bool(job and getattr(job, "kind", "") == "podcast")
+        parent = self._podcast_folder_id() if is_podcast else self._music_folder_id()
         remote = build_remote_path(
             TrackMetadata(),
             ext or ".mp3",
-            music_folder_id=music_parent,
+            music_folder_id=parent,
             guid=guid,
         )
         _, basename = split_remote_path(remote)
@@ -5623,13 +6343,26 @@ class AppController:
                 remote_name=basename,
                 guid=guid,
                 item_id=object_id,
-                parent_id=music_parent,
+                parent_id=parent,
                 storage_id=DEFAULT_STORAGE_ID,
             )
             # Debounced rebuild from cache (many sends in a batch).
             self._schedule_device_music_tree_refresh(enrich_missing_tags=False)
         except Exception:
             logger.debug("device_index record_send failed", exc_info=True)
+        # Optional: drop host cache after successful podcast audio sync.
+        if is_podcast and not self._config.keep_downloaded_podcasts:
+            try:
+                from mtpmanager.infra.podcast_index import get_episode_by_guid
+
+                ep = get_episode_by_guid(guid)
+                if ep is not None:
+                    discard_episode_local_files(ep)
+            except Exception:
+                logger.debug(
+                    "discard podcast download after audio send failed",
+                    exc_info=True,
+                )
 
     @staticmethod
     def _enrich_device_tracks_from_index(refs: list):
@@ -7132,6 +7865,8 @@ class AppController:
             return self._device_video_track_by_iid
         if tree is self.win.device_audiobooks_tree:
             return self._device_audiobook_track_by_iid
+        if tree is self.win.device_podcasts_tree:
+            return self._device_podcast_track_by_iid
         return self._device_track_by_iid
 
     def _device_refs_by_item_id(self) -> dict[int, DeviceTrackRef]:
@@ -7140,6 +7875,7 @@ class AppController:
             self._device_music_refs,
             self._device_video_refs,
             self._device_audiobook_refs,
+            self._device_podcast_refs,
         ):
             for ref in refs or ():
                 oid = int(getattr(ref, "item_id", 0) or 0)
