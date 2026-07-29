@@ -111,6 +111,21 @@ def load_more_episodes(
     return refreshed, n
 
 
+def refresh_podcast(
+    podcast_id: int,
+    *,
+    path: Path | None = None,
+) -> tuple[Podcast, int]:
+    """Manual refresh: re-fetch the RSS feed, update show metadata, add new episodes.
+
+    Processes every item in the current feed document (publisher-bounded list)
+    and inserts any not already in the index. Returns (podcast, new_count).
+    """
+    return load_more_episodes(
+        podcast_id, count=0, full_history=True, path=path
+    )
+
+
 def download_episode(
     episode: PodcastEpisode,
     *,
