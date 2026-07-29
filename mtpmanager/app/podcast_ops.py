@@ -50,11 +50,18 @@ MORE_EPISODE_STEP = 10
 
 @dataclass
 class PodcastVideoJob:
-    """Downloaded video enclosure ready to encode/send under ZENcast."""
+    """Media ready to encode/send under ZENcast as device video.
+
+    *local_path* is either a real video enclosure, or (when *from_audio_still*)
+    a downloaded audio file that will be muxed with a still image.
+    """
 
     episode: PodcastEpisode
     podcast: Podcast
     local_path: str
+    # Experimental: audio enclosure + show artwork (or black) → still XviD.
+    from_audio_still: bool = False
+    image_path: str = ""
 
 
 @dataclass
@@ -375,12 +382,68 @@ def pick_latest_not_on_device(
     return None
 
 
+def ensure_podcast_artwork(
+    podcast: Podcast,
+    *,
+    data_dir: Path | None = None,
+) -> str | None:
+    """Download show artwork into the podcast cache; return local path or None.
+
+    Used as the single video frame when syncing audio podcasts as still video.
+    """
+    url = (podcast.image_url or "").strip()
+    if not url:
+        return None
+    cache = episode_cache_dir(podcast.id, data_dir=data_dir)
+    for existing in sorted(cache.glob("artwork.*")):
+        try:
+            if existing.is_file() and existing.stat().st_size > 0:
+                return str(existing)
+        except OSError:
+            continue
+    # Guess extension from URL path; default jpeg.
+    path_l = (urlparse(url).path or "").lower()
+    ext = ".jpg"
+    for cand in (".jpg", ".jpeg", ".png", ".webp", ".gif"):
+        if path_l.endswith(cand):
+            ext = ".jpg" if cand == ".jpeg" else cand
+            break
+    dest = cache / f"artwork{ext}"
+    try:
+        logger.info(
+            "Downloading podcast artwork podcast_id=%s → %s",
+            podcast.id,
+            dest,
+        )
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": "MtpManager/1.0 (podcast artwork)"},
+            method="GET",
+        )
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            data = resp.read()
+        if not data:
+            logger.warning("Empty podcast artwork for id=%s", podcast.id)
+            return None
+        dest.write_bytes(data)
+        return str(dest)
+    except Exception as e:
+        logger.warning(
+            "Could not download podcast artwork id=%s url=%s: %s",
+            podcast.id,
+            url,
+            e,
+        )
+        return None
+
+
 def prepare_episodes_for_sync(
     episodes: Sequence[PodcastEpisode],
     *,
     path: Path | None = None,
     data_dir: Path | None = None,
     allow_video: bool = False,
+    audio_as_video: bool = False,
     target_audio_format: str = "mp3",
 ) -> PodcastSyncPrep:
     """Download missing media; return audio tracks and optional video jobs.
@@ -388,9 +451,14 @@ def prepare_episodes_for_sync(
     When *allow_video* is False (default), always produce audio (extract from
     video-only episodes). When True, video episodes become :class:`PodcastVideoJob`
     entries for ZENcast video send (caller encodes XviD for ZEN Vision:M).
+
+    When *audio_as_video* is True (experimental), non-video episodes become
+    still-image video jobs (artwork or black + audio) so they can land under
+    ZENcast on devices that only list video there.
     """
     prep = PodcastSyncPrep()
     podcast_cache: dict[int, Podcast] = {}
+    artwork_cache: dict[int, str | None] = {}
     for ep in episodes:
         show = podcast_cache.get(ep.podcast_id)
         if show is None:
@@ -416,6 +484,29 @@ def prepare_episodes_for_sync(
                 prep.video_jobs.append(
                     PodcastVideoJob(
                         episode=ready, podcast=show, local_path=ready.local_path
+                    )
+                )
+            elif audio_as_video:
+                ready = ensure_episode_audio_file(
+                    ep,
+                    path=path,
+                    data_dir=data_dir,
+                    target_format=target_audio_format,
+                )
+                if not ready.local_path or not os.path.isfile(ready.local_path):
+                    raise FileNotFoundError("audio download missing")
+                if show.id not in artwork_cache:
+                    artwork_cache[show.id] = ensure_podcast_artwork(
+                        show, data_dir=data_dir
+                    )
+                art = artwork_cache.get(show.id) or ""
+                prep.video_jobs.append(
+                    PodcastVideoJob(
+                        episode=ready,
+                        podcast=show,
+                        local_path=ready.local_path,
+                        from_audio_still=True,
+                        image_path=art,
                     )
                 )
             else:
@@ -605,6 +696,9 @@ def send_podcast_video_to_zencast(
     encode_for_device: bool = True,
     on_progress=None,
     keep_download: bool = True,
+    still_fps: float | None = None,
+    still_width: int | None = None,
+    still_height: int | None = None,
 ) -> PodcastVideoSendResult:
     """Encode and send podcast video via the same path as library Send Video.
 
@@ -615,11 +709,17 @@ def send_podcast_video_to_zencast(
     - *parent_id* is ZENcast / show folder (``allowed_parents=None``).
     - ObjectFileName is the episode title (+ container).
     - Optional durable ``{guid}_device.avi`` when *keep_download* is on.
+    - *from_audio_still* jobs: still image (artwork or black) + audio → XviD.
 
     Host GUID is returned for device-index skip-if-present only (never wire).
     """
     from mtpmanager.app.device_ops import prepare_and_send_video
-    from mtpmanager.infra.ffmpeg_video import convert_video_for_profile
+    from mtpmanager.infra.ffmpeg_video import (
+        cleanup_video_temp,
+        convert_audio_still_to_video_for_profile,
+        convert_video_for_profile,
+        default_temp_video_path,
+    )
 
     src = job.local_path
     if not src or not os.path.isfile(src):
@@ -632,78 +732,151 @@ def send_podcast_video_to_zencast(
     ep = job.episode
     title = (ep.title or "Episode").strip() or "Episode"
     host_guid = ep.guid if is_track_guid(ep.guid) else ""
+    still = bool(job.from_audio_still)
+
+    if still and encode_profile is None:
+        raise ValueError(
+            "Audio-as-video podcasts need a device video encode profile"
+        )
 
     do_encode = bool(encode_for_device and encode_profile is not None)
     send_src = src
-    # When keeping downloads, encode once into the cache so the kept file is
-    # exactly what we send (same convert_video_for_profile as library).
-    if do_encode and keep_download and host_guid:
-        cont = encode_profile.container.lstrip(".")
-        kept = episode_cache_dir(ep.podcast_id) / f"{host_guid}_device.{cont}"
+    temp_to_clean: str | None = None
 
-        def _enc_progress(done: float, total: float, msg: str) -> None:
-            if on_progress is None:
-                return
-            try:
-                if total and total > 0:
-                    pct = int(min(85, max(0, (done / total) * 85)))
-                    on_progress("progress", pct, 100, msg)
-                else:
-                    on_progress("status", msg)
-            except Exception:
-                logger.debug("podcast video progress failed", exc_info=True)
+    def _enc_progress(done: float, total: float, msg: str) -> None:
+        if on_progress is None:
+            return
+        try:
+            if total and total > 0:
+                pct = int(min(85, max(0, (done / total) * 85)))
+                on_progress("progress", pct, 100, msg)
+            else:
+                on_progress("status", msg)
+        except Exception:
+            logger.debug("podcast video progress failed", exc_info=True)
 
-        if on_progress is not None:
-            try:
-                on_progress("phase", "transcode")
-                on_progress("progress", 0, 100, "encoding podcast video…")
-            except Exception:
-                pass
-        convert_video_for_profile(
-            src,
-            encode_profile,
-            dest_path=str(kept),
-            on_progress=_enc_progress,
-        )
+    def _start_transcode(status: str) -> None:
+        if on_progress is None:
+            return
+        try:
+            on_progress("phase", "transcode")
+            on_progress("progress", 0, 100, status)
+        except Exception:
+            pass
+
+    try:
+        # Still-from-audio: always pre-encode (source is not a video file).
+        if still:
+            cont = encode_profile.container.lstrip(".")
+            if keep_download and host_guid:
+                out_path = str(
+                    episode_cache_dir(ep.podcast_id)
+                    / f"{host_guid}_device.{cont}"
+                )
+            else:
+                out_path = default_temp_video_path(encode_profile)
+                temp_to_clean = out_path
+            _start_transcode("encoding still-image podcast…")
+            image = (job.image_path or "").strip() or None
+            from mtpmanager.infra.app_config import (
+                DEFAULT_AUDIO_PODCAST_STILL_FPS,
+                DEFAULT_AUDIO_PODCAST_STILL_HEIGHT,
+                DEFAULT_AUDIO_PODCAST_STILL_WIDTH,
+                normalize_still_fps,
+                normalize_still_frame_size,
+            )
+
+            fps = normalize_still_fps(
+                still_fps
+                if still_fps is not None
+                else DEFAULT_AUDIO_PODCAST_STILL_FPS
+            )
+            fw, fh = normalize_still_frame_size(
+                still_width
+                if still_width is not None
+                else DEFAULT_AUDIO_PODCAST_STILL_WIDTH,
+                still_height
+                if still_height is not None
+                else DEFAULT_AUDIO_PODCAST_STILL_HEIGHT,
+            )
+            convert_audio_still_to_video_for_profile(
+                src,
+                encode_profile,
+                image_path=image,
+                dest_path=out_path,
+                on_progress=_enc_progress,
+                still_fps=fps,
+                width=fw,
+                height=fh,
+            )
+            logger.info(
+                "Podcast audio-still device encode: %s (audio=%s image=%s "
+                "fps=%g frame=%dx%d)",
+                out_path,
+                src,
+                image or "(black)",
+                fps,
+                fw,
+                fh,
+            )
+            send_src = out_path
+            do_encode = False
+        elif do_encode and keep_download and host_guid:
+            # Real video: encode once into the cache for inspect/resend.
+            cont = encode_profile.container.lstrip(".")
+            kept = episode_cache_dir(ep.podcast_id) / f"{host_guid}_device.{cont}"
+            _start_transcode("encoding podcast video…")
+            convert_video_for_profile(
+                src,
+                encode_profile,
+                dest_path=str(kept),
+                on_progress=_enc_progress,
+            )
+            logger.info(
+                "Podcast video device encode kept for inspect: %s (source=%s)",
+                kept,
+                src,
+            )
+            send_src = str(kept)
+            do_encode = False  # already device AVI; send as-is
+
+        if encode_profile is not None and (
+            still or encode_for_device or send_src != src
+        ):
+            ext = f".{encode_profile.container.lstrip('.')}"
+        else:
+            _, src_ext = os.path.splitext(send_src)
+            ext = src_ext or ".avi"
+        preferred = podcast_video_object_basename(title, container_ext=ext)
+
         logger.info(
-            "Podcast video device encode kept for inspect: %s (source=%s)",
-            kept,
-            src,
+            "Podcast video → prepare_and_send_video parent=%s title=%r "
+            "src=%s encode=%s still=%s guid_index=%s",
+            parent,
+            title,
+            send_src,
+            do_encode,
+            still,
+            host_guid or "—",
         )
-        send_src = str(kept)
-        do_encode = False  # already XviD-padded; send as-is like library skip
-
-    if encode_for_device and encode_profile is not None:
-        ext = f".{encode_profile.container.lstrip('.')}"
-    else:
-        _, src_ext = os.path.splitext(send_src)
-        ext = src_ext or ".avi"
-    preferred = podcast_video_object_basename(title, container_ext=ext)
-
-    logger.info(
-        "Podcast video → prepare_and_send_video parent=%s title=%r "
-        "src=%s encode=%s guid_index=%s",
-        parent,
-        title,
-        send_src,
-        do_encode,
-        host_guid or "—",
-    )
-    result = prepare_and_send_video(
-        transport,
-        send_src,
-        parent_id=parent,
-        encode_profile=encode_profile,
-        encode_for_device=do_encode,
-        on_progress=on_progress,
-        title=title,
-        preferred_basename=preferred,
-        guid=host_guid or None,
-        allowed_parents=None,  # ZENcast / show folder — not Video/TV only
-    )
-    return PodcastVideoSendResult(
-        object_id=int(result.object_id or 0),
-        parent_id=int(result.parent_id),
-        remote_basename=result.remote_basename,
-        guid=host_guid,
-    )
+        result = prepare_and_send_video(
+            transport,
+            send_src,
+            parent_id=parent,
+            encode_profile=encode_profile,
+            encode_for_device=do_encode,
+            on_progress=on_progress,
+            title=title,
+            preferred_basename=preferred,
+            guid=host_guid or None,
+            allowed_parents=None,  # ZENcast / show folder — not Video/TV only
+        )
+        return PodcastVideoSendResult(
+            object_id=int(result.object_id or 0),
+            parent_id=int(result.parent_id),
+            remote_basename=result.remote_basename,
+            guid=host_guid,
+        )
+    finally:
+        if temp_to_clean:
+            cleanup_video_temp(temp_to_clean)

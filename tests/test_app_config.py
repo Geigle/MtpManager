@@ -26,6 +26,10 @@ class AppConfigTests(unittest.TestCase):
             self.assertFalse(cfg.always_show_playback_controls)
             self.assertFalse(cfg.store_podcasts_in_show_folders)
             self.assertFalse(cfg.allow_video_podcasts_to_sync)
+            self.assertFalse(cfg.sync_audio_podcasts_as_video)
+            self.assertEqual(cfg.audio_podcast_still_fps, 2.0)
+            self.assertEqual(cfg.audio_podcast_still_width, 128)
+            self.assertEqual(cfg.audio_podcast_still_height, 96)
             self.assertTrue(cfg.keep_downloaded_podcasts)
             self.assertEqual(cfg.active_mode(), "experimental")
 
@@ -41,6 +45,10 @@ class AppConfigTests(unittest.TestCase):
                     show_broken_video_presets=True,
                     always_show_playback_controls=True,
                     allow_video_podcasts_to_sync=True,
+                    sync_audio_podcasts_as_video=True,
+                    audio_podcast_still_fps=2.0,
+                    audio_podcast_still_width=128,
+                    audio_podcast_still_height=96,
                     keep_downloaded_podcasts=False,
                 ),
                 path=dest,
@@ -53,6 +61,10 @@ class AppConfigTests(unittest.TestCase):
             self.assertTrue(loaded.show_broken_video_presets)
             self.assertTrue(loaded.always_show_playback_controls)
             self.assertTrue(loaded.allow_video_podcasts_to_sync)
+            self.assertTrue(loaded.sync_audio_podcasts_as_video)
+            self.assertEqual(loaded.audio_podcast_still_fps, 2.0)
+            self.assertEqual(loaded.audio_podcast_still_width, 128)
+            self.assertEqual(loaded.audio_podcast_still_height, 96)
             self.assertFalse(loaded.keep_downloaded_podcasts)
             self.assertEqual(loaded.active_mode(), "stable")
             data = json.loads(dest.read_text(encoding="utf-8"))
@@ -63,6 +75,10 @@ class AppConfigTests(unittest.TestCase):
             self.assertTrue(data["show_broken_video_presets"])
             self.assertTrue(data["always_show_playback_controls"])
             self.assertTrue(data["allow_video_podcasts_to_sync"])
+            self.assertTrue(data["sync_audio_podcasts_as_video"])
+            self.assertEqual(data["audio_podcast_still_fps"], 2.0)
+            self.assertEqual(data["audio_podcast_still_width"], 128)
+            self.assertEqual(data["audio_podcast_still_height"], 96)
             self.assertFalse(data["keep_downloaded_podcasts"])
 
     def test_album_folder_requires_artist_folder(self) -> None:

@@ -350,6 +350,7 @@ class AppController:
             on_album_folders_toggle=self.on_album_folders_toggle,
             on_podcast_folders_toggle=self.on_podcast_folders_toggle,
             on_allow_video_podcasts_toggle=self.on_allow_video_podcasts_toggle,
+            on_audio_podcasts_as_video_toggle=self.on_audio_podcasts_as_video_toggle,
             on_keep_downloaded_podcasts_toggle=self.on_keep_downloaded_podcasts_toggle,
             on_clear_downloaded_podcasts=self.on_clear_downloaded_podcasts,
             on_reveal_podcast_downloads=self.on_reveal_podcast_downloads,
@@ -363,6 +364,9 @@ class AppController:
         )
         w.var_allow_video_podcasts.set(
             bool(self._config.allow_video_podcasts_to_sync)
+        )
+        w.var_audio_podcasts_as_video.set(
+            bool(self._config.sync_audio_podcasts_as_video)
         )
         w.var_keep_downloaded_podcasts.set(
             bool(self._config.keep_downloaded_podcasts)
@@ -730,6 +734,31 @@ class AppController:
             messagebox.showerror("Config", f"Could not save settings:\n{e}")
             return
         logger.info("Config allow_video_podcasts_to_sync=%s", enabled)
+
+    def on_audio_podcasts_as_video_toggle(self) -> None:
+        """Config → Sync Audio Podcasts as Video (experimental)."""
+        enabled = bool(self.win.var_audio_podcasts_as_video.get())
+        if enabled:
+            messagebox.showinfo(
+                "Audio podcasts as video",
+                "When enabled, audio episodes are encoded as still-image "
+                "XviD plus the episode audio, then sent under ZENcast.\n\n"
+                "ZVM: audio-only podcasts often land under Music (genre "
+                "Podcast); only video appears in ZENcast.\n\n"
+                "Defaults (device-proven): 2 fps · 128×96 (~+9% vs audio). "
+                "1 fps failed. Tune in config.json:\n"
+                "  audio_podcast_still_fps\n"
+                "  audio_podcast_still_width / _height\n\n"
+                "Re-sync rebuilds *_device.avi.",
+            )
+        self._config.sync_audio_podcasts_as_video = enabled
+        try:
+            save_app_config(self._config)
+        except OSError as e:
+            logger.exception("Failed to save sync_audio_podcasts_as_video")
+            messagebox.showerror("Config", f"Could not save settings:\n{e}")
+            return
+        logger.info("Config sync_audio_podcasts_as_video=%s", enabled)
 
     def on_keep_downloaded_podcasts_toggle(self) -> None:
         """Config → Keep downloaded podcasts."""
@@ -1445,6 +1474,7 @@ class AppController:
     def _sync_podcast_episodes(self, episodes: list, *, label: str) -> None:
         """Download enclosures on a worker, then transfer under ZENcast."""
         allow_video = bool(self._config.allow_video_podcasts_to_sync)
+        audio_as_video = bool(self._config.sync_audio_podcasts_as_video)
         self.win.lbl_podcast_status.configure(text="Preparing episodes…")
         self.win.set_progress_status("Downloading podcast media…")
 
@@ -1452,6 +1482,7 @@ class AppController:
             return prepare_episodes_for_sync(
                 episodes,
                 allow_video=allow_video,
+                audio_as_video=audio_as_video,
                 target_audio_format=self._target_format(),
             )
 
@@ -1525,6 +1556,17 @@ class AppController:
         experimental = self.win.active_mode() == "experimental"
         encode_profile = self._podcast_video_encode_profile()
         encode_for_device = encode_profile is not None
+        # Still-from-audio jobs require a device video profile (XviD on ZEN).
+        if any(getattr(j, "from_audio_still", False) for j in video_jobs):
+            if encode_profile is None:
+                messagebox.showerror(
+                    "Podcast",
+                    "Sync Audio Podcasts as Video needs a device video "
+                    "encode profile (Creative ZEN Vision:M).\n\n"
+                    "Connect the device or pick the ZEN profile, then try again.",
+                )
+                return
+            encode_for_device = True
         jobs = list(video_jobs)
         serial = self._device_serial or device_serial_key()
         from mtpmanager.infra.remote_naming import DEFAULT_STORAGE_ID
@@ -1585,6 +1627,9 @@ class AppController:
                     encode_for_device=encode_for_device,
                     on_progress=on_progress,
                     keep_download=bool(self._config.keep_downloaded_podcasts),
+                    still_fps=float(self._config.audio_podcast_still_fps),
+                    still_width=int(self._config.audio_podcast_still_width),
+                    still_height=int(self._config.audio_podcast_still_height),
                 )
                 if not self._config.keep_downloaded_podcasts:
                     try:

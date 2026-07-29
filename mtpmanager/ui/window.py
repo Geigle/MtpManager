@@ -109,6 +109,9 @@ MENU_ARTIST_FOLDERS = "Store tracks in artist folder (experimental)"
 MENU_ALBUM_FOLDERS = "Store tracks in album folder (experimental)"
 MENU_PODCAST_FOLDERS = "Store Podcasts in Identifiable Folders (experimental)"
 MENU_ALLOW_VIDEO_PODCASTS = "Allow video podcasts to Sync"
+MENU_AUDIO_PODCASTS_AS_VIDEO = (
+    "Sync Audio Podcasts as Video (experimental)"
+)
 MENU_KEEP_DOWNLOADED_PODCASTS = "Keep downloaded podcasts"
 MENU_CLEAR_DOWNLOADED_PODCASTS = "Clear downloaded podcasts…"
 MENU_REVEAL_PODCAST_DOWNLOADS = "Reveal podcast downloads folder"
@@ -412,6 +415,7 @@ class MainWindow:
         self.var_album_folders = BooleanVar(value=False)
         self.var_podcast_folders = BooleanVar(value=False)
         self.var_allow_video_podcasts = BooleanVar(value=False)
+        self.var_audio_podcasts_as_video = BooleanVar(value=False)
         self.var_keep_downloaded_podcasts = BooleanVar(value=True)
         self.menu_config = Menu(self.menubar, tearoff=0)
         self.menubar.add_cascade(label="Config", menu=self.menu_config)
@@ -443,6 +447,12 @@ class MainWindow:
         self.menu_config.add_checkbutton(
             label=MENU_ALLOW_VIDEO_PODCASTS,
             variable=self.var_allow_video_podcasts,
+            onvalue=True,
+            offvalue=False,
+        )
+        self.menu_config.add_checkbutton(
+            label=MENU_AUDIO_PODCASTS_AS_VIDEO,
+            variable=self.var_audio_podcasts_as_video,
             onvalue=True,
             offvalue=False,
         )
@@ -1451,6 +1461,7 @@ class MainWindow:
         on_album_folders_toggle=None,
         on_podcast_folders_toggle=None,
         on_allow_video_podcasts_toggle=None,
+        on_audio_podcasts_as_video_toggle=None,
         on_keep_downloaded_podcasts_toggle=None,
         on_clear_downloaded_podcasts=None,
         on_reveal_podcast_downloads=None,
@@ -1476,6 +1487,11 @@ class MainWindow:
             self.menu_config.entryconfig(
                 MENU_ALLOW_VIDEO_PODCASTS,
                 command=on_allow_video_podcasts_toggle,
+            )
+        if on_audio_podcasts_as_video_toggle is not None:
+            self.menu_config.entryconfig(
+                MENU_AUDIO_PODCASTS_AS_VIDEO,
+                command=on_audio_podcasts_as_video_toggle,
             )
         if on_keep_downloaded_podcasts_toggle is not None:
             self.menu_config.entryconfig(

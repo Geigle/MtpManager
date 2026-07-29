@@ -17,6 +17,44 @@ CONFIG_VERSION = 1
 VALID_SEND_FORMATS = frozenset({"mp3", "wma", "wav"})
 DEFAULT_SEND_FORMAT = "mp3"
 
+# Audio→still-video (ZVM ZENcast). Proven on device: 2 fps · 128×96 (~4:3).
+# 1 fps failed; 15 fps · 640×480 worked but was large (+110% vs audio).
+DEFAULT_AUDIO_PODCAST_STILL_FPS = 2.0
+DEFAULT_AUDIO_PODCAST_STILL_WIDTH = 128
+DEFAULT_AUDIO_PODCAST_STILL_HEIGHT = 96
+
+
+def normalize_still_frame_size(width: int, height: int) -> tuple[int, int]:
+    """Positive even dimensions (MPEG-4-friendly); minimum 16×16."""
+    try:
+        w = int(width)
+    except (TypeError, ValueError):
+        w = DEFAULT_AUDIO_PODCAST_STILL_WIDTH
+    try:
+        h = int(height)
+    except (TypeError, ValueError):
+        h = DEFAULT_AUDIO_PODCAST_STILL_HEIGHT
+    w = max(16, w)
+    h = max(16, h)
+    # Even (yuv420); prefer multiples of 16 when already close.
+    if w % 2:
+        w += 1
+    if h % 2:
+        h += 1
+    return w, h
+
+
+def normalize_still_fps(value: object) -> float:
+    """Positive still frame rate; default when missing/invalid."""
+    try:
+        fps = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return DEFAULT_AUDIO_PODCAST_STILL_FPS
+    if fps <= 0:
+        return DEFAULT_AUDIO_PODCAST_STILL_FPS
+    # Cap absurd values; ZEN video max is ~30.
+    return min(fps, 60.0)
+
 
 @dataclass
 class AppConfig:
@@ -38,11 +76,17 @@ class AppConfig:
     # When True, video podcast episodes sync as video (XviD on ZEN) under ZENcast.
     # Default off: video-only items extract audio; dual feeds prefer audio enclosure.
     allow_video_podcasts_to_sync: bool = False
+    # When True, audio podcasts are muxed as still-image XviD video under ZENcast
+    # (ZVM experiment: only video objects appear in ZENcast; audio lands in Music).
+    sync_audio_podcasts_as_video: bool = False
+    # Still-video ladder (edit config.json to binary-search the ZVM floor).
+    audio_podcast_still_fps: float = DEFAULT_AUDIO_PODCAST_STILL_FPS
+    audio_podcast_still_width: int = DEFAULT_AUDIO_PODCAST_STILL_WIDTH
+    audio_podcast_still_height: int = DEFAULT_AUDIO_PODCAST_STILL_HEIGHT
     # When True (default), keep enclosure/encode files under data/podcasts/.
     # When False, delete local copies after a successful sync of that episode.
     keep_downloaded_podcasts: bool = True
     version: int = CONFIG_VERSION
-
     def normalized_send_format(self) -> str:
         fmt = (self.send_format or DEFAULT_SEND_FORMAT).lower().lstrip(".")
         if fmt not in VALID_SEND_FORMATS:
@@ -106,11 +150,25 @@ def load_app_config(*, path: Path | None = None) -> AppConfig:
         allow_video_podcasts_to_sync=_as_bool(
             raw.get("allow_video_podcasts_to_sync"), False
         ),
+        sync_audio_podcasts_as_video=_as_bool(
+            raw.get("sync_audio_podcasts_as_video"), False
+        ),
+        audio_podcast_still_fps=normalize_still_fps(
+            raw.get("audio_podcast_still_fps", DEFAULT_AUDIO_PODCAST_STILL_FPS)
+        ),
+        audio_podcast_still_width=DEFAULT_AUDIO_PODCAST_STILL_WIDTH,
+        audio_podcast_still_height=DEFAULT_AUDIO_PODCAST_STILL_HEIGHT,
         keep_downloaded_podcasts=_as_bool(
             raw.get("keep_downloaded_podcasts"), True
         ),
         version=int(raw.get("version", CONFIG_VERSION) or CONFIG_VERSION),
     )
+    sw, sh = normalize_still_frame_size(
+        raw.get("audio_podcast_still_width", DEFAULT_AUDIO_PODCAST_STILL_WIDTH),
+        raw.get("audio_podcast_still_height", DEFAULT_AUDIO_PODCAST_STILL_HEIGHT),
+    )
+    cfg.audio_podcast_still_width = sw
+    cfg.audio_podcast_still_height = sh
     cfg.send_format = cfg.normalized_send_format()
     return cfg
 
@@ -137,6 +195,18 @@ def save_app_config(config: AppConfig, *, path: Path | None = None) -> Path:
         "allow_video_podcasts_to_sync": bool(
             config.allow_video_podcasts_to_sync
         ),
+        "sync_audio_podcasts_as_video": bool(
+            config.sync_audio_podcasts_as_video
+        ),
+        "audio_podcast_still_fps": normalize_still_fps(
+            config.audio_podcast_still_fps
+        ),
+        "audio_podcast_still_width": normalize_still_frame_size(
+            config.audio_podcast_still_width, config.audio_podcast_still_height
+        )[0],
+        "audio_podcast_still_height": normalize_still_frame_size(
+            config.audio_podcast_still_width, config.audio_podcast_still_height
+        )[1],
         "keep_downloaded_podcasts": bool(config.keep_downloaded_podcasts),
     }
     text = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
