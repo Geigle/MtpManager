@@ -25,6 +25,7 @@ from mtpmanager.app.podcast_ops import (
     load_more_episodes,
     pick_latest_not_on_device,
     prepare_episodes_for_sync,
+    refresh_podcast,
     subscribe_feed,
 )
 from mtpmanager.app.scan_library import scan_library, scan_library_roots
@@ -346,6 +347,7 @@ class AppController:
         w.set_podcast_tab_commands(
             on_add=self.on_podcast_add,
             on_remove=self.on_podcast_remove,
+            on_refresh=self.on_podcast_refresh,
             on_more=None,  # handled via Shift-aware Button-1 bind below
             on_sync_latest=self.on_podcast_sync_latest_all,
             on_show_select=self.on_podcast_show_select,
@@ -712,6 +714,9 @@ class AppController:
             self.win.btn_podcast_remove.configure(
                 state=NORMAL if has else DISABLED
             )
+            self.win.btn_podcast_refresh.configure(
+                state=NORMAL if has else DISABLED
+            )
             self.win.btn_podcast_sync_latest.configure(
                 state=NORMAL if has else DISABLED
             )
@@ -964,6 +969,74 @@ class AppController:
             delete_podcast(pid)
         self._selected_podcast_id = None
         self._refresh_podcast_tab()
+
+    def on_podcast_refresh(self) -> None:
+        """Re-fetch RSS for selected show(s) (or the active show) and add new episodes."""
+        ids = self._selected_podcast_ids()
+        if not ids and self._selected_podcast_id is not None:
+            ids = [self._selected_podcast_id]
+        if not ids and self._podcast_ids:
+            # No selection: refresh all subscriptions.
+            ids = list(self._podcast_ids)
+        if not ids:
+            messagebox.showinfo("Podcast", "No podcasts to refresh.")
+            return
+        self.win.lbl_podcast_status.configure(text="Refreshing feed(s)…")
+        try:
+            self.win.btn_podcast_refresh.configure(state=DISABLED)
+        except Exception:
+            pass
+
+        def work() -> list[tuple[int, int, str]]:
+            # (podcast_id, new_count, title)
+            out: list[tuple[int, int, str]] = []
+            for pid in ids:
+                podcast, n = refresh_podcast(pid)
+                out.append((pid, n, podcast.title or f"#{pid}"))
+            return out
+
+        def on_done(results: list) -> None:
+            try:
+                self.win.btn_podcast_refresh.configure(state=NORMAL)
+            except Exception:
+                pass
+            total_new = sum(int(n) for _pid, n, _t in results)
+            # Keep selection; reload episode list for the active show.
+            self._refresh_podcast_tab()
+            if self._selected_podcast_id is not None:
+                self._load_podcast_episodes(self._selected_podcast_id)
+            if len(results) == 1:
+                _pid, n, title = results[0]
+                msg = (
+                    f"Refreshed “{title}”: {n} new episode(s)."
+                    if n
+                    else f"Refreshed “{title}”: no new episodes."
+                )
+            else:
+                msg = (
+                    f"Refreshed {len(results)} podcast(s): "
+                    f"{total_new} new episode(s) total."
+                )
+            try:
+                self.win.lbl_podcast_status.configure(text=msg)
+            except Exception:
+                pass
+
+        def on_error(exc: BaseException) -> None:
+            try:
+                self.win.btn_podcast_refresh.configure(state=NORMAL)
+            except Exception:
+                pass
+            try:
+                self.win.lbl_podcast_status.configure(text="")
+            except Exception:
+                pass
+            logger.exception("podcast refresh failed")
+            messagebox.showerror("Podcast", f"Could not refresh feed:\n{exc}")
+
+        self._bg.submit(
+            work, on_done=on_done, on_error=on_error, name="podcast-refresh"
+        )
 
     def _on_podcast_more_click(self, event) -> None:
         """More Episodes: Shift+click → full history with warning."""

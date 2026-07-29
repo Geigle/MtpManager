@@ -781,7 +781,12 @@ class MainWindow:
         self.btn_podcast_remove = Button(
             pod_sub_btns, text="−", width=3, state=DISABLED
         )
-        self.btn_podcast_remove.pack(side=TOP)
+        self.btn_podcast_remove.pack(side=TOP, pady=(0, 4))
+        # Manual re-fetch of selected show feed(s) for new episodes.
+        self.btn_podcast_refresh = Button(
+            pod_sub_btns, text="↻", width=3, state=DISABLED
+        )
+        self.btn_podcast_refresh.pack(side=TOP)
 
         pod_ep_header = Frame(pod_outer)
         pod_ep_header.pack(side=TOP, fill=X, pady=(8, 2))
@@ -1389,6 +1394,7 @@ class MainWindow:
         *,
         on_add=None,
         on_remove=None,
+        on_refresh=None,
         on_more=None,
         on_sync_latest=None,
         on_show_select=None,
@@ -1401,6 +1407,8 @@ class MainWindow:
             self.btn_podcast_add.configure(command=on_add)
         if on_remove is not None:
             self.btn_podcast_remove.configure(command=on_remove)
+        if on_refresh is not None:
+            self.btn_podcast_refresh.configure(command=on_refresh)
         if on_more is not None:
             self.btn_podcast_more.configure(command=on_more)
         if on_sync_latest is not None:
