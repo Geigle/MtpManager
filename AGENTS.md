@@ -51,6 +51,7 @@ Do **not**:
 | Transcode → send pipeline, batch abort | `mtpmanager/app/transfer.py` |
 | Live batch queue (append mid-job) | `mtpmanager/app/transfer_queue.py` + controllers `_enqueue_tracks` |
 | UI actions, mode, recovery dialogs | `mtpmanager/ui/controllers.py`, `window.py`, `dialogs.py` (incl. Manage Library) |
+| Exclusive MTP/USB ownership (auto-connect vs sync) | `mtpmanager/app/device_io_gate.py` + poll/transfer/seed paths in `ui/controllers.py` |
 | Artist/album selection | `mtpmanager/domain/library.py` |
 | Scan / tags | `app/scan_library.py`, `infra/mutagen_tags.py` |
 | Album art thumbs | `infra/album_art.py` (mutagen + Pillow; album header rows only) |

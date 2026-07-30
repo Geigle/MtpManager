@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 import os
 import threading
-import time
 from collections.abc import Callable
 from tkinter import DISABLED, NORMAL, filedialog, messagebox
 
@@ -13,6 +12,7 @@ from mtpmanager.app import device_ops
 from mtpmanager.app import retail_ops
 from mtpmanager.app.artist_folders import ensure_album_folder, ensure_artist_folder
 from mtpmanager.app.cancellation import JobCancelled
+from mtpmanager.app.device_io_gate import DEFAULT_USB_QUIET_S, DeviceIoGate
 from mtpmanager.app.playlist_device import (
     ordered_guids_from_tracks,
     playlists_parent_id,
@@ -216,8 +216,8 @@ def fibonacci_chunk_bounds(
 # Experimental auto-connect poll interval (ms).
 _DEVICE_POLL_MS = 3000
 # After a heavy USB job (listing/transfer), skip probes so a recovering
-# ZEN session is not torn down by get_modelname / get_device_info.
-_DEVICE_USB_COOLDOWN_S = 12.0
+# ZEN session is not torn down by Get_Storage / identity walks.
+_DEVICE_USB_COOLDOWN_S = DEFAULT_USB_QUIET_S
 # Consecutive soft probe failures before disconnect/reconnect.
 _DEVICE_PROBE_FAIL_LIMIT = 2
 
@@ -250,10 +250,9 @@ class AppController:
         self._device_populate_after_id: str | None = None
         self._device_poll_after_id: str | None = None
         self._device_poll_gen = 0
-        self._device_connect_inflight = False
         self._logged_no_device = False
-        # monotonic deadline: auto-connect must not touch USB until then
-        self._usb_quiet_until = 0.0
+        # Exclusive MTP/USB ownership (poll, transfer, seed, enrich, meta).
+        self._device_io = DeviceIoGate(quiet_after_s=_DEVICE_USB_COOLDOWN_S)
         self._device_probe_fails = 0
         # When False, experimental poll is stopped until Device → Connect.
         self._device_auto_reconnect = True
@@ -2058,7 +2057,11 @@ class AppController:
             return
         if not self.device.is_connected():
             return
-        if self._transfer_busy or self._file_meta_probe_inflight:
+        if (
+            self._transfer_busy
+            or self._file_meta_probe_inflight
+            or self._device_io.is_held()
+        ):
             return
         try:
             sel = list(tree.selection())
@@ -2136,18 +2139,28 @@ class AppController:
             return
         if not self._require_device_ready():
             return
+        if not self._device_io.try_acquire("embedded-meta"):
+            messagebox.showinfo(
+                "Fetch file metadata",
+                "The device is busy with another USB operation. Try again "
+                "in a moment.",
+            )
+            return
 
         oid = int(ref.item_id or 0)
         self._file_meta_probe_inflight = True
         device = self.device
         batch_ref = ref
+        gate_reason = "embedded-meta"
 
         def work():
             return device_ops.probe_embedded_metadata(device, batch_ref)
 
         def on_done(result) -> None:
             self._file_meta_probe_inflight = False
-            self._mark_usb_quiet(_DEVICE_USB_COOLDOWN_S)
+            self._device_io.release(
+                reason=gate_reason, quiet_s=_DEVICE_USB_COOLDOWN_S
+            )
             try:
                 self.win.set_progress_status("")
             except Exception:
@@ -2195,7 +2208,9 @@ class AppController:
 
         def on_error(exc: BaseException) -> None:
             self._file_meta_probe_inflight = False
-            self._mark_usb_quiet(_DEVICE_USB_COOLDOWN_S)
+            self._device_io.release(
+                reason=gate_reason, quiet_s=_DEVICE_USB_COOLDOWN_S
+            )
             try:
                 self.win.set_progress_status("")
             except Exception:
@@ -4082,9 +4097,7 @@ class AppController:
                 seen.add(oid)
                 need.append(ref)
             if need and self.device.is_connected() and not self._device_tag_enrich_inflight:
-                remaining_ms = int(
-                    max(0.0, self._usb_quiet_until - time.monotonic()) * 1000
-                )
+                remaining_ms = int(self._device_io.quiet_remaining_s() * 1000)
                 delay_ms = max(remaining_ms, 500)
 
                 def _later() -> None:
@@ -4546,10 +4559,12 @@ class AppController:
             return
         if not self.device.is_connected():
             return
-        # Avoid racing another transfer/listing job hard; enrich is best-effort.
-        if self._transfer_busy or self._library_busy:
+        # Best-effort: only when no other USB owner holds the device.
+        if self._transfer_busy or not self._device_io.try_acquire("tag-enrich"):
             logger.info(
-                "Device tag enrich deferred (busy) count=%s", len(need)
+                "Device tag enrich deferred (busy holder=%s) count=%s",
+                self._device_io.holder,
+                len(need),
             )
             return
 
@@ -4557,13 +4572,16 @@ class AppController:
         batch = list(need)
         device = self.device
         serial = self._device_serial
+        gate_reason = "tag-enrich"
 
         def work():
             return device_ops.enrich_track_refs(device, batch, stop_on_fatal=True)
 
         def on_done(result) -> None:
             self._device_tag_enrich_inflight = False
-            self._mark_usb_quiet(_DEVICE_USB_COOLDOWN_S)
+            self._device_io.release(
+                reason=gate_reason, quiet_s=_DEVICE_USB_COOLDOWN_S
+            )
             if serial != self._device_serial:
                 return
             updated_by_id = {
@@ -4607,7 +4625,9 @@ class AppController:
 
         def on_error(exc: BaseException) -> None:
             self._device_tag_enrich_inflight = False
-            self._mark_usb_quiet(_DEVICE_USB_COOLDOWN_S)
+            self._device_io.release(
+                reason=gate_reason, quiet_s=_DEVICE_USB_COOLDOWN_S
+            )
             logger.warning("Device tag enrich failed: %s", exc)
 
         logger.info("Device media tag enrich start count=%s", len(batch))
@@ -4840,8 +4860,10 @@ class AppController:
     def _experimental_device_tick(self, gen: int) -> None:
         """Quiet auto-connect / liveness check while Experimental is active.
 
-        When a session looks open, probe the device so sudden unplug is
-        detected; then clear state and keep retrying connect every interval
+        Probes only when the exclusive device I/O gate is free and outside the
+        post-job quiet window — never while a sync, listing, seed, or enrich
+        holds USB. When a session looks open, ``session_alive`` detects unplug;
+        after soft-fail strikes we disconnect and retry connect next interval
         (unless the user disabled auto-reconnect via Device → Disconnect).
         """
         if gen != self._device_poll_gen:
@@ -4851,24 +4873,20 @@ class AppController:
         if not self._device_auto_reconnect:
             return
 
-        # Avoid racing libmtp during library/transfer work, and give the
-        # session a quiet window after heavy USB (list_tracks can leave the
-        # ZEN bus flaky for several seconds).
-        if (
-            self._library_busy
-            or self._transfer_busy
-            or self._device_connect_inflight
-            or self._usb_is_quiet()
-        ):
+        # Single gate: skip while any USB owner is active or bus is cooling down.
+        if not self._device_io.can_auto_probe():
+            self._schedule_device_poll(gen)
+            return
+        if not self._device_io.try_acquire("auto-connect"):
             self._schedule_device_poll(gen)
             return
 
-        self._device_connect_inflight = True
         local_gen = gen
         need_identity = self._active_profile is None
+        gate_reason = "auto-connect"
 
         def work() -> tuple[str, DeviceInfo | None]:
-            """Return (status, info). status: ok | soft_fail | gone | absent.
+            """Return (status, info). status: ok | soft_fail | absent.
 
             Minimum USB: connect + optional identity (name/mfr/model). Never
             battery/storage here — those are Device → Device Info only.
@@ -4901,77 +4919,92 @@ class AppController:
                 return ("ok", DeviceInfo())
 
         def on_done(result: tuple[str, DeviceInfo | None]) -> None:
-            self._device_connect_inflight = False
-            stale = (
-                local_gen != self._device_poll_gen
-                or self.win.active_mode() != "experimental"
-            )
-            if stale:
-                if self.win.active_mode() != "experimental" and self.device.is_connected():
-                    try:
-                        device_ops.disconnect(self.device)
-                    except Exception:
-                        pass
-                return
-            if not self._device_auto_reconnect:
-                return
+            quiet_s: float | None = None
+            status: str = "absent"
+            info: DeviceInfo | None = None
+            try:
+                stale = (
+                    local_gen != self._device_poll_gen
+                    or self.win.active_mode() != "experimental"
+                )
+                if stale:
+                    if (
+                        self.win.active_mode() != "experimental"
+                        and self.device.is_connected()
+                    ):
+                        try:
+                            device_ops.disconnect(self.device)
+                        except Exception:
+                            pass
+                    return
+                if not self._device_auto_reconnect:
+                    return
 
-            status, info = result
-            if status == "ok":
-                self._device_probe_fails = 0
-                self._logged_no_device = False
-                # Only re-apply art/log when profile missing or first connect.
+                status, info = result
+                if status == "ok":
+                    self._device_probe_fails = 0
+                    self._logged_no_device = False
+                elif status == "soft_fail":
+                    self._device_probe_fails += 1
+                    if self._device_probe_fails < _DEVICE_PROBE_FAIL_LIMIT:
+                        logger.info(
+                            "Experimental auto-connect: session probe soft-fail "
+                            "%s/%s (keeping session; common after long listings)",
+                            self._device_probe_fails,
+                            _DEVICE_PROBE_FAIL_LIMIT,
+                        )
+                        quiet_s = _DEVICE_USB_COOLDOWN_S
+                    else:
+                        logger.info(
+                            "Experimental auto-connect: session probe failed %s "
+                            "times — disconnecting to recover",
+                            self._device_probe_fails,
+                        )
+                        try:
+                            device_ops.disconnect(self.device)
+                        except Exception:
+                            pass
+                        self._device_probe_fails = 0
+                        self._logged_no_device = False
+                        self._clear_device_session()
+                else:
+                    self._device_probe_fails = 0
+                    self._note_no_device()
+                    self._clear_device_session()
+            finally:
+                self._device_io.release(reason=gate_reason, quiet_s=quiet_s)
+
+            # Start seed / profile only after releasing the gate so seed can
+            # acquire exclusive USB ownership for list_files.
+            if (
+                local_gen == self._device_poll_gen
+                and self.win.active_mode() == "experimental"
+                and self._device_auto_reconnect
+                and status == "ok"
+            ):
                 if info is not None and self._active_profile is None:
                     self._apply_device_profile(info)
                     self._note_device_session(info)
                 elif not self._device_index_seeded and self.device.is_connected():
-                    # Already had profile; still need one-time index seed.
                     self._note_device_session(info)
-            elif status == "soft_fail":
-                self._device_probe_fails += 1
-                if self._device_probe_fails < _DEVICE_PROBE_FAIL_LIMIT:
-                    logger.info(
-                        "Experimental auto-connect: session probe soft-fail "
-                        "%s/%s (keeping session; common after long listings)",
-                        self._device_probe_fails,
-                        _DEVICE_PROBE_FAIL_LIMIT,
-                    )
-                    self._mark_usb_quiet(_DEVICE_USB_COOLDOWN_S)
-                else:
-                    logger.info(
-                        "Experimental auto-connect: session probe failed %s "
-                        "times — disconnecting to recover",
-                        self._device_probe_fails,
-                    )
-                    try:
-                        device_ops.disconnect(self.device)
-                    except Exception:
-                        pass
-                    self._device_probe_fails = 0
-                    self._logged_no_device = False
-                    self._clear_device_session()
-            elif status == "gone":
-                logger.info("Experimental auto-connect: device disconnected")
-                self._device_probe_fails = 0
-                self._logged_no_device = False  # allow one "no device" log on next fails
-                self._clear_device_session()
-            else:
-                self._device_probe_fails = 0
-                self._note_no_device()
-                self._clear_device_session()
-            self._schedule_device_poll(local_gen)
+
+            if local_gen == self._device_poll_gen:
+                self._schedule_device_poll(local_gen)
 
         def on_error(_exc: BaseException) -> None:
-            self._device_connect_inflight = False
-            if (
-                local_gen != self._device_poll_gen
-                or self.win.active_mode() != "experimental"
-                or not self._device_auto_reconnect
-            ):
-                return
-            self._note_no_device()
-            self._clear_device_session()
-            self._schedule_device_poll(local_gen)
+            try:
+                if (
+                    local_gen != self._device_poll_gen
+                    or self.win.active_mode() != "experimental"
+                    or not self._device_auto_reconnect
+                ):
+                    return
+                self._note_no_device()
+                self._clear_device_session()
+            finally:
+                self._device_io.release(reason=gate_reason)
+            if local_gen == self._device_poll_gen:
+                self._schedule_device_poll(local_gen)
 
         def runner() -> None:
             try:
@@ -5063,23 +5096,34 @@ class AppController:
         if not self._device_index_seeded and not self._device_index_seed_inflight:
             self._start_device_index_seed(serial)
 
-    def _start_device_index_seed(self, serial: str, *, force: bool = False) -> None:
-        """Background list_files once → replace SQLite device_files for *serial*."""
+    def _start_device_index_seed(self, serial: str, *, force: bool = False) -> bool:
+        """Background list_files once → replace SQLite device_files for *serial*.
+
+        Returns True when a seed job was started (USB gate acquired).
+        """
         if self._device_index_seed_inflight:
-            return
+            return False
         if self._device_index_seeded and not force:
-            return
+            return False
         if not self.device.is_connected():
-            return
-        if (self._library_busy or self._transfer_busy) and not force:
-            # Retry after USB work settles (poll / reconnect may call again).
+            return False
+        # Exclusive USB: never race auto-connect or an active transfer.
+        if self._transfer_busy and not force:
             logger.info(
-                "Device index seed deferred (busy) serial=%s", serial
+                "Device index seed deferred (transfer busy) serial=%s", serial
             )
-            return
+            return False
+        if not self._device_io.try_acquire("index-seed"):
+            logger.info(
+                "Device index seed deferred (USB held by %r) serial=%s",
+                self._device_io.holder,
+                serial,
+            )
+            return False
 
         self._device_index_seed_inflight = True
         device = self.device
+        gate_reason = "index-seed"
 
         def work():
             # Folders first (cheap): name → Music/Video/TV/ZENcast object ids
@@ -5101,7 +5145,9 @@ class AppController:
         def on_done(result) -> None:
             self._device_index_seed_inflight = False
             self._device_index_seeded = True
-            self._mark_usb_quiet(_DEVICE_USB_COOLDOWN_S)
+            self._device_io.release(
+                reason=gate_reason, quiet_s=_DEVICE_USB_COOLDOWN_S
+            )
             # Clear seed label so it does not linger after indexing.
             self.win.set_progress_status("")
             layout = None
@@ -5134,7 +5180,9 @@ class AppController:
             logger.warning(
                 "Device index seed failed serial=%s: %s", serial, exc
             )
-            self._mark_usb_quiet(_DEVICE_USB_COOLDOWN_S)
+            self._device_io.release(
+                reason=gate_reason, quiet_s=_DEVICE_USB_COOLDOWN_S
+            )
 
         self.win.set_progress_status("Indexing device folders + files…")
         self._bg.submit(
@@ -5143,17 +5191,21 @@ class AppController:
             on_error=on_error,
             name="device-index-seed",
         )
+        return True
 
     def _disconnect_for_stable(self) -> None:
         """Drop PyMTP session so Stable mtp-sendtr can claim the device."""
         self._clear_device_session()
         if not self.device.is_connected():
             return
+        self._device_io.steal("stable-disconnect")
         try:
             device_ops.disconnect(self.device)
             logger.info("Disconnected PyMTP session for Stable Mode")
         except Exception:
             logger.exception("Disconnect for Stable Mode failed")
+        finally:
+            self._device_io.release(reason="stable-disconnect")
 
     def on_connect(self) -> None:
         """Manual connect; re-enables auto-reconnect polling on Experimental.
@@ -5165,12 +5217,23 @@ class AppController:
         Also starts a one-shot device file index seed (list_files → SQLite).
         """
         self._device_auto_reconnect = True
+        if not self._device_io.try_acquire("manual-connect"):
+            messagebox.showinfo(
+                "Connect",
+                "The device is busy with another USB operation. Wait for it "
+                "to finish, then try Connect again.",
+            )
+            return
+        gate_reason = "manual-connect"
         try:
             device_ops.connect(self.device)
             self._logged_no_device = False
             try:
                 info = device_ops.get_device_identity(self.device)
                 self._apply_device_profile(info)
+                # Release before seed so index-seed can take the gate.
+                self._device_io.release(reason=gate_reason)
+                gate_reason = ""
                 self._note_device_session(info)
             except Exception:
                 # Session is up; missing identity must not undo connect.
@@ -5178,10 +5241,15 @@ class AppController:
                     "Connected but could not load device identity "
                     "(name/manufacturer/model)"
                 )
+                self._device_io.release(reason=gate_reason)
+                gate_reason = ""
                 self._note_device_session(None)
         except Exception as e:
             logger.exception("Connect failed")
             messagebox.showerror("Connect", str(e))
+        finally:
+            if gate_reason:
+                self._device_io.release(reason=gate_reason)
         # Resume monitoring (liveness + reconnect after unplug).
         if self.win.active_mode() == "experimental":
             self._start_device_poll()
@@ -5190,7 +5258,11 @@ class AppController:
         """Manual disconnect; stop auto-reconnect until Device → Connect."""
         self._device_auto_reconnect = False
         self._stop_device_poll()
-        device_ops.disconnect(self.device)
+        self._device_io.steal("manual-disconnect")
+        try:
+            device_ops.disconnect(self.device)
+        finally:
+            self._device_io.release(reason="manual-disconnect")
         self._clear_device_session()
         self._logged_no_device = False
         logger.info("Device → Disconnect: auto-reconnect paused")
@@ -5200,6 +5272,13 @@ class AppController:
         """Device → Device Info: full diagnostics (battery, storage, …)."""
         if not self._require_device_ready():
             return
+        if not self._device_io.try_acquire("device-info"):
+            messagebox.showinfo(
+                "Device Info",
+                "The device is busy with another USB operation. Try again "
+                "in a moment.",
+            )
+            return
         try:
             # Full probe is intentional here; fields soft-fail individually.
             info = device_ops.get_device_info(self.device)
@@ -5207,10 +5286,21 @@ class AppController:
             logger.exception("Device info failed")
             messagebox.showerror("Device Info", str(e))
             return
+        finally:
+            self._device_io.release(
+                reason="device-info", quiet_s=_DEVICE_USB_COOLDOWN_S
+            )
 
         def apply_name(new_name: str) -> None:
-            device_ops.set_device_name(self.device, new_name)
-            logger.info("Device renamed to %r", new_name)
+            if not self._device_io.try_acquire("set-device-name"):
+                raise RuntimeError(
+                    "Device is busy; could not apply name change right now."
+                )
+            try:
+                device_ops.set_device_name(self.device, new_name)
+                logger.info("Device renamed to %r", new_name)
+            finally:
+                self._device_io.release(reason="set-device-name")
 
         show_device_info_dialog(
             self.win.root,
@@ -5999,12 +6089,19 @@ class AppController:
                 "current item.",
             )
             return False
+        # Exclusive USB for the whole job so auto-connect cannot probe mid-sync.
+        if not self._device_io.try_acquire("transfer"):
+            messagebox.showinfo(
+                "Busy",
+                "The device is busy with another USB operation "
+                f"({self._device_io.holder or 'unknown'}).\n\n"
+                "Wait for it to finish, then try again.",
+            )
+            return False
         self._transfer_busy = True
         self._job_cancel.clear()
         self.win.set_cancel_job_enabled(True)
         self._clear_transfer_highlights()
-        # Hold auto-connect off the bus for the whole job + cooldown tail.
-        self._mark_usb_quiet(_DEVICE_USB_COOLDOWN_S)
         try:
             self.win.progress["value"] = 0
         except Exception:
@@ -6025,9 +6122,11 @@ class AppController:
         self._stop_busy_progress()
         self._batch_track_by_path = {}
         self.win.set_progress_status("")
-        # Listing/transfer just finished — pause auto-connect USB probes.
+        # Listing/transfer just finished — release USB + pause probes.
         self._device_probe_fails = 0
-        self._mark_usb_quiet()
+        self._device_io.release(
+            reason="transfer", quiet_s=_DEVICE_USB_COOLDOWN_S
+        )
 
     def on_cancel_job(self) -> None:
         """Progress-bar Cancel: stop after the current track/delete finishes."""
@@ -6057,15 +6156,6 @@ class AppController:
             detail = "Stopped before any items finished."
         logger.info("%s: %s", title, detail)
         messagebox.showinfo(title, f"{title}.\n\n{detail}")
-
-    def _mark_usb_quiet(self, seconds: float = _DEVICE_USB_COOLDOWN_S) -> None:
-        """Defer auto-connect probes until *seconds* after now (monotonic)."""
-        until = time.monotonic() + max(0.0, float(seconds))
-        if until > self._usb_quiet_until:
-            self._usb_quiet_until = until
-
-    def _usb_is_quiet(self) -> bool:
-        return time.monotonic() < self._usb_quiet_until
 
     def _start_busy_progress(self) -> None:
         """Indeterminate bar while a USB listing (etc.) runs off the UI thread."""
@@ -8731,8 +8821,21 @@ class AppController:
                 "A device index job is already running.",
             )
             return
+        if self._transfer_busy or self._device_io.is_held():
+            messagebox.showinfo(
+                "Refresh Device Index",
+                "The device is busy with another USB operation. Wait for it "
+                "to finish, then refresh again.",
+            )
+            return
         self._device_index_seeded = False
-        self._start_device_index_seed(serial, force=True)
+        if not self._start_device_index_seed(serial, force=True):
+            messagebox.showinfo(
+                "Refresh Device Index",
+                "Could not start device index refresh (device busy or "
+                "disconnected).",
+            )
+            return
         messagebox.showinfo(
             "Refresh Device Index",
             "Refreshing durable device file index in the background "
