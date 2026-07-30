@@ -83,6 +83,8 @@ After a heavy USB job the gate is released with a short **USB quiet window** (`D
 
 **Connect vs diagnostics:** Device → Connect and auto-connect only open the MTP session and read **identity** (name / manufacturer / model) for profile matching. They never call battery or storage APIs. Full `get_info` (battery, free/total/used space, serial, version) is **Device → Device Info** only; each optional field soft-fails so one bad property (historically `get_batterylevel` on recovering ZENs) does not abort the dialog or undo connect.
 
+**Quit:** Closing the main window stops the auto-connect poll and calls `disconnect` on any open PyMTP session (`AppController.shutdown_device_session`) so the device is not left claimed on USB for the next run or for Stable `mtp-sendtr`.
+
 ---
 
 ## Format targets and transcoding

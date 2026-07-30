@@ -2471,7 +2471,15 @@ class AppController:
     # ------------------------------------------------------------------
 
     def on_app_close(self) -> None:
-        """Main window close: terminate host playback, then destroy the UI."""
+        """Main window close: stop MTP session + host playback, then destroy UI.
+
+        Leaving a long-lived PyMTP session open after quit keeps the device
+        claimed on USB and blocks the next Connect / Stable ``mtp-sendtr``.
+        """
+        try:
+            self.shutdown_device_session()
+        except Exception:
+            logger.debug("device session shutdown on close failed", exc_info=True)
         try:
             self.shutdown_playback()
         except Exception:
@@ -2480,6 +2488,35 @@ class AppController:
             self.win.root.destroy()
         except Exception:
             logger.debug("root.destroy on close failed", exc_info=True)
+
+    def shutdown_device_session(self) -> None:
+        """Stop auto-connect poll and release any open PyMTP session.
+
+        Safe to call more than once (close handler + post-mainloop cleanup).
+        """
+        self._device_auto_reconnect = False
+        self._stop_device_poll()
+        # Steal even if a transfer/seed holds the gate — quit must free USB.
+        self._device_io.steal("app-close")
+        try:
+            if self.device.is_connected():
+                try:
+                    device_ops.disconnect(self.device)
+                    logger.info("Disconnected MTP device on application close")
+                except Exception:
+                    logger.exception("Disconnect on application close failed")
+            else:
+                # Force-clear a stale non-NULL pointer if is_connected lied.
+                try:
+                    device_ops.disconnect(self.device)
+                except Exception:
+                    pass
+        finally:
+            self._device_io.release(reason="app-close")
+        try:
+            self._clear_device_session()
+        except Exception:
+            logger.debug("clear device session on close failed", exc_info=True)
 
     def shutdown_playback(self) -> None:
         """Stop ffplay, cancel poll/marquee timers, and clear the play queue."""
