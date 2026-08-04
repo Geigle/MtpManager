@@ -63,6 +63,9 @@ class AppConfig:
     send_format: str = DEFAULT_SEND_FORMAT
     # When True, transfers use mtp-sendtr (Stable). Default is PyMTP (Experimental).
     stable_mode: bool = False
+    # When True, show Device/Transfer menu items marked experimental (list/delete
+    # diagnostics, retail package tools, etc.). Default off to keep the UI simple.
+    enable_experimental_tools: bool = False
     # When True, create Music/<artist> on the device and send tracks there (PyMTP).
     store_tracks_in_artist_folder: bool = False
     # When True (requires artist folders), create Music/<artist>/<album> and send there.
@@ -136,6 +139,9 @@ def load_app_config(*, path: Path | None = None) -> AppConfig:
     cfg = AppConfig(
         send_format=fmt,
         stable_mode=_as_bool(raw.get("stable_mode"), False),
+        enable_experimental_tools=_as_bool(
+            raw.get("enable_experimental_tools"), False
+        ),
         store_tracks_in_artist_folder=artist,
         store_tracks_in_album_folder=album,
         show_broken_video_presets=_as_bool(
@@ -183,6 +189,7 @@ def save_app_config(config: AppConfig, *, path: Path | None = None) -> Path:
         "version": CONFIG_VERSION,
         "send_format": config.normalized_send_format(),
         "stable_mode": bool(config.stable_mode),
+        "enable_experimental_tools": bool(config.enable_experimental_tools),
         "store_tracks_in_artist_folder": artist,
         "store_tracks_in_album_folder": album,
         "show_broken_video_presets": bool(config.show_broken_video_presets),

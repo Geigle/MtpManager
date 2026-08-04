@@ -345,6 +345,7 @@ class AppController:
         w.set_config_menu_commands(
             on_config=self.on_config,
             on_stable_mode_toggle=self.on_stable_mode_toggle,
+            on_enable_experimental_tools_toggle=self.on_enable_experimental_tools_toggle,
             on_artist_folders_toggle=self.on_artist_folders_toggle,
             on_album_folders_toggle=self.on_album_folders_toggle,
             on_podcast_folders_toggle=self.on_podcast_folders_toggle,
@@ -370,6 +371,10 @@ class AppController:
         w.var_keep_downloaded_podcasts.set(
             bool(self._config.keep_downloaded_podcasts)
         )
+        # Apply experimental-tools visibility after commands are wired so
+        # rebuild can re-bind callbacks. Default off simplifies Device/Transfer.
+        exp_tools = bool(self._config.enable_experimental_tools)
+        w.set_experimental_tools_enabled(exp_tools)
         w.set_album_folders_menu_enabled(artist_on)
         w.set_podcast_tab_commands(
             on_add=self.on_podcast_add,
@@ -636,6 +641,22 @@ class AppController:
                 reason="incompatible with Stable Mode"
             )
         self._apply_transfer_mode(mode, persist=True, reason="config_menu")
+
+    def on_enable_experimental_tools_toggle(self) -> None:
+        """Config → Enable Experimental Tools: show/hide experimental menus."""
+        enabled = bool(self.win.var_enable_experimental_tools.get())
+        prev = bool(self._config.enable_experimental_tools)
+        self._config.enable_experimental_tools = enabled
+        try:
+            save_app_config(self._config)
+        except OSError as e:
+            logger.exception("Failed to save enable_experimental_tools")
+            self._config.enable_experimental_tools = prev
+            messagebox.showerror("Config", f"Could not save settings:\n{e}")
+            self.win.set_experimental_tools_enabled(prev)
+            return
+        self.win.set_experimental_tools_enabled(enabled)
+        logger.info("Config enable_experimental_tools=%s", enabled)
 
     def on_artist_folders_toggle(self) -> None:
         """Config → Store tracks in artist folder (experimental)."""

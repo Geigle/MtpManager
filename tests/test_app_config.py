@@ -20,6 +20,7 @@ class AppConfigTests(unittest.TestCase):
             cfg = load_app_config(path=Path(tmp) / "nope.json")
             self.assertEqual(cfg.normalized_send_format(), "mp3")
             self.assertFalse(cfg.stable_mode)
+            self.assertFalse(cfg.enable_experimental_tools)
             self.assertFalse(cfg.store_tracks_in_artist_folder)
             self.assertFalse(cfg.store_tracks_in_album_folder)
             self.assertFalse(cfg.show_broken_video_presets)
@@ -40,6 +41,7 @@ class AppConfigTests(unittest.TestCase):
                 AppConfig(
                     send_format="wma",
                     stable_mode=True,
+                    enable_experimental_tools=True,
                     store_tracks_in_artist_folder=True,
                     store_tracks_in_album_folder=True,
                     show_broken_video_presets=True,
@@ -56,6 +58,7 @@ class AppConfigTests(unittest.TestCase):
             loaded = load_app_config(path=dest)
             self.assertEqual(loaded.normalized_send_format(), "wma")
             self.assertTrue(loaded.stable_mode)
+            self.assertTrue(loaded.enable_experimental_tools)
             self.assertTrue(loaded.store_tracks_in_artist_folder)
             self.assertTrue(loaded.store_tracks_in_album_folder)
             self.assertTrue(loaded.show_broken_video_presets)
@@ -70,6 +73,7 @@ class AppConfigTests(unittest.TestCase):
             data = json.loads(dest.read_text(encoding="utf-8"))
             self.assertEqual(data["send_format"], "wma")
             self.assertTrue(data["stable_mode"])
+            self.assertTrue(data["enable_experimental_tools"])
             self.assertTrue(data["store_tracks_in_artist_folder"])
             self.assertTrue(data["store_tracks_in_album_folder"])
             self.assertTrue(data["show_broken_video_presets"])
