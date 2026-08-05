@@ -76,11 +76,13 @@ class AppConfig:
     always_show_playback_controls: bool = False
     # When True, create ZENcast/<show>/ folders for podcast sends (PyMTP; experimental).
     store_podcasts_in_show_folders: bool = False
-    # When True, video podcast episodes sync as video (XviD on ZEN) under ZENcast.
-    # Default off: video-only items extract audio; dual feeds prefer audio enclosure.
+    # When True (experimental tools), video podcast episodes sync as video
+    # (XviD on ZEN) under ZENcast. Default off: video-only items extract audio;
+    # dual feeds prefer audio enclosure. Hidden unless Enable Experimental Tools.
     allow_video_podcasts_to_sync: bool = False
-    # When True, audio podcasts are muxed as still-image XviD video under ZENcast
-    # (ZVM experiment: only video objects appear in ZENcast; audio lands in Music).
+    # When True (experimental tools), audio podcasts are muxed as still-image
+    # XviD video under ZENcast (ZVM experiment: only video objects appear in
+    # ZENcast; audio lands in Music). Hidden unless Enable Experimental Tools.
     sync_audio_podcasts_as_video: bool = False
     # Still-video ladder (edit config.json to binary-search the ZVM floor).
     audio_podcast_still_fps: float = DEFAULT_AUDIO_PODCAST_STILL_FPS

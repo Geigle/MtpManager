@@ -109,7 +109,7 @@ MENU_ENABLE_EXPERIMENTAL_TOOLS = "Enable Experimental Tools"
 MENU_ARTIST_FOLDERS = "Store tracks in artist folder (experimental)"
 MENU_ALBUM_FOLDERS = "Store tracks in album folder (experimental)"
 MENU_PODCAST_FOLDERS = "Store Podcasts in Identifiable Folders (experimental)"
-MENU_ALLOW_VIDEO_PODCASTS = "Allow video podcasts to Sync"
+MENU_ALLOW_VIDEO_PODCASTS = "Allow video podcasts to Sync (experimental)"
 MENU_AUDIO_PODCASTS_AS_VIDEO = (
     "Sync Audio Podcasts as Video (experimental)"
 )
@@ -1805,18 +1805,18 @@ class MainWindow:
                 offvalue=False,
             )
             self.menu_config.add_checkbutton(
+                label=MENU_ALLOW_VIDEO_PODCASTS,
+                variable=self.var_allow_video_podcasts,
+                onvalue=True,
+                offvalue=False,
+            )
+            self.menu_config.add_checkbutton(
                 label=MENU_AUDIO_PODCASTS_AS_VIDEO,
                 variable=self.var_audio_podcasts_as_video,
                 onvalue=True,
                 offvalue=False,
             )
         self.menu_config.add_separator()
-        self.menu_config.add_checkbutton(
-            label=MENU_ALLOW_VIDEO_PODCASTS,
-            variable=self.var_allow_video_podcasts,
-            onvalue=True,
-            offvalue=False,
-        )
         self.menu_config.add_checkbutton(
             label=MENU_KEEP_DOWNLOADED_PODCASTS,
             variable=self.var_keep_downloaded_podcasts,

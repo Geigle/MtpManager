@@ -744,8 +744,18 @@ class AppController:
         logger.info("Config store_podcasts_in_show_folders=%s", enabled)
 
     def on_allow_video_podcasts_toggle(self) -> None:
-        """Config → Allow video podcasts to Sync."""
+        """Config → Allow video podcasts to Sync (experimental)."""
         enabled = bool(self.win.var_allow_video_podcasts.get())
+        if enabled:
+            messagebox.showinfo(
+                "Video podcasts",
+                "When enabled, video podcast episodes are encoded for the "
+                "device (XviD on ZEN) and sent under ZENcast.\n\n"
+                "Default (safer): video-only enclosures extract audio; dual "
+                "feeds prefer the audio enclosure.\n\n"
+                "This path is experimental — expect encode/send failures on "
+                "picky players. Turn off if syncs start failing.",
+            )
         self._config.allow_video_podcasts_to_sync = enabled
         try:
             save_app_config(self._config)
@@ -769,6 +779,7 @@ class AppController:
                 "1 fps failed. Tune in config.json:\n"
                 "  audio_podcast_still_fps\n"
                 "  audio_podcast_still_width / _height\n\n"
+                "This path is experimental — expect encode/send failures. "
                 "Re-sync rebuilds *_device.avi.",
             )
         self._config.sync_audio_podcasts_as_video = enabled
@@ -1493,8 +1504,11 @@ class AppController:
 
     def _sync_podcast_episodes(self, episodes: list, *, label: str) -> None:
         """Download enclosures on a worker, then transfer under ZENcast."""
-        allow_video = bool(self._config.allow_video_podcasts_to_sync)
-        audio_as_video = bool(self._config.sync_audio_podcasts_as_video)
+        # Video podcast paths are experimental: only honor when the tools gate
+        # is on so a stuck config.json flag cannot keep failing normal syncs.
+        exp = bool(self._config.enable_experimental_tools)
+        allow_video = exp and bool(self._config.allow_video_podcasts_to_sync)
+        audio_as_video = exp and bool(self._config.sync_audio_podcasts_as_video)
         self.win.lbl_podcast_status.configure(text="Preparing episodes…")
         self.win.set_progress_status("Downloading podcast media…")
 
