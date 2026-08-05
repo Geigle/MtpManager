@@ -105,10 +105,11 @@ MENU_ALWAYS_SHOW_PLAYBACK = "Always show playback controls"
 
 # Config menu
 MENU_STABLE_MODE = "Stable Mode"
+MENU_ENABLE_EXPERIMENTAL_TOOLS = "Enable Experimental Tools"
 MENU_ARTIST_FOLDERS = "Store tracks in artist folder (experimental)"
 MENU_ALBUM_FOLDERS = "Store tracks in album folder (experimental)"
 MENU_PODCAST_FOLDERS = "Store Podcasts in Identifiable Folders (experimental)"
-MENU_ALLOW_VIDEO_PODCASTS = "Allow video podcasts to Sync"
+MENU_ALLOW_VIDEO_PODCASTS = "Allow video podcasts to Sync (experimental)"
 MENU_AUDIO_PODCASTS_AS_VIDEO = (
     "Sync Audio Podcasts as Video (experimental)"
 )
@@ -132,15 +133,15 @@ MENU_CONNECT = "Connect"
 MENU_DISCONNECT = "Disconnect"
 MENU_DEVICE_INFO = "Device Info"
 MENU_CREATE_FOLDER = "Create Folder…"
-MENU_SEND_VIDEO = "Send Video… (experimental)"
-MENU_LIST_FOLDERS = "List Folders"
+MENU_SEND_VIDEO = "Send Video…"
+MENU_LIST_FOLDERS = "List Folders (experimental)"
 MENU_LIST_FILES = "List Files (experimental)"
 MENU_LIST_TRACKS = "List Tracks (experimental)"
 MENU_GET_TRACKS_FROM_DEVICE = "Get Tracks from Device… (experimental)"
 MENU_DELETE_TRACK = "Delete Track (experimental)"
 MENU_GET_FILE_INFO = "Get File Info (experimental)"
 MENU_GET_TRACK_INFO = "Get Track Info (experimental)"
-MENU_DELETE_ALL = "Delete All Tracks…"
+MENU_DELETE_ALL = "Delete All Tracks… (experimental)"
 MENU_REFRESH_DEVICE_INDEX = "Refresh Device Index…"
 
 # Track context menu
@@ -179,22 +180,33 @@ CTX_DEVICE_DELETE_FOLDER = "Delete all in folder…"
 CTX_DEVICE_INFO = "Device Info"
 CTX_DEVICE_DELETE_ALL = "Delete All Tracks…"
 
-_DEVICE_MENU_LABELS = (
+# Always shown under Device (when PyMTP mode is active).
+_DEVICE_MENU_STANDARD = (
     MENU_CONNECT,
     MENU_DISCONNECT,
     MENU_DEVICE_INFO,
     MENU_CREATE_FOLDER,
     MENU_SEND_VIDEO,
+    MENU_REFRESH_DEVICE_INDEX,
+)
+
+# Shown only when Config → Enable Experimental Tools is on.
+_DEVICE_MENU_EXPERIMENTAL = (
     MENU_LIST_FOLDERS,
     MENU_LIST_FILES,
     MENU_LIST_TRACKS,
     MENU_GET_TRACKS_FROM_DEVICE,
-    MENU_REFRESH_DEVICE_INDEX,
     MENU_DELETE_TRACK,
     MENU_GET_FILE_INFO,
     MENU_GET_TRACK_INFO,
     MENU_DELETE_ALL,
 )
+
+def _device_menu_labels(*, experimental_tools: bool) -> tuple[str, ...]:
+    """Device menu labels for the current experimental-tools setting."""
+    if experimental_tools:
+        return _DEVICE_MENU_STANDARD + _DEVICE_MENU_EXPERIMENTAL
+    return _DEVICE_MENU_STANDARD
 
 
 def _elide_path(path: str, max_len: int = _PATH_DISPLAY_MAX) -> str:
@@ -385,20 +397,17 @@ class MainWindow:
 
         self.menu_transfer = Menu(self.menubar, tearoff=0)
         self.menubar.add_cascade(label="Transfer", menu=self.menu_transfer)
-        self.menu_transfer.add_command(label=MENU_SYNC_ENTIRE)
-        self.menu_transfer.add_command(label=MENU_SYNC_FOLDER)
-        self.menu_transfer.add_command(label=MENU_SYNC_SELECTED, state=DISABLED)
-        self.menu_transfer.add_command(label=MENU_RESUME_SYNC, state=DISABLED)
-        self.menu_transfer.add_separator()
-        self.menu_transfer.add_command(label=MENU_PACKAGE_RETAIL)
-        self.menu_transfer.add_command(label=MENU_RESTORE_RETAIL)
-        self.menu_transfer.add_separator()
-        self.menu_transfer.add_command(label=MENU_CANCEL_JOB, state=DISABLED)
+        # Built by set_experimental_tools_enabled / _rebuild_transfer_menu.
+        self._transfer_menu_commands: dict | None = None
+        self._sync_selected_enabled = False
+        self._sync_selected_count = 0
+        self._resume_sync_enabled = False
+        self._cancel_job_enabled = False
 
         self.menu_device = Menu(self.menubar, tearoff=0)
         self.menubar.add_cascade(label="Device", menu=self.menu_device)
-        for label in _DEVICE_MENU_LABELS:
-            self.menu_device.add_command(label=label, state=DISABLED)
+        self._device_menu_commands: dict | None = None
+        # Built by set_experimental_tools_enabled / _rebuild_device_menu.
 
         self.var_always_show_playback = BooleanVar(value=False)
         self.menu_view = Menu(self.menubar, tearoff=0)
@@ -411,61 +420,20 @@ class MainWindow:
         )
 
         self.var_stable_mode = BooleanVar(value=False)
+        self.var_enable_experimental_tools = BooleanVar(value=False)
         self.var_artist_folders = BooleanVar(value=False)
         self.var_album_folders = BooleanVar(value=False)
         self.var_podcast_folders = BooleanVar(value=False)
         self.var_allow_video_podcasts = BooleanVar(value=False)
         self.var_audio_podcasts_as_video = BooleanVar(value=False)
         self.var_keep_downloaded_podcasts = BooleanVar(value=True)
+        self._enable_experimental_tools = False
+        self._config_menu_commands: dict | None = None
         self.menu_config = Menu(self.menubar, tearoff=0)
         self.menubar.add_cascade(label="Config", menu=self.menu_config)
-        self.menu_config.add_checkbutton(
-            label=MENU_STABLE_MODE,
-            variable=self.var_stable_mode,
-            onvalue=True,
-            offvalue=False,
-        )
-        self.menu_config.add_checkbutton(
-            label=MENU_ARTIST_FOLDERS,
-            variable=self.var_artist_folders,
-            onvalue=True,
-            offvalue=False,
-        )
-        self.menu_config.add_checkbutton(
-            label=MENU_ALBUM_FOLDERS,
-            variable=self.var_album_folders,
-            onvalue=True,
-            offvalue=False,
-            state=DISABLED,
-        )
-        self.menu_config.add_checkbutton(
-            label=MENU_PODCAST_FOLDERS,
-            variable=self.var_podcast_folders,
-            onvalue=True,
-            offvalue=False,
-        )
-        self.menu_config.add_checkbutton(
-            label=MENU_ALLOW_VIDEO_PODCASTS,
-            variable=self.var_allow_video_podcasts,
-            onvalue=True,
-            offvalue=False,
-        )
-        self.menu_config.add_checkbutton(
-            label=MENU_AUDIO_PODCASTS_AS_VIDEO,
-            variable=self.var_audio_podcasts_as_video,
-            onvalue=True,
-            offvalue=False,
-        )
-        self.menu_config.add_checkbutton(
-            label=MENU_KEEP_DOWNLOADED_PODCASTS,
-            variable=self.var_keep_downloaded_podcasts,
-            onvalue=True,
-            offvalue=False,
-        )
-        self.menu_config.add_command(label=MENU_REVEAL_PODCAST_DOWNLOADS)
-        self.menu_config.add_command(label=MENU_CLEAR_DOWNLOADED_PODCASTS)
-        self.menu_config.add_separator()
-        self.menu_config.add_command(label=MENU_CONFIG)
+        # Built by set_experimental_tools_enabled / _rebuild_config_menu.
+        # Default: experimental tools off (simpler menus).
+        self.set_experimental_tools_enabled(False)
 
         # Track / group context menus (commands wired by controller).
         self.menu_track_ctx = Menu(self.root, tearoff=0)
@@ -1409,54 +1377,87 @@ class MainWindow:
         on_package_retail=None,
         on_restore_retail=None,
     ) -> None:
-        self.menu_transfer.entryconfig(MENU_SYNC_ENTIRE, command=on_sync_entire)
-        self.menu_transfer.entryconfig(MENU_SYNC_FOLDER, command=on_sync_folder)
+        self._transfer_menu_commands = {
+            "on_sync_entire": on_sync_entire,
+            "on_sync_folder": on_sync_folder,
+            "on_sync_selected": on_sync_selected,
+            "on_resume_sync": on_resume_sync,
+            "on_cancel_job": on_cancel_job,
+            "on_package_retail": on_package_retail,
+            "on_restore_retail": on_restore_retail,
+        }
+        if on_cancel_job is not None:
+            self._cancel_job_command = on_cancel_job
+        self._apply_transfer_menu_commands()
+
+    def _apply_transfer_menu_commands(self) -> None:
+        cmds = self._transfer_menu_commands
+        if not cmds:
+            return
+        on_sync_entire = cmds.get("on_sync_entire")
+        on_sync_folder = cmds.get("on_sync_folder")
+        on_sync_selected = cmds.get("on_sync_selected")
+        on_resume_sync = cmds.get("on_resume_sync")
+        on_cancel_job = cmds.get("on_cancel_job")
+        on_package_retail = cmds.get("on_package_retail")
+        on_restore_retail = cmds.get("on_restore_retail")
+        if on_sync_entire is not None:
+            self._menu_entryconfig(
+                self.menu_transfer, MENU_SYNC_ENTIRE, command=on_sync_entire
+            )
+        if on_sync_folder is not None:
+            self._menu_entryconfig(
+                self.menu_transfer, MENU_SYNC_FOLDER, command=on_sync_folder
+            )
         if on_sync_selected is not None:
-            self.menu_transfer.entryconfig(
-                MENU_SYNC_SELECTED, command=on_sync_selected
+            self._menu_entryconfig(
+                self.menu_transfer, MENU_SYNC_SELECTED, command=on_sync_selected
             )
         if on_resume_sync is not None:
-            self.menu_transfer.entryconfig(MENU_RESUME_SYNC, command=on_resume_sync)
+            self._menu_entryconfig(
+                self.menu_transfer, MENU_RESUME_SYNC, command=on_resume_sync
+            )
         if on_package_retail is not None:
-            self.menu_transfer.entryconfig(
-                MENU_PACKAGE_RETAIL, command=on_package_retail
+            self._menu_entryconfig(
+                self.menu_transfer, MENU_PACKAGE_RETAIL, command=on_package_retail
             )
         if on_restore_retail is not None:
-            self.menu_transfer.entryconfig(
-                MENU_RESTORE_RETAIL, command=on_restore_retail
+            self._menu_entryconfig(
+                self.menu_transfer, MENU_RESTORE_RETAIL, command=on_restore_retail
             )
         if on_cancel_job is not None:
-            self.menu_transfer.entryconfig(MENU_CANCEL_JOB, command=on_cancel_job)
+            self._menu_entryconfig(
+                self.menu_transfer, MENU_CANCEL_JOB, command=on_cancel_job
+            )
             self._cancel_job_command = on_cancel_job
 
     def set_sync_selected_enabled(self, enabled: bool, *, count: int = 0) -> None:
         """Enable Transfer → Sync Selected when one or more tracks are selected."""
+        self._sync_selected_enabled = bool(enabled)
+        self._sync_selected_count = int(count) if enabled else 0
         state = NORMAL if enabled else DISABLED
         label = MENU_SYNC_SELECTED
         if enabled and count > 0:
             label = f"Sync Selected Tracks ({count})"
-        try:
-            self.menu_transfer.entryconfig(
-                MENU_SYNC_SELECTED, state=state, label=label
-            )
-        except Exception:
-            pass
+        self._menu_entryconfig(
+            self.menu_transfer, MENU_SYNC_SELECTED, state=state, label=label
+        )
 
     def set_resume_sync_enabled(self, enabled: bool) -> None:
         """Enable Transfer → Resume Sync when a durable job can continue."""
-        try:
-            self.menu_transfer.entryconfig(
-                MENU_RESUME_SYNC,
-                state=NORMAL if enabled else DISABLED,
-            )
-        except Exception:
-            pass
+        self._resume_sync_enabled = bool(enabled)
+        self._menu_entryconfig(
+            self.menu_transfer,
+            MENU_RESUME_SYNC,
+            state=NORMAL if enabled else DISABLED,
+        )
 
     def set_config_menu_commands(
         self,
         *,
         on_config,
         on_stable_mode_toggle=None,
+        on_enable_experimental_tools_toggle=None,
         on_artist_folders_toggle=None,
         on_album_folders_toggle=None,
         on_podcast_folders_toggle=None,
@@ -1466,48 +1467,61 @@ class MainWindow:
         on_clear_downloaded_podcasts=None,
         on_reveal_podcast_downloads=None,
     ) -> None:
-        self.menu_config.entryconfig(MENU_CONFIG, command=on_config)
-        if on_stable_mode_toggle is not None:
-            self.menu_config.entryconfig(
-                MENU_STABLE_MODE, command=on_stable_mode_toggle
-            )
-        if on_artist_folders_toggle is not None:
-            self.menu_config.entryconfig(
-                MENU_ARTIST_FOLDERS, command=on_artist_folders_toggle
-            )
-        if on_album_folders_toggle is not None:
-            self.menu_config.entryconfig(
-                MENU_ALBUM_FOLDERS, command=on_album_folders_toggle
-            )
-        if on_podcast_folders_toggle is not None:
-            self.menu_config.entryconfig(
-                MENU_PODCAST_FOLDERS, command=on_podcast_folders_toggle
-            )
-        if on_allow_video_podcasts_toggle is not None:
-            self.menu_config.entryconfig(
+        self._config_menu_commands = {
+            "on_config": on_config,
+            "on_stable_mode_toggle": on_stable_mode_toggle,
+            "on_enable_experimental_tools_toggle": on_enable_experimental_tools_toggle,
+            "on_artist_folders_toggle": on_artist_folders_toggle,
+            "on_album_folders_toggle": on_album_folders_toggle,
+            "on_podcast_folders_toggle": on_podcast_folders_toggle,
+            "on_allow_video_podcasts_toggle": on_allow_video_podcasts_toggle,
+            "on_audio_podcasts_as_video_toggle": on_audio_podcasts_as_video_toggle,
+            "on_keep_downloaded_podcasts_toggle": on_keep_downloaded_podcasts_toggle,
+            "on_clear_downloaded_podcasts": on_clear_downloaded_podcasts,
+            "on_reveal_podcast_downloads": on_reveal_podcast_downloads,
+        }
+        self._apply_config_menu_commands()
+
+    def _apply_config_menu_commands(self) -> None:
+        cmds = self._config_menu_commands
+        if not cmds:
+            return
+        on_config = cmds.get("on_config")
+        if on_config is not None:
+            self._menu_entryconfig(self.menu_config, MENU_CONFIG, command=on_config)
+        pairs = (
+            (MENU_STABLE_MODE, cmds.get("on_stable_mode_toggle")),
+            (
+                MENU_ENABLE_EXPERIMENTAL_TOOLS,
+                cmds.get("on_enable_experimental_tools_toggle"),
+            ),
+            (MENU_ARTIST_FOLDERS, cmds.get("on_artist_folders_toggle")),
+            (MENU_ALBUM_FOLDERS, cmds.get("on_album_folders_toggle")),
+            (MENU_PODCAST_FOLDERS, cmds.get("on_podcast_folders_toggle")),
+            (
                 MENU_ALLOW_VIDEO_PODCASTS,
-                command=on_allow_video_podcasts_toggle,
-            )
-        if on_audio_podcasts_as_video_toggle is not None:
-            self.menu_config.entryconfig(
+                cmds.get("on_allow_video_podcasts_toggle"),
+            ),
+            (
                 MENU_AUDIO_PODCASTS_AS_VIDEO,
-                command=on_audio_podcasts_as_video_toggle,
-            )
-        if on_keep_downloaded_podcasts_toggle is not None:
-            self.menu_config.entryconfig(
+                cmds.get("on_audio_podcasts_as_video_toggle"),
+            ),
+            (
                 MENU_KEEP_DOWNLOADED_PODCASTS,
-                command=on_keep_downloaded_podcasts_toggle,
-            )
-        if on_reveal_podcast_downloads is not None:
-            self.menu_config.entryconfig(
+                cmds.get("on_keep_downloaded_podcasts_toggle"),
+            ),
+            (
                 MENU_REVEAL_PODCAST_DOWNLOADS,
-                command=on_reveal_podcast_downloads,
-            )
-        if on_clear_downloaded_podcasts is not None:
-            self.menu_config.entryconfig(
+                cmds.get("on_reveal_podcast_downloads"),
+            ),
+            (
                 MENU_CLEAR_DOWNLOADED_PODCASTS,
-                command=on_clear_downloaded_podcasts,
-            )
+                cmds.get("on_clear_downloaded_podcasts"),
+            ),
+        )
+        for label, cmd in pairs:
+            if cmd is not None:
+                self._menu_entryconfig(self.menu_config, label, command=cmd)
 
     def set_podcast_tab_commands(
         self,
@@ -1603,7 +1617,8 @@ class MainWindow:
 
     def set_album_folders_menu_enabled(self, enabled: bool) -> None:
         """Enable/disable album-folder checkbutton (requires artist folders)."""
-        self.menu_config.entryconfig(
+        self._menu_entryconfig(
+            self.menu_config,
             MENU_ALBUM_FOLDERS,
             state=NORMAL if enabled else DISABLED,
         )
@@ -1626,33 +1641,193 @@ class MainWindow:
         on_refresh_device_index=None,
         on_send_video=None,
     ) -> None:
-        self.menu_device.entryconfig(MENU_CONNECT, command=on_connect)
-        self.menu_device.entryconfig(MENU_DISCONNECT, command=on_disconnect)
-        self.menu_device.entryconfig(MENU_DEVICE_INFO, command=on_device_info)
-        self.menu_device.entryconfig(MENU_CREATE_FOLDER, command=on_create_folder)
-        if on_send_video is not None:
-            self.menu_device.entryconfig(MENU_SEND_VIDEO, command=on_send_video)
-        self.menu_device.entryconfig(MENU_LIST_FOLDERS, command=on_list_folders)
-        if on_list_files is not None:
-            self.menu_device.entryconfig(MENU_LIST_FILES, command=on_list_files)
-        if on_list_tracks is not None:
-            self.menu_device.entryconfig(MENU_LIST_TRACKS, command=on_list_tracks)
-        if on_get_tracks_from_device is not None:
-            self.menu_device.entryconfig(
-                MENU_GET_TRACKS_FROM_DEVICE, command=on_get_tracks_from_device
+        self._device_menu_commands = {
+            "on_connect": on_connect,
+            "on_disconnect": on_disconnect,
+            "on_device_info": on_device_info,
+            "on_create_folder": on_create_folder,
+            "on_list_folders": on_list_folders,
+            "on_list_files": on_list_files,
+            "on_list_tracks": on_list_tracks,
+            "on_get_tracks_from_device": on_get_tracks_from_device,
+            "on_delete_track": on_delete_track,
+            "on_get_file_info": on_get_file_info,
+            "on_get_track_info": on_get_track_info,
+            "on_delete_all": on_delete_all,
+            "on_refresh_device_index": on_refresh_device_index,
+            "on_send_video": on_send_video,
+        }
+        self._apply_device_menu_commands()
+
+    def _apply_device_menu_commands(self) -> None:
+        cmds = self._device_menu_commands
+        if not cmds:
+            return
+        pairs = (
+            (MENU_CONNECT, cmds.get("on_connect")),
+            (MENU_DISCONNECT, cmds.get("on_disconnect")),
+            (MENU_DEVICE_INFO, cmds.get("on_device_info")),
+            (MENU_CREATE_FOLDER, cmds.get("on_create_folder")),
+            (MENU_SEND_VIDEO, cmds.get("on_send_video")),
+            (MENU_REFRESH_DEVICE_INDEX, cmds.get("on_refresh_device_index")),
+            (MENU_LIST_FOLDERS, cmds.get("on_list_folders")),
+            (MENU_LIST_FILES, cmds.get("on_list_files")),
+            (MENU_LIST_TRACKS, cmds.get("on_list_tracks")),
+            (MENU_GET_TRACKS_FROM_DEVICE, cmds.get("on_get_tracks_from_device")),
+            (MENU_DELETE_TRACK, cmds.get("on_delete_track")),
+            (MENU_GET_FILE_INFO, cmds.get("on_get_file_info")),
+            (MENU_GET_TRACK_INFO, cmds.get("on_get_track_info")),
+            (MENU_DELETE_ALL, cmds.get("on_delete_all")),
+        )
+        for label, cmd in pairs:
+            if cmd is not None:
+                self._menu_entryconfig(self.menu_device, label, command=cmd)
+
+    @staticmethod
+    def _menu_has_label(menu: Menu, entry: str) -> bool:
+        try:
+            menu.index(entry)
+            return True
+        except Exception:
+            return False
+
+    def _menu_entryconfig(self, menu: Menu, entry: str, **kwargs) -> None:
+        """entryconfig by menu entry label; no-op if the entry is absent.
+
+        *entry* is the menu item's identity string (what ``Menu.index`` uses).
+        Pass Tk options such as ``command=``, ``state=``, or ``label=`` (to
+        retitle the item) via **kwargs.
+        """
+        if not self._menu_has_label(menu, entry):
+            return
+        try:
+            menu.entryconfig(entry, **kwargs)
+        except Exception:
+            pass
+
+    def experimental_tools_enabled(self) -> bool:
+        """True when Config → Enable Experimental Tools is on."""
+        return bool(self._enable_experimental_tools)
+
+    def set_experimental_tools_enabled(self, enabled: bool) -> None:
+        """Show or hide experimental Device/Transfer/Config menu commands.
+
+        Send Video is a standard Device tool and is not gated.
+        List Folders is experimental and is gated.
+        """
+        enabled = bool(enabled)
+        self._enable_experimental_tools = enabled
+        try:
+            self.var_enable_experimental_tools.set(enabled)
+        except Exception:
+            pass
+        self._rebuild_device_menu()
+        self._rebuild_transfer_menu()
+        self._rebuild_config_menu()
+        # apply_mode_ui sets _mode late in __init__; skip until then.
+        if getattr(self, "_mode", None) is not None:
+            self.apply_mode_actions()
+
+    def _rebuild_device_menu(self) -> None:
+        try:
+            self.menu_device.delete(0, END)
+        except Exception:
+            pass
+        labels = _device_menu_labels(
+            experimental_tools=self._enable_experimental_tools
+        )
+        for label in labels:
+            self.menu_device.add_command(label=label, state=DISABLED)
+        self._apply_device_menu_commands()
+
+    def _rebuild_transfer_menu(self) -> None:
+        # Preserve dynamic enable state across rebuild.
+        sync_en = bool(getattr(self, "_sync_selected_enabled", False))
+        sync_count = int(getattr(self, "_sync_selected_count", 0) or 0)
+        resume_en = bool(getattr(self, "_resume_sync_enabled", False))
+        cancel_en = bool(getattr(self, "_cancel_job_enabled", False))
+        try:
+            self.menu_transfer.delete(0, END)
+        except Exception:
+            pass
+        self.menu_transfer.add_command(label=MENU_SYNC_ENTIRE)
+        self.menu_transfer.add_command(label=MENU_SYNC_FOLDER)
+        self.menu_transfer.add_command(label=MENU_SYNC_SELECTED, state=DISABLED)
+        self.menu_transfer.add_command(label=MENU_RESUME_SYNC, state=DISABLED)
+        if self._enable_experimental_tools:
+            self.menu_transfer.add_separator()
+            self.menu_transfer.add_command(label=MENU_PACKAGE_RETAIL)
+            self.menu_transfer.add_command(label=MENU_RESTORE_RETAIL)
+        self.menu_transfer.add_separator()
+        self.menu_transfer.add_command(label=MENU_CANCEL_JOB, state=DISABLED)
+        self._apply_transfer_menu_commands()
+        self.set_sync_selected_enabled(sync_en, count=sync_count)
+        self.set_resume_sync_enabled(resume_en)
+        self.set_cancel_job_enabled(cancel_en)
+
+    def _rebuild_config_menu(self) -> None:
+        album_enabled = bool(self.var_artist_folders.get())
+        try:
+            self.menu_config.delete(0, END)
+        except Exception:
+            pass
+        self.menu_config.add_checkbutton(
+            label=MENU_STABLE_MODE,
+            variable=self.var_stable_mode,
+            onvalue=True,
+            offvalue=False,
+        )
+        self.menu_config.add_checkbutton(
+            label=MENU_ENABLE_EXPERIMENTAL_TOOLS,
+            variable=self.var_enable_experimental_tools,
+            onvalue=True,
+            offvalue=False,
+        )
+        if self._enable_experimental_tools:
+            self.menu_config.add_separator()
+            self.menu_config.add_checkbutton(
+                label=MENU_ARTIST_FOLDERS,
+                variable=self.var_artist_folders,
+                onvalue=True,
+                offvalue=False,
             )
-        if on_refresh_device_index is not None:
-            self.menu_device.entryconfig(
-                MENU_REFRESH_DEVICE_INDEX, command=on_refresh_device_index
+            self.menu_config.add_checkbutton(
+                label=MENU_ALBUM_FOLDERS,
+                variable=self.var_album_folders,
+                onvalue=True,
+                offvalue=False,
+                state=NORMAL if album_enabled else DISABLED,
             )
-        if on_delete_track is not None:
-            self.menu_device.entryconfig(MENU_DELETE_TRACK, command=on_delete_track)
-        self.menu_device.entryconfig(MENU_GET_FILE_INFO, command=on_get_file_info)
-        if on_get_track_info is not None:
-            self.menu_device.entryconfig(
-                MENU_GET_TRACK_INFO, command=on_get_track_info
+            self.menu_config.add_checkbutton(
+                label=MENU_PODCAST_FOLDERS,
+                variable=self.var_podcast_folders,
+                onvalue=True,
+                offvalue=False,
             )
-        self.menu_device.entryconfig(MENU_DELETE_ALL, command=on_delete_all)
+            self.menu_config.add_checkbutton(
+                label=MENU_ALLOW_VIDEO_PODCASTS,
+                variable=self.var_allow_video_podcasts,
+                onvalue=True,
+                offvalue=False,
+            )
+            self.menu_config.add_checkbutton(
+                label=MENU_AUDIO_PODCASTS_AS_VIDEO,
+                variable=self.var_audio_podcasts_as_video,
+                onvalue=True,
+                offvalue=False,
+            )
+        self.menu_config.add_separator()
+        self.menu_config.add_checkbutton(
+            label=MENU_KEEP_DOWNLOADED_PODCASTS,
+            variable=self.var_keep_downloaded_podcasts,
+            onvalue=True,
+            offvalue=False,
+        )
+        self.menu_config.add_command(label=MENU_REVEAL_PODCAST_DOWNLOADS)
+        self.menu_config.add_command(label=MENU_CLEAR_DOWNLOADED_PODCASTS)
+        self.menu_config.add_separator()
+        self.menu_config.add_command(label=MENU_CONFIG)
+        self._apply_config_menu_commands()
 
     def set_track_context_commands(
         self,
@@ -2632,6 +2807,7 @@ class MainWindow:
 
     def set_cancel_job_enabled(self, enabled: bool) -> None:
         """Enable Cancel (button + Transfer menu) while a job is running."""
+        self._cancel_job_enabled = bool(enabled)
         state = NORMAL if enabled else DISABLED
         try:
             self.btn_cancel_job.configure(
@@ -2640,20 +2816,17 @@ class MainWindow:
             )
         except Exception:
             pass
-        try:
-            self.menu_transfer.entryconfig(MENU_CANCEL_JOB, state=state)
-        except Exception:
-            pass
+        self._menu_entryconfig(self.menu_transfer, MENU_CANCEL_JOB, state=state)
 
     def apply_mode_actions(self) -> None:
         """Enable Device menu only when PyMTP (non-Stable) is active."""
-        experimental = self.active_mode() == "experimental"
-        state = NORMAL if experimental else DISABLED
-        for label in _DEVICE_MENU_LABELS:
-            try:
-                self.menu_device.entryconfig(label, state=state)
-            except Exception:
-                pass
+        pymtp = self.active_mode() == "experimental"
+        state = NORMAL if pymtp else DISABLED
+        labels = _device_menu_labels(
+            experimental_tools=self._enable_experimental_tools
+        )
+        for label in labels:
+            self._menu_entryconfig(self.menu_device, label, state=state)
 
     def set_device_graphic(
         self,

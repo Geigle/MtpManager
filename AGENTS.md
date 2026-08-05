@@ -51,13 +51,14 @@ Do **not**:
 | Transcode → send pipeline, batch abort | `mtpmanager/app/transfer.py` |
 | Live batch queue (append mid-job) | `mtpmanager/app/transfer_queue.py` + controllers `_enqueue_tracks` |
 | UI actions, mode, recovery dialogs | `mtpmanager/ui/controllers.py`, `window.py`, `dialogs.py` (incl. Manage Library) |
+| Exclusive MTP/USB ownership (auto-connect vs sync) | `mtpmanager/app/device_io_gate.py` + poll/transfer/seed paths in `ui/controllers.py` |
 | Artist/album selection | `mtpmanager/domain/library.py` |
 | Scan / tags | `app/scan_library.py`, `infra/mutagen_tags.py` |
 | Album art thumbs | `infra/album_art.py` (mutagen + Pillow; album header rows only) |
 | Library index (SQLite + GUID; multi-root) | `infra/library_index.py`, `domain/library.py` (`root_paths`), `app/scan_library.py`, `domain/track_id.py`, `infra/app_paths.py` |
 | Host playlists (M3U in index DB) | `domain/playlist_m3u.py`, `infra/playlists.py`, Playlists tab + context menus in `ui/window.py` / `ui/controllers.py`, dialog `ui/dialogs.py` (`ask_add_to_playlist`) |
 | On-device playlist push (GUID→item_id) | `app/playlist_device.py`, `infra/device_index.item_ids_for_guids`, patched playlist APIs in `pymtp_wrapper` / `pymtp_device`; phase-2 after Sync playlist track transfer |
-| Podcasts (RSS, ZENcast sync; video detect + optional video sync) | `infra/podcast_feed.py`, `infra/podcast_index.py`, `app/podcast_ops.py`, Config `allow_video_podcasts_to_sync` / `sync_audio_podcasts_as_video`, Podcasts tab in `ui/window.py` / `ui/controllers.py`; parent ZENcast; video-only → audio extract by default; XviD when video sync allowed; experimental audio→still+XviD for ZENcast |
+| Podcasts (RSS, ZENcast sync; video detect + optional video sync) | `infra/podcast_feed.py`, `infra/podcast_index.py`, `app/podcast_ops.py`, Config `enable_experimental_tools` + `allow_video_podcasts_to_sync` / `sync_audio_podcasts_as_video` (both experimental; UI gated; runtime no-ops if tools off), Podcasts tab in `ui/window.py` / `ui/controllers.py`; parent ZENcast; default video-only → audio extract; XviD / still+XviD only when experimental tools + toggles on |
 | Device → Podcasts inventory | `domain/device_media.looks_like_podcast` / `podcast_refs_from_files`, `device_index.list_cached_podcast_refs`, Device Podcasts tree in `ui/window.py` / controllers; pull via existing device context menu |
 | Device list join / skip-if-present | `domain/device_media.py`, `app/transfer.py`, controllers list/sync |
 | Durable device inventory (list_files once) | `infra/device_index.py` + connect seed / Refresh menu in controllers |

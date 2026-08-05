@@ -23,8 +23,16 @@ def main(argv: list[str] | None = None) -> int:
 
     window = MainWindow()
     device = PymtpDevice()
-    AppController(window, device)
-    window.mainloop()
+    controller = AppController(window, device)
+    try:
+        window.mainloop()
+    finally:
+        # Belt-and-suspenders if the mainloop ends without WM_DELETE_WINDOW
+        # (e.g. some platforms destroy the root first).
+        try:
+            controller.shutdown_device_session()
+        except Exception:
+            log.debug("device session shutdown after mainloop failed", exc_info=True)
     return 0
 
 

@@ -63,6 +63,9 @@ class AppConfig:
     send_format: str = DEFAULT_SEND_FORMAT
     # When True, transfers use mtp-sendtr (Stable). Default is PyMTP (Experimental).
     stable_mode: bool = False
+    # When True, show Device/Transfer menu items marked experimental (list/delete
+    # diagnostics, retail package tools, etc.). Default off to keep the UI simple.
+    enable_experimental_tools: bool = False
     # When True, create Music/<artist> on the device and send tracks there (PyMTP).
     store_tracks_in_artist_folder: bool = False
     # When True (requires artist folders), create Music/<artist>/<album> and send there.
@@ -73,11 +76,13 @@ class AppConfig:
     always_show_playback_controls: bool = False
     # When True, create ZENcast/<show>/ folders for podcast sends (PyMTP; experimental).
     store_podcasts_in_show_folders: bool = False
-    # When True, video podcast episodes sync as video (XviD on ZEN) under ZENcast.
-    # Default off: video-only items extract audio; dual feeds prefer audio enclosure.
+    # When True (experimental tools), video podcast episodes sync as video
+    # (XviD on ZEN) under ZENcast. Default off: video-only items extract audio;
+    # dual feeds prefer audio enclosure. Hidden unless Enable Experimental Tools.
     allow_video_podcasts_to_sync: bool = False
-    # When True, audio podcasts are muxed as still-image XviD video under ZENcast
-    # (ZVM experiment: only video objects appear in ZENcast; audio lands in Music).
+    # When True (experimental tools), audio podcasts are muxed as still-image
+    # XviD video under ZENcast (ZVM experiment: only video objects appear in
+    # ZENcast; audio lands in Music). Hidden unless Enable Experimental Tools.
     sync_audio_podcasts_as_video: bool = False
     # Still-video ladder (edit config.json to binary-search the ZVM floor).
     audio_podcast_still_fps: float = DEFAULT_AUDIO_PODCAST_STILL_FPS
@@ -136,6 +141,9 @@ def load_app_config(*, path: Path | None = None) -> AppConfig:
     cfg = AppConfig(
         send_format=fmt,
         stable_mode=_as_bool(raw.get("stable_mode"), False),
+        enable_experimental_tools=_as_bool(
+            raw.get("enable_experimental_tools"), False
+        ),
         store_tracks_in_artist_folder=artist,
         store_tracks_in_album_folder=album,
         show_broken_video_presets=_as_bool(
@@ -183,6 +191,7 @@ def save_app_config(config: AppConfig, *, path: Path | None = None) -> Path:
         "version": CONFIG_VERSION,
         "send_format": config.normalized_send_format(),
         "stable_mode": bool(config.stable_mode),
+        "enable_experimental_tools": bool(config.enable_experimental_tools),
         "store_tracks_in_artist_folder": artist,
         "store_tracks_in_album_folder": album,
         "show_broken_video_presets": bool(config.show_broken_video_presets),
