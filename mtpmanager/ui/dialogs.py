@@ -1559,8 +1559,9 @@ def ask_add_to_playlist(
     create_playlist: Callable[[str], object],
     delete_playlist: Callable[[int], bool],
 ) -> AddToPlaylistResult | None:
-    """Modal: pick (or create) a playlist and confirm adding *candidate_tracks*.
+    """Modal: pick (or create) a playlist and add *candidate_tracks*.
 
+    No post-add confirmation — the caller reports status non-modally.
     *list_playlists* returns a sequence of objects with ``.id``, ``.name``,
     and optional ``.track_count``. *create_playlist(name)* returns an object
     with ``.id`` / ``.name``. *delete_playlist(id)* returns success bool.

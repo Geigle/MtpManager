@@ -2981,6 +2981,17 @@ class AppController:
         except Exception:
             pass
 
+        # Add-to-playlist labels for group menus: multi / mixed selection uses
+        # the expanded track count (same resolver as the action).
+        multi_sel = len(self.win.selected_tree_iids()) > 1
+        if n_audio > 1:
+            bulk_add_label = f"Add {n_audio} tracks to Playlist…"
+        elif n_audio == 1:
+            bulk_add_label = "Add This Track to Playlist…"
+        else:
+            bulk_add_label = "Add to Playlist…"
+        add_state = NORMAL if n_audio >= 1 else DISABLED
+
         if seed is None:
             return
         if "group_artist" in tagset:
@@ -2993,8 +3004,13 @@ class AppController:
                 self.win.menu_artist_ctx.entryconfig(
                     2, label=f"Play All from {artist}"
                 )
+                artist_add = (
+                    bulk_add_label
+                    if multi_sel or n_audio > 1
+                    else f"Add All from {artist} to Playlist…"
+                )
                 self.win.menu_artist_ctx.entryconfig(
-                    3, label=f"Add All from {artist} to Playlist…"
+                    3, label=artist_add, state=add_state
                 )
             except Exception:
                 pass
@@ -3010,8 +3026,13 @@ class AppController:
                 self.win.menu_album_ctx.entryconfig(
                     2, label=f"Play folder {folder}"
                 )
+                folder_add = (
+                    bulk_add_label
+                    if multi_sel or n_audio > 1
+                    else f"Add folder {folder} to Playlist…"
+                )
                 self.win.menu_album_ctx.entryconfig(
-                    3, label=f"Add folder {folder} to Playlist…"
+                    3, label=folder_add, state=add_state
                 )
             except Exception:
                 pass
@@ -3024,8 +3045,13 @@ class AppController:
                 self.win.menu_album_ctx.entryconfig(
                     2, label=f"Play Album {album}"
                 )
+                album_add = (
+                    bulk_add_label
+                    if multi_sel or n_audio > 1
+                    else f"Add Album {album} to Playlist…"
+                )
                 self.win.menu_album_ctx.entryconfig(
-                    3, label=f"Add Album {album} to Playlist…"
+                    3, label=album_add, state=add_state
                 )
             except Exception:
                 pass
@@ -3962,49 +3988,61 @@ class AppController:
         )
 
     def action_add_selected_to_playlist(self) -> None:
-        tracks = self._audio_tracks_only(
-            self._tracks_from_selected_iids_tree_order()
-        )
-        self._open_add_to_playlist(tracks)
+        """Add expanded multi-selection (tracks + artist/album headers) to a playlist."""
+        self._open_add_to_playlist(self._tracks_for_playlist_add())
 
     def action_add_artist_to_playlist(self) -> None:
-        seed = self._context_group_seed
-        iid = self.win.selected_tree_iid() or ""
-        if seed is None and iid:
-            seed = self._group_seed_by_iid.get(iid)
-        tracks = self._audio_tracks_only(
-            self._tracks_from_iids_tree_order([iid] if iid else [])
-        )
-        if not tracks and seed is not None:
-            tracks = self._audio_tracks_only(
-                self.library.filter_by_artist(seed)
-            )
-        self._open_add_to_playlist(tracks)
+        """Group menu entry — same mixed-selection expansion as track menu."""
+        self.action_add_selected_to_playlist()
 
     def action_add_album_to_playlist(self) -> None:
-        seed = self._context_group_seed
-        iid = self.win.selected_tree_iid() or ""
-        if seed is None and iid:
-            seed = self._group_seed_by_iid.get(iid)
+        """Group menu entry — same mixed-selection expansion as track menu."""
+        self.action_add_selected_to_playlist()
+
+    def _tracks_for_playlist_add(self) -> list[Track]:
+        """Resolve selected library rows to audio tracks for playlist add.
+
+        Expands artist/album/folder headers via tree children (tree order),
+        dedupes by path, and falls back to library filters when a group has
+        no children yet. Mixed selections (tracks + groups) are supported.
+        """
+        iids = list(self.win.selected_tree_iids() or [])
+        if not iids:
+            focus = self.win.selected_tree_iid() or ""
+            if focus:
+                iids = [focus]
         tracks = self._audio_tracks_only(
-            self._tracks_from_iids_tree_order([iid] if iid else [])
+            self._tracks_from_iids_tree_order(iids)
         )
-        if not tracks and seed is not None:
-            tags = set()
+        if tracks:
+            return tracks
+
+        # Fallback: expand group seeds when tree children are unavailable.
+        seen: set[str] = set()
+        out: list[Track] = []
+        tree = self.win.active_library_tree()
+        for iid in iids:
+            seed = self._group_seed_by_iid.get(iid)
+            if seed is None:
+                continue
+            tags: set[str] = set()
             try:
-                tree = self.win.active_library_tree()
                 tags = set(tree.item(iid, "tags") or ())
             except Exception:
                 pass
-            if "group_directory" in tags:
-                tracks = self._audio_tracks_only(
-                    self.library.filter_by_directory(seed)
-                )
+            if "group_artist" in tags:
+                batch = self.library.filter_by_artist(seed)
+            elif "group_directory" in tags:
+                batch = self.library.filter_by_directory(seed)
+            elif "group_album" in tags:
+                batch = self.library.filter_by_album(seed)
             else:
-                tracks = self._audio_tracks_only(
-                    self.library.filter_by_album(seed)
-                )
-        self._open_add_to_playlist(tracks)
+                continue
+            for t in self._audio_tracks_only(batch):
+                if t.path and t.path not in seen:
+                    seen.add(t.path)
+                    out.append(t)
+        return out
 
     def _open_add_to_playlist(self, tracks: list[Track]) -> None:
         if not tracks:
@@ -4038,14 +4076,26 @@ class AppController:
         except Exception as e:
             messagebox.showerror("Playlist", f"Could not add tracks:\n{e}")
             return
-        messagebox.showinfo(
-            "Playlist",
+        # No success dialog — status bar / playlist tab only (faster build flow).
+        skipped = max(0, len(tracks) - added_n)
+        status = (
             f"Added {added_n} track(s) to “{result.playlist_name}”"
-            + (
-                f" ({len(tracks) - added_n} already present)."
-                if added_n < len(tracks)
-                else "."
-            ),
+            + (f" ({skipped} already present)" if skipped else "")
+        )
+        try:
+            self.win.set_progress_status(status)
+        except Exception:
+            pass
+        try:
+            self.win.lbl_playlist_status.configure(text=status)
+        except Exception:
+            pass
+        logger.info(
+            "Playlist add name=%r added=%d skipped=%d candidates=%d",
+            result.playlist_name,
+            added_n,
+            skipped,
+            len(tracks),
         )
         # Refresh tab if that playlist is open (or always keep dropdown current).
         self._refresh_playlist_tab()
