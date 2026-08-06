@@ -32,6 +32,10 @@ class AppConfigTests(unittest.TestCase):
             self.assertEqual(cfg.audio_podcast_still_width, 128)
             self.assertEqual(cfg.audio_podcast_still_height, 96)
             self.assertTrue(cfg.keep_downloaded_podcasts)
+            self.assertFalse(cfg.podcast_auto_enabled)
+            self.assertEqual(cfg.podcast_schedule_time, "06:30")
+            self.assertEqual(cfg.podcast_max_new_per_show, 1)
+            self.assertTrue(cfg.podcast_auto_sync_to_device)
             self.assertEqual(cfg.active_mode(), "experimental")
 
     def test_round_trip(self) -> None:
@@ -52,6 +56,11 @@ class AppConfigTests(unittest.TestCase):
                     audio_podcast_still_width=128,
                     audio_podcast_still_height=96,
                     keep_downloaded_podcasts=False,
+                    podcast_auto_enabled=True,
+                    podcast_schedule_days=("mon", "wed", "fri"),
+                    podcast_schedule_time="07:15",
+                    podcast_max_new_per_show=3,
+                    podcast_auto_sync_to_device=False,
                 ),
                 path=dest,
             )
@@ -69,6 +78,11 @@ class AppConfigTests(unittest.TestCase):
             self.assertEqual(loaded.audio_podcast_still_width, 128)
             self.assertEqual(loaded.audio_podcast_still_height, 96)
             self.assertFalse(loaded.keep_downloaded_podcasts)
+            self.assertTrue(loaded.podcast_auto_enabled)
+            self.assertEqual(list(loaded.podcast_schedule_days), ["mon", "wed", "fri"])
+            self.assertEqual(loaded.podcast_schedule_time, "07:15")
+            self.assertEqual(loaded.podcast_max_new_per_show, 3)
+            self.assertFalse(loaded.podcast_auto_sync_to_device)
             self.assertEqual(loaded.active_mode(), "stable")
             data = json.loads(dest.read_text(encoding="utf-8"))
             self.assertEqual(data["send_format"], "wma")
@@ -78,6 +92,8 @@ class AppConfigTests(unittest.TestCase):
             self.assertTrue(data["store_tracks_in_album_folder"])
             self.assertTrue(data["show_broken_video_presets"])
             self.assertTrue(data["always_show_playback_controls"])
+            self.assertTrue(data["podcast_auto_enabled"])
+            self.assertEqual(data["podcast_schedule_time"], "07:15")
             self.assertTrue(data["allow_video_podcasts_to_sync"])
             self.assertTrue(data["sync_audio_podcasts_as_video"])
             self.assertEqual(data["audio_podcast_still_fps"], 2.0)

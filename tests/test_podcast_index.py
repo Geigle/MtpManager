@@ -6,14 +6,19 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from mtpmanager.app.podcast_ops import pick_new_not_on_device
 from mtpmanager.infra.podcast_index import (
     create_or_update_podcast,
     delete_podcast,
+    get_episode,
     get_podcast,
     known_feed_guids,
     list_episodes,
     list_podcasts,
     normalize_feed_url,
+    set_episode_local_path,
+    set_podcast_auto_last_run,
+    set_podcast_auto_settings,
     upsert_episodes,
 )
 
@@ -98,6 +103,83 @@ class PodcastIndexTests(unittest.TestCase):
             self.assertTrue(delete_podcast(p.id, path=db))
             self.assertIsNone(get_podcast(p.id, path=db))
             self.assertEqual(list_episodes(p.id, path=db), [])
+
+    def test_auto_settings_and_retrieved_at(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "library_index.db"
+            p = create_or_update_podcast(
+                feed_url="https://example.com/auto",
+                title="Auto Show",
+                path=db,
+            )
+            self.assertTrue(p.auto_update)
+            updated = set_podcast_auto_settings(
+                p.id,
+                auto_update=False,
+                schedule_time="21:30",
+                path=db,
+            )
+            assert updated is not None
+            self.assertFalse(updated.auto_update)
+            self.assertEqual(updated.schedule_time, "21:30")
+            set_podcast_auto_last_run(p.id, "2026-08-05", path=db)
+            again = get_podcast(p.id, path=db)
+            assert again is not None
+            self.assertEqual(again.auto_last_run_local_date, "2026-08-05")
+
+            upsert_episodes(
+                p.id,
+                [
+                    {
+                        "feed_guid": "e1",
+                        "title": "Ep1",
+                        "pub_date": "2026-08-01T00:00:00Z",
+                        "enclosure_url": "https://x/e1.mp3",
+                    },
+                    {
+                        "feed_guid": "e2",
+                        "title": "Ep2",
+                        "pub_date": "2026-08-04T00:00:00Z",
+                        "enclosure_url": "https://x/e2.mp3",
+                    },
+                ],
+                path=db,
+            )
+            eps = list_episodes(p.id, path=db)
+            self.assertEqual(len(eps), 2)
+            newest = eps[0]
+            set_episode_local_path(
+                newest.id,
+                "/tmp/fake.mp3",
+                path=db,
+                stamp_retrieved=True,
+                mark_pending_device_sync=True,
+            )
+            got = get_episode(newest.id, path=db)
+            assert got is not None
+            self.assertTrue(got.retrieved_at)
+            self.assertTrue(got.pending_device_sync)
+            first_stamp = got.retrieved_at
+            set_episode_local_path(
+                newest.id, "/tmp/fake.mp3", path=db, stamp_retrieved=True
+            )
+            got2 = get_episode(newest.id, path=db)
+            assert got2 is not None
+            self.assertEqual(got2.retrieved_at, first_stamp)
+
+            picks = pick_new_not_on_device(p.id, set(), limit=2, path=db)
+            self.assertEqual(len(picks), 2)
+            picks2 = pick_new_not_on_device(
+                p.id, {newest.guid}, limit=2, path=db
+            )
+            self.assertEqual(len(picks2), 1)
+            self.assertEqual(picks2[0].feed_guid, "e1")
+            # Since window excludes older episode.
+            picks3 = pick_new_not_on_device(
+                p.id, set(), limit=2, path=db, since_iso="2026-08-03"
+            )
+            self.assertEqual(len(picks3), 1)
+            self.assertEqual(picks3[0].feed_guid, "e2")
 
 
 if __name__ == "__main__":

@@ -32,7 +32,17 @@ from tkinter import ttk
 
 from mtpmanager.domain.device_profile import DeviceVideoOptions, VideoEncodePreset
 from mtpmanager.domain.models import DeviceInfo
-from mtpmanager.infra.app_config import VALID_SEND_FORMATS
+from mtpmanager.app.podcast_schedule import components_to_hhmm, hhmm_to_12h
+from mtpmanager.infra.app_config import (
+    ALL_DAY_KEYS,
+    DEFAULT_PODCAST_SCHEDULE_TIME,
+    MAX_PODCAST_NEW_PER_SHOW,
+    VALID_SEND_FORMATS,
+    WEEKDAY_KEYS,
+    normalize_max_new_per_show,
+    normalize_schedule_days,
+    normalize_schedule_time,
+)
 from mtpmanager.infra.remote_naming import (
     DEFAULT_TV_FOLDER_ID,
     DEFAULT_VIDEO_FOLDER_ID,
@@ -1749,4 +1759,350 @@ def ask_add_to_playlist(
             playlists_changed=True,
         )
     return out
+
+
+# ---------------------------------------------------------------------------
+# Podcast Settings (Library → Podcast Settings…)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class PodcastSettingsResult:
+    """Values saved from Library → Podcast Settings…"""
+
+    auto_enabled: bool
+    schedule_days: tuple[str, ...]
+    schedule_time: str
+    max_new_per_show: int
+    auto_sync_to_device: bool
+    run_full_sync_now: bool = False
+
+
+def _time_spinner_row(
+    parent,
+    *,
+    initial_hhmm: str,
+) -> tuple[Frame, Callable[[], str]]:
+    """Hour / minute / AM·PM with ± buttons, keyboard entry, Tab advance.
+
+    Returns (frame, getter) where getter() → normalized HH:MM 24h.
+    """
+    hour0, minute0, ampm0 = hhmm_to_12h(initial_hhmm)
+    row = Frame(parent)
+    hour_var = StringVar(value=str(hour0))
+    min_var = StringVar(value=f"{minute0:02d}")
+    ampm_var = StringVar(value=ampm0)
+
+    def _clamp_hour() -> int:
+        try:
+            h = int(str(hour_var.get()).strip() or "12")
+        except ValueError:
+            h = 12
+        h = max(1, min(12, h))
+        hour_var.set(str(h))
+        return h
+
+    def _clamp_min() -> int:
+        raw = str(min_var.get()).strip()
+        try:
+            m = int(raw or "0")
+        except ValueError:
+            m = 0
+        m = max(0, min(59, m))
+        min_var.set(f"{m:02d}")
+        return m
+
+    def bump_hour(delta: int) -> None:
+        h = _clamp_hour()
+        h = ((h - 1 + delta) % 12) + 1
+        hour_var.set(str(h))
+
+    def bump_min(delta: int) -> None:
+        m = _clamp_min()
+        m = (m + delta) % 60
+        min_var.set(f"{m:02d}")
+
+    def toggle_ampm() -> None:
+        cur = str(ampm_var.get()).strip().upper()
+        ampm_var.set("PM" if cur.startswith("A") else "AM")
+
+    def get_hhmm() -> str:
+        return components_to_hhmm(_clamp_hour(), _clamp_min(), ampm_var.get())
+
+    # Hour
+    hour_col = Frame(row)
+    hour_col.pack(side=LEFT)
+    Label(hour_col, text="Hour").pack()
+    Button(hour_col, text="▲", width=3, command=lambda: bump_hour(1)).pack()
+    hour_entry = Entry(hour_col, textvariable=hour_var, width=3, justify="center")
+    hour_entry.pack(pady=2)
+    Button(hour_col, text="▼", width=3, command=lambda: bump_hour(-1)).pack()
+
+    Label(row, text=":", font=("", 14, "bold")).pack(side=LEFT, padx=4, pady=(14, 0))
+
+    # Minute
+    min_col = Frame(row)
+    min_col.pack(side=LEFT)
+    Label(min_col, text="Min").pack()
+    Button(min_col, text="▲", width=3, command=lambda: bump_min(1)).pack()
+    min_entry = Entry(min_col, textvariable=min_var, width=3, justify="center")
+    min_entry.pack(pady=2)
+    Button(min_col, text="▼", width=3, command=lambda: bump_min(-1)).pack()
+
+    # AM/PM
+    ampm_col = Frame(row)
+    ampm_col.pack(side=LEFT, padx=(10, 0))
+    Label(ampm_col, text="AM/PM").pack()
+    Button(ampm_col, text="▲", width=4, command=toggle_ampm).pack()
+    ampm_entry = Entry(
+        ampm_col, textvariable=ampm_var, width=4, justify="center"
+    )
+    ampm_entry.pack(pady=2)
+    Button(ampm_col, text="▼", width=4, command=toggle_ampm).pack()
+
+    def on_hour_return(_e=None) -> str:
+        _clamp_hour()
+        min_entry.focus_set()
+        min_entry.selection_range(0, END)
+        return "break"
+
+    def on_min_return(_e=None) -> str:
+        _clamp_min()
+        ampm_entry.focus_set()
+        ampm_entry.selection_range(0, END)
+        return "break"
+
+    def on_ampm_return(_e=None) -> str:
+        raw = str(ampm_var.get()).strip().upper()
+        if raw.startswith("P"):
+            ampm_var.set("PM")
+        else:
+            ampm_var.set("AM")
+        return "break"
+
+    def on_hour_tab(_e=None) -> str:
+        return on_hour_return()
+
+    def on_min_tab(_e=None) -> str:
+        return on_min_return()
+
+    hour_entry.bind("<Return>", on_hour_return)
+    hour_entry.bind("<Tab>", on_hour_tab)
+    hour_entry.bind("<FocusOut>", lambda _e: _clamp_hour())
+    min_entry.bind("<Return>", on_min_return)
+    min_entry.bind("<Tab>", on_min_tab)
+    min_entry.bind("<FocusOut>", lambda _e: _clamp_min())
+    ampm_entry.bind("<Return>", on_ampm_return)
+    ampm_entry.bind("<FocusOut>", on_ampm_return)
+
+    return row, get_hhmm
+
+
+def show_podcast_settings_dialog(
+    parent,
+    *,
+    auto_enabled: bool = False,
+    schedule_days: list[str] | tuple[str, ...] | None = None,
+    schedule_time: str = DEFAULT_PODCAST_SCHEDULE_TIME,
+    max_new_per_show: int = 1,
+    auto_sync_to_device: bool = True,
+    status_line: str = "",
+) -> PodcastSettingsResult | None:
+    """Global podcast schedule + sync scope. Save → result; Cancel → None.
+
+    Set ``run_full_sync_now`` when the user chooses **Full Sync Now**
+    (settings are still saved first).
+    """
+    days0 = normalize_schedule_days(
+        schedule_days if schedule_days is not None else WEEKDAY_KEYS
+    )
+    time0 = normalize_schedule_time(schedule_time)
+    n0 = normalize_max_new_per_show(max_new_per_show)
+
+    dlg = Toplevel(parent)
+    dlg.title("Podcast Settings")
+    dlg.transient(parent)
+    dlg.resizable(False, False)
+
+    body = Frame(dlg, padx=14, pady=12)
+    body.pack(fill=BOTH, expand=True)
+
+    Label(
+        body,
+        text="Scheduled full sync",
+        font=("", 11, "bold"),
+        anchor="w",
+    ).pack(fill="x", pady=(0, 4))
+    Label(
+        body,
+        text=(
+            "While MtpManager is open, check subscribed feeds on a schedule "
+            "and download the N most recent new episodes since the last full "
+            "sync. Missed times catch up after launch or wake. Use Full Sync "
+            "Now to run the same pass immediately."
+        ),
+        justify=LEFT,
+        wraplength=440,
+    ).pack(anchor="w", pady=(0, 10))
+
+    enabled_var = BooleanVar(value=bool(auto_enabled))
+    Checkbutton(
+        body,
+        text="Enable scheduled full sync",
+        variable=enabled_var,
+        anchor="w",
+    ).pack(fill="x", pady=(0, 8))
+
+    Label(body, text="Days:", anchor="w").pack(fill="x")
+    days_frame = Frame(body)
+    days_frame.pack(fill="x", pady=(2, 6))
+    day_vars: dict[str, BooleanVar] = {}
+    labels = (
+        ("mon", "Mon"),
+        ("tue", "Tue"),
+        ("wed", "Wed"),
+        ("thu", "Thu"),
+        ("fri", "Fri"),
+        ("sat", "Sat"),
+        ("sun", "Sun"),
+    )
+    for i, (key, lab) in enumerate(labels):
+        v = BooleanVar(value=key in days0)
+        day_vars[key] = v
+        Checkbutton(days_frame, text=lab, variable=v).grid(
+            row=0, column=i, sticky="w", padx=(0, 4)
+        )
+
+    preset_row = Frame(body)
+    preset_row.pack(fill="x", pady=(0, 8))
+
+    def set_days(keys: tuple[str, ...]) -> None:
+        want = set(keys)
+        for k, var in day_vars.items():
+            var.set(k in want)
+
+    Button(
+        preset_row,
+        text="Weekdays",
+        width=10,
+        command=lambda: set_days(WEEKDAY_KEYS),
+    ).pack(side=LEFT, padx=(0, 4))
+    Button(
+        preset_row,
+        text="Daily",
+        width=10,
+        command=lambda: set_days(ALL_DAY_KEYS),
+    ).pack(side=LEFT)
+
+    Label(body, text="Time (local):", anchor="w").pack(fill="x", pady=(4, 2))
+    time_frame, get_time = _time_spinner_row(body, initial_hhmm=time0)
+    time_frame.pack(anchor="w", pady=(0, 10))
+
+    n_row = Frame(body)
+    n_row.pack(fill="x", pady=(0, 8))
+    Label(
+        n_row,
+        text=f"Max new episodes per show (1–{MAX_PODCAST_NEW_PER_SHOW}):",
+    ).pack(side=LEFT)
+    n_var = StringVar(value=str(n0))
+    n_entry = Entry(n_row, textvariable=n_var, width=4)
+    n_entry.pack(side=LEFT, padx=(8, 0))
+
+    n_btn_col = Frame(n_row)
+    n_btn_col.pack(side=LEFT, padx=(4, 0))
+
+    def bump_n(delta: int) -> None:
+        try:
+            cur = int(str(n_var.get()).strip() or "1")
+        except ValueError:
+            cur = 1
+        n_var.set(str(normalize_max_new_per_show(cur + delta)))
+
+    Button(n_btn_col, text="▲", width=2, command=lambda: bump_n(1)).pack()
+    Button(n_btn_col, text="▼", width=2, command=lambda: bump_n(-1)).pack()
+
+    sync_var = BooleanVar(value=bool(auto_sync_to_device))
+    Checkbutton(
+        body,
+        text="Sync to device when connected (after full sync)",
+        variable=sync_var,
+        anchor="w",
+    ).pack(fill="x", pady=(4, 2))
+
+    if status_line:
+        Label(
+            body,
+            text=status_line,
+            justify=LEFT,
+            wraplength=440,
+            fg="#444",
+        ).pack(anchor="w", pady=(6, 10))
+
+    result: list[PodcastSettingsResult | None] = [None]
+
+    def build_result(*, run_now: bool) -> PodcastSettingsResult | None:
+        chosen_days = [k for k, v in day_vars.items() if v.get()]
+        if not chosen_days:
+            messagebox.showerror(
+                "Podcast Settings",
+                "Select at least one day.",
+                parent=dlg,
+            )
+            return None
+        try:
+            n = normalize_max_new_per_show(int(str(n_var.get()).strip() or "1"))
+        except (TypeError, ValueError):
+            messagebox.showerror(
+                "Podcast Settings",
+                f"Max episodes must be a number between 1 and {MAX_PODCAST_NEW_PER_SHOW}.",
+                parent=dlg,
+            )
+            return None
+        return PodcastSettingsResult(
+            auto_enabled=bool(enabled_var.get()),
+            schedule_days=tuple(normalize_schedule_days(chosen_days)),
+            schedule_time=get_time(),
+            max_new_per_show=n,
+            auto_sync_to_device=bool(sync_var.get()),
+            run_full_sync_now=run_now,
+        )
+
+    def on_save() -> None:
+        built = build_result(run_now=False)
+        if built is None:
+            return
+        result[0] = built
+        dlg.destroy()
+
+    def on_full_sync() -> None:
+        built = build_result(run_now=True)
+        if built is None:
+            return
+        result[0] = built
+        dlg.destroy()
+
+    def on_cancel() -> None:
+        result[0] = None
+        dlg.destroy()
+
+    btn_row = Frame(body)
+    btn_row.pack(fill="x", pady=(8, 0))
+    Button(btn_row, text="Cancel", width=10, command=on_cancel).pack(
+        side=RIGHT, padx=(6, 0)
+    )
+    Button(btn_row, text="Save", width=10, command=on_save).pack(side=RIGHT)
+    Button(
+        btn_row, text="Full Sync Now", width=14, command=on_full_sync
+    ).pack(side=LEFT)
+
+    dlg.protocol("WM_DELETE_WINDOW", on_cancel)
+    dlg.grab_set()
+    try:
+        px = parent.winfo_rootx() + max(0, (parent.winfo_width() - 480) // 2)
+        py = parent.winfo_rooty() + max(0, (parent.winfo_height() - 520) // 3)
+        dlg.geometry(f"+{px}+{py}")
+    except Exception:
+        pass
+    parent.wait_window(dlg)
+    return result[0]
 

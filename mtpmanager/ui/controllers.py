@@ -24,12 +24,20 @@ from mtpmanager.app.podcast_ops import (
     MORE_EPISODE_STEP,
     clear_downloaded_podcasts,
     discard_episode_local_files,
+    due_podcasts_for_schedule,
     load_more_episodes,
+    mark_episodes_device_synced,
+    pending_episodes_for_device_sync,
     pick_latest_not_on_device,
     prepare_episodes_for_sync,
     refresh_podcast,
+    run_full_sync_host_pass,
     send_podcast_video_to_zencast,
     subscribe_feed,
+)
+from mtpmanager.app.podcast_schedule import (
+    format_schedule_summary,
+    next_run_after,
 )
 from mtpmanager.app.scan_library import scan_library, scan_library_roots
 from mtpmanager.app.transfer import transfer_track, transfer_tracks
@@ -162,6 +170,7 @@ from mtpmanager.ui.dialogs import (
     show_file_info_dialog,
     show_file_list_dialog,
     show_folder_list_dialog,
+    show_podcast_settings_dialog,
     show_track_info_dialog,
     show_track_list_dialog,
 )
@@ -182,6 +191,9 @@ logger = logging.getLogger(__name__)
 _TREE_CHUNK_FIB_FIRST = 1
 _TREE_CHUNK_FIB_SECOND = 1
 _TREE_CHUNK_CAP = 512
+
+# Podcast full-sync schedule poll interval (catch-up + due check).
+_PODCAST_SCHEDULE_POLL_MS = 60_000
 
 
 def fibonacci_chunk_bounds(
@@ -320,9 +332,15 @@ class AppController:
         # After video podcast send completes, optional audio batch to start.
         self._pending_podcast_audio_after_video: list | None = None
         self._pending_podcast_audio_label: str = ""
+        # Scheduled podcast full-sync (host pass + optional device phase).
+        self._podcast_auto_host_inflight = False
+        self._podcast_auto_device_inflight = False
+        self._pending_auto_podcast: dict | None = None
+        self._podcast_schedule_after_id: str | None = None
         self._wire()
         # Defer restore so mainloop can start before any index I/O.
         self.win.root.after(0, self._start_index_restore)
+        self.win.root.after(5_000, self._podcast_schedule_tick)
 
 
     def _wire(self) -> None:
@@ -332,6 +350,7 @@ class AppController:
         w.set_library_menu_commands(
             on_manage_library=self.on_manage_library,
             on_manage_playlists=self.on_manage_playlists,
+            on_podcast_settings=self.on_podcast_settings,
         )
         w.set_transfer_menu_commands(
             on_sync_entire=self.action_entire_library,
@@ -1390,6 +1409,300 @@ class AppController:
             messagebox.showerror("Podcast", f"Could not load episodes:\n{exc}")
 
         self._bg.submit(work, on_done=on_done, on_error=on_error, name="podcast-more")
+
+    def on_podcast_settings(self) -> None:
+        """Library → Podcast Settings…"""
+        cfg = self._config
+        status = self._podcast_schedule_status_line()
+        result = show_podcast_settings_dialog(
+            self.win.root,
+            auto_enabled=bool(cfg.podcast_auto_enabled),
+            schedule_days=list(cfg.podcast_schedule_days),
+            schedule_time=cfg.podcast_schedule_time,
+            max_new_per_show=int(cfg.podcast_max_new_per_show),
+            auto_sync_to_device=bool(cfg.podcast_auto_sync_to_device),
+            status_line=status,
+        )
+        if result is None:
+            return
+        self._config.podcast_auto_enabled = bool(result.auto_enabled)
+        self._config.podcast_schedule_days = tuple(result.schedule_days)
+        self._config.podcast_schedule_time = result.schedule_time
+        self._config.podcast_max_new_per_show = int(result.max_new_per_show)
+        self._config.podcast_auto_sync_to_device = bool(result.auto_sync_to_device)
+        try:
+            save_app_config(self._config)
+        except Exception as e:
+            messagebox.showerror(
+                "Podcast Settings", f"Could not save settings:\n{e}"
+            )
+            return
+        logger.info(
+            "Podcast settings saved enabled=%s days=%s time=%s max=%s",
+            self._config.podcast_auto_enabled,
+            self._config.podcast_schedule_days,
+            self._config.podcast_schedule_time,
+            self._config.podcast_max_new_per_show,
+        )
+        if result.run_full_sync_now:
+            self._start_full_podcast_sync(
+                podcast_ids=None, force_all=True, label="Full Podcast Sync"
+            )
+        else:
+            self.win.root.after(200, self._podcast_schedule_tick)
+
+    def _podcast_schedule_status_line(self) -> str:
+        from datetime import datetime
+
+        cfg = self._config
+        if not cfg.podcast_auto_enabled:
+            last = (cfg.podcast_last_full_sync_at or "").strip()
+            last_part = f"Last full sync: {last}" if last else "Last full sync: never"
+            return f"Scheduled full sync is off. {last_part}."
+        last = (cfg.podcast_last_full_sync_at or "").strip()
+        last_part = f"Last full sync: {last}" if last else "Last full sync: never"
+        now = datetime.now().astimezone()
+        nxt = next_run_after(
+            now_local=now,
+            days=cfg.podcast_schedule_days,
+            time_hhmm=cfg.podcast_schedule_time,
+            last_run_local_date=cfg.podcast_last_full_sync_local_date or "",
+        )
+        if nxt is not None:
+            next_part = f"Next: {nxt.strftime('%a %Y-%m-%d %I:%M %p')}"
+        else:
+            next_part = "Next: —"
+        summary = format_schedule_summary(
+            days=cfg.podcast_schedule_days,
+            time_hhmm=cfg.podcast_schedule_time,
+        )
+        return f"{summary}. {last_part}. {next_part}."
+
+    def _podcast_schedule_tick(self) -> None:
+        """Timer: catch-up / due full sync; reschedule next tick."""
+        try:
+            self._podcast_schedule_after_id = self.win.root.after(
+                _PODCAST_SCHEDULE_POLL_MS, self._podcast_schedule_tick
+            )
+        except Exception:
+            self._podcast_schedule_after_id = None
+        if not bool(self._config.podcast_auto_enabled):
+            return
+        if self._podcast_auto_host_inflight:
+            return
+        from datetime import datetime
+
+        now = datetime.now().astimezone()
+        # Global "already ran today" stamp short-circuits when every show
+        # would be marked; still honor per-show due for partial failures.
+        due = due_podcasts_for_schedule(
+            now_local=now,
+            global_days=self._config.podcast_schedule_days,
+            global_time=self._config.podcast_schedule_time,
+        )
+        if not due:
+            self._maybe_auto_sync_pending_podcasts()
+            return
+        self._start_full_podcast_sync(
+            podcast_ids=[p.id for p in due],
+            force_all=False,
+            label="Scheduled Podcast Sync",
+        )
+
+    def _start_full_podcast_sync(
+        self,
+        *,
+        podcast_ids: list[int] | None,
+        force_all: bool,
+        label: str,
+    ) -> None:
+        """Refresh feeds + download N newest new episodes (host pass).
+
+        *force_all*: manual Full Sync Now — all shows with auto_update (or
+        every subscribed show when ids is None).
+        """
+        if self._podcast_auto_host_inflight:
+            messagebox.showinfo(
+                "Podcast",
+                "A full podcast sync is already running.",
+            )
+            return
+        self._podcast_auto_host_inflight = True
+        stems = self._device_guid_stems_for_skip() or set()
+        max_n = int(self._config.podcast_max_new_per_show or 1)
+        fmt = self._target_format()
+        # Manual full sync has no lower pub_date bound (all missing up to N).
+        # Scheduled passes use last full-sync day as the “since” window.
+        if force_all:
+            since = ""
+            ids = podcast_ids
+        else:
+            since = (self._config.podcast_last_full_sync_local_date or "").strip()
+            ids = podcast_ids
+        try:
+            self.win.lbl_podcast_status.configure(text=f"{label}: updating…")
+            self.win.set_progress_status(
+                f"{label}: refreshing feeds and downloading…"
+            )
+        except Exception:
+            pass
+
+        def work():
+            from datetime import datetime
+
+            return run_full_sync_host_pass(
+                podcast_ids=ids,
+                max_new_per_show=max_n,
+                device_guids=stems,
+                target_audio_format=fmt,
+                now_local=datetime.now().astimezone(),
+                since_last_full_sync=since,
+            )
+
+        def on_done(result) -> None:
+            self._podcast_auto_host_inflight = False
+            try:
+                self.win.set_progress_status("")
+            except Exception:
+                pass
+            n = len(getattr(result, "downloaded", None) or [])
+            errs = list(getattr(result, "errors", None) or [])
+            from datetime import datetime, timezone
+
+            now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            local_day = datetime.now().astimezone().date().isoformat()
+            self._config.podcast_last_full_sync_at = now
+            self._config.podcast_last_full_sync_local_date = local_day
+            try:
+                save_app_config(self._config)
+            except Exception:
+                logger.debug("save last full podcast sync failed", exc_info=True)
+            msg = f"{label}: {n} episode(s) ready"
+            if errs:
+                msg += f" · {len(errs)} error(s)"
+            try:
+                self.win.lbl_podcast_status.configure(text=msg)
+            except Exception:
+                pass
+            logger.info(
+                "Podcast full sync host pass done downloaded=%s errors=%s",
+                n,
+                len(errs),
+            )
+            self._refresh_podcast_tab()
+            if self._selected_podcast_id is not None:
+                self._load_podcast_episodes(self._selected_podcast_id)
+            self._maybe_auto_sync_pending_podcasts()
+
+        def on_error(exc: BaseException) -> None:
+            self._podcast_auto_host_inflight = False
+            try:
+                self.win.set_progress_status("")
+                self.win.lbl_podcast_status.configure(
+                    text=f"{label} failed (see log)"
+                )
+            except Exception:
+                pass
+            logger.exception("Podcast full sync host pass failed: %s", exc)
+            messagebox.showerror("Podcast", f"{label} failed:\n{exc}")
+
+        self._bg.submit(
+            work, on_done=on_done, on_error=on_error, name="podcast-full-sync"
+        )
+
+    def _maybe_auto_sync_pending_podcasts(self) -> None:
+        """Device phase: sync pending full-sync episodes if ready."""
+        if not bool(self._config.podcast_auto_sync_to_device):
+            return
+        if self._podcast_auto_device_inflight or self._podcast_auto_host_inflight:
+            return
+        if self._transfer_busy or self._bg.busy:
+            return
+        if not self.device.is_connected():
+            return
+        stems = self._device_guid_stems_for_skip() or set()
+        pending = pending_episodes_for_device_sync(device_guids=stems)
+        if not pending:
+            return
+        self._podcast_auto_device_inflight = True
+        episode_ids = [ep.id for ep in pending]
+        self._pending_auto_podcast = {"episode_ids": episode_ids}
+        try:
+            self.win.lbl_podcast_status.configure(
+                text=f"Auto-syncing {len(pending)} podcast episode(s)…"
+            )
+        except Exception:
+            pass
+        logger.info("Auto podcast device sync starting n=%s", len(pending))
+        self._sync_podcast_episodes_auto(pending)
+
+    def _sync_podcast_episodes_auto(self, episodes: list) -> None:
+        """Prepare + transfer pending auto episodes (audio-only; quiet status)."""
+        try:
+            self.win.set_progress_status("Auto podcast: preparing…")
+        except Exception:
+            pass
+
+        def work():
+            return prepare_episodes_for_sync(
+                episodes,
+                allow_video=False,
+                audio_as_video=False,
+                target_audio_format=self._target_format(),
+            )
+
+        def on_done(prep) -> None:
+            try:
+                self.win.set_progress_status("")
+            except Exception:
+                pass
+            audio = list(getattr(prep, "audio_tracks", None) or [])
+            if not audio:
+                logger.warning("Auto podcast prepare produced nothing")
+                self._finish_auto_podcast_device_batch(ok=False)
+                return
+            before_busy = bool(self._transfer_busy)
+            self._transfer_many(
+                audio, kind="podcast", label="Auto Podcast Sync"
+            )
+            if not before_busy and not self._transfer_busy:
+                if self._pending_auto_podcast is not None:
+                    self._finish_auto_podcast_device_batch(ok=False)
+
+        def on_error(exc: BaseException) -> None:
+            try:
+                self.win.set_progress_status("")
+            except Exception:
+                pass
+            logger.exception("Auto podcast prepare failed")
+            self._finish_auto_podcast_device_batch(ok=False)
+
+        self._bg.submit(
+            work, on_done=on_done, on_error=on_error, name="podcast-auto-prepare"
+        )
+
+    def _finish_auto_podcast_device_batch(self, *, ok: bool) -> None:
+        pending = self._pending_auto_podcast
+        self._pending_auto_podcast = None
+        self._podcast_auto_device_inflight = False
+        if not pending:
+            return
+        ids = list(pending.get("episode_ids") or [])
+        if ok and ids:
+            try:
+                mark_episodes_device_synced(ids)
+            except Exception:
+                logger.debug("mark_episodes_device_synced failed", exc_info=True)
+        try:
+            self.win.lbl_podcast_status.configure(
+                text=(
+                    "Auto podcast sync finished"
+                    if ok
+                    else "Auto podcast sync incomplete"
+                )
+            )
+        except Exception:
+            pass
 
     def on_podcast_sync_latest_all(self) -> None:
         ids = list(self._podcast_ids)
@@ -6772,9 +7085,13 @@ class AppController:
                 self._pending_device_playlist is not None
             ):
                 self._publish_pending_device_playlist()
+            if self._pending_auto_podcast is not None:
+                self._finish_auto_podcast_device_batch(ok=True)
 
         def on_error(exc: BaseException) -> None:
             self._clear_pending_device_playlist()
+            if self._pending_auto_podcast is not None:
+                self._finish_auto_podcast_device_batch(ok=False)
             if isinstance(exc, JobCancelled):
                 self._finish_sync_job_cancelled(exc)
                 self._end_transfer_job()

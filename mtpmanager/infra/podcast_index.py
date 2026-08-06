@@ -1,9 +1,8 @@
 """Host podcast subscriptions + episodes in the library index SQLite DB.
 
 # TODO(follow-up): OPML import/export
-# TODO(follow-up): auto-refresh on a timer
 # TODO(follow-up): Device → Podcasts inventory browser
-# TODO(follow-up): per-show auto-download rules beyond “latest”
+# TODO(follow-up): per-show schedule days override UI (column already exists)
 """
 
 from __future__ import annotations
@@ -36,6 +35,11 @@ class Podcast:
     created_at: str = ""
     updated_at: str = ""
     episode_count: int = 0
+    # Automatic full-sync (Library → Podcast Settings + per-show override).
+    auto_update: bool = True
+    schedule_time: str = ""  # HH:MM override; empty = global
+    schedule_days: str = ""  # reserved; empty = global
+    auto_last_run_local_date: str = ""  # YYYY-MM-DD
 
 
 @dataclass(frozen=True)
@@ -46,7 +50,7 @@ class PodcastEpisode:
     feed_guid: str
     title: str = ""
     description: str = ""
-    pub_date: str = ""  # ISO-ish sortable when possible
+    pub_date: str = ""  # release date (ISO-ish) from feed
     duration_sec: float = 0.0
     enclosure_url: str = ""
     enclosure_type: str = ""
@@ -60,6 +64,10 @@ class PodcastEpisode:
     video_enclosure_type: str = ""
     created_at: str = ""
     updated_at: str = ""
+    # When the enclosure was first fully downloaded (ISO UTC); empty if never.
+    retrieved_at: str = ""
+    # Set by full-sync host pass; cleared after successful device send / skip.
+    pending_device_sync: bool = False
 
 
 def _utc_now() -> str:
@@ -131,6 +139,8 @@ def ensure_podcasts_schema(conn: sqlite3.Connection) -> None:
         """
     )
     _migrate_episode_video_columns(conn)
+    _migrate_podcast_auto_columns(conn)
+    _migrate_episode_retrieval_columns(conn)
 
 
 def _migrate_episode_video_columns(conn: sqlite3.Connection) -> None:
@@ -164,6 +174,67 @@ def _migrate_episode_video_columns(conn: sqlite3.Connection) -> None:
             logger.debug("podcast episode column migrate skipped: %s", e)
 
 
+def _migrate_podcast_auto_columns(conn: sqlite3.Connection) -> None:
+    """Per-show auto-update schedule columns."""
+    try:
+        cols = {
+            str(r[1])
+            for r in conn.execute("PRAGMA table_info(podcasts)").fetchall()
+        }
+    except sqlite3.Error:
+        return
+    alters: list[str] = []
+    if "auto_update" not in cols:
+        alters.append(
+            "ALTER TABLE podcasts ADD COLUMN auto_update INTEGER NOT NULL DEFAULT 1"
+        )
+    if "schedule_time" not in cols:
+        alters.append(
+            "ALTER TABLE podcasts ADD COLUMN schedule_time TEXT NOT NULL DEFAULT ''"
+        )
+    if "schedule_days" not in cols:
+        alters.append(
+            "ALTER TABLE podcasts ADD COLUMN schedule_days TEXT NOT NULL DEFAULT ''"
+        )
+    if "auto_last_run_local_date" not in cols:
+        alters.append(
+            "ALTER TABLE podcasts ADD COLUMN "
+            "auto_last_run_local_date TEXT NOT NULL DEFAULT ''"
+        )
+    for sql in alters:
+        try:
+            conn.execute(sql)
+        except sqlite3.Error as e:
+            logger.debug("podcast auto column migrate skipped: %s", e)
+
+
+def _migrate_episode_retrieval_columns(conn: sqlite3.Connection) -> None:
+    """Retrieval stamp + pending device-sync flag."""
+    try:
+        cols = {
+            str(r[1])
+            for r in conn.execute("PRAGMA table_info(podcast_episodes)").fetchall()
+        }
+    except sqlite3.Error:
+        return
+    alters: list[str] = []
+    if "retrieved_at" not in cols:
+        alters.append(
+            "ALTER TABLE podcast_episodes ADD COLUMN "
+            "retrieved_at TEXT NOT NULL DEFAULT ''"
+        )
+    if "pending_device_sync" not in cols:
+        alters.append(
+            "ALTER TABLE podcast_episodes ADD COLUMN "
+            "pending_device_sync INTEGER NOT NULL DEFAULT 0"
+        )
+    for sql in alters:
+        try:
+            conn.execute(sql)
+        except sqlite3.Error as e:
+            logger.debug("podcast retrieval column migrate skipped: %s", e)
+
+
 def _open(path: Path | None = None) -> tuple[sqlite3.Connection, Path]:
     dest = path if path is not None else index_path()
     conn = _connect(dest)
@@ -173,6 +244,23 @@ def _open(path: Path | None = None) -> tuple[sqlite3.Connection, Path]:
 
 
 def _podcast_from_row(row: sqlite3.Row, *, episode_count: int = 0) -> Podcast:
+    keys = set(row.keys())
+    auto_update = True
+    if "auto_update" in keys:
+        auto_update = bool(
+            int(row["auto_update"] if row["auto_update"] is not None else 1)
+        )
+    schedule_time = (
+        str(row["schedule_time"] or "") if "schedule_time" in keys else ""
+    )
+    schedule_days = (
+        str(row["schedule_days"] or "") if "schedule_days" in keys else ""
+    )
+    auto_last = (
+        str(row["auto_last_run_local_date"] or "")
+        if "auto_last_run_local_date" in keys
+        else ""
+    )
     return Podcast(
         id=int(row["id"]),
         feed_url=str(row["feed_url"] or ""),
@@ -185,6 +273,10 @@ def _podcast_from_row(row: sqlite3.Row, *, episode_count: int = 0) -> Podcast:
         created_at=str(row["created_at"] or ""),
         updated_at=str(row["updated_at"] or ""),
         episode_count=int(episode_count),
+        auto_update=auto_update,
+        schedule_time=schedule_time,
+        schedule_days=schedule_days,
+        auto_last_run_local_date=auto_last,
     )
 
 
@@ -197,6 +289,10 @@ def _episode_from_row(row: sqlite3.Row) -> PodcastEpisode:
     video_type = (
         str(row["video_enclosure_type"] or "") if "video_enclosure_type" in keys else ""
     )
+    retrieved_at = str(row["retrieved_at"] or "") if "retrieved_at" in keys else ""
+    pending = False
+    if "pending_device_sync" in keys:
+        pending = bool(int(row["pending_device_sync"] or 0))
     return PodcastEpisode(
         id=int(row["id"]),
         podcast_id=int(row["podcast_id"]),
@@ -217,6 +313,8 @@ def _episode_from_row(row: sqlite3.Row) -> PodcastEpisode:
         video_enclosure_type=video_type,
         created_at=str(row["created_at"] or ""),
         updated_at=str(row["updated_at"] or ""),
+        retrieved_at=retrieved_at,
+        pending_device_sync=pending,
     )
 
 
@@ -609,6 +707,56 @@ def set_episode_local_path(
     local_path: str,
     *,
     path: Path | None = None,
+    stamp_retrieved: bool = True,
+    mark_pending_device_sync: bool | None = None,
+) -> None:
+    """Update local_path; optionally stamp first retrieval and pending sync.
+
+    *stamp_retrieved*: when True and path is non-empty, set ``retrieved_at``
+    only if it is currently empty (idempotent).
+    *mark_pending_device_sync*: True/False set the flag; None leaves it alone.
+    """
+    now = _utc_now()
+    dest = (local_path or "").strip()
+    conn: sqlite3.Connection | None = None
+    try:
+        conn, _ = _open(path)
+        with conn:
+            if dest and stamp_retrieved:
+                conn.execute(
+                    """
+                    UPDATE podcast_episodes SET
+                      local_path = ?,
+                      updated_at = ?,
+                      retrieved_at = CASE
+                        WHEN retrieved_at = '' OR retrieved_at IS NULL
+                        THEN ? ELSE retrieved_at END
+                    WHERE id = ?
+                    """,
+                    (dest, now, now, int(episode_id)),
+                )
+            else:
+                conn.execute(
+                    "UPDATE podcast_episodes SET local_path = ?, updated_at = ? "
+                    "WHERE id = ?",
+                    (dest, now, int(episode_id)),
+                )
+            if mark_pending_device_sync is not None:
+                conn.execute(
+                    "UPDATE podcast_episodes SET pending_device_sync = ?, "
+                    "updated_at = ? WHERE id = ?",
+                    (1 if mark_pending_device_sync else 0, now, int(episode_id)),
+                )
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def set_episode_pending_device_sync(
+    episode_id: int,
+    pending: bool,
+    *,
+    path: Path | None = None,
 ) -> None:
     now = _utc_now()
     conn: sqlite3.Connection | None = None
@@ -616,9 +764,140 @@ def set_episode_local_path(
         conn, _ = _open(path)
         with conn:
             conn.execute(
-                "UPDATE podcast_episodes SET local_path = ?, updated_at = ? WHERE id = ?",
-                (local_path or "", now, int(episode_id)),
+                "UPDATE podcast_episodes SET pending_device_sync = ?, updated_at = ? "
+                "WHERE id = ?",
+                (1 if pending else 0, now, int(episode_id)),
             )
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def clear_pending_device_sync_for_ids(
+    episode_ids: Iterable[int],
+    *,
+    path: Path | None = None,
+) -> int:
+    ids = [int(i) for i in episode_ids if int(i) > 0]
+    if not ids:
+        return 0
+    now = _utc_now()
+    conn: sqlite3.Connection | None = None
+    try:
+        conn, _ = _open(path)
+        with conn:
+            placeholders = ",".join("?" * len(ids))
+            cur = conn.execute(
+                f"UPDATE podcast_episodes SET pending_device_sync = 0, "
+                f"updated_at = ? WHERE id IN ({placeholders})",
+                (now, *ids),
+            )
+            return int(cur.rowcount or 0)
+    except sqlite3.Error as e:
+        logger.warning("clear_pending_device_sync_for_ids failed: %s", e)
+        return 0
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def list_pending_device_sync_episodes(
+    *,
+    path: Path | None = None,
+) -> list[PodcastEpisode]:
+    """Episodes marked pending with a non-empty local_path."""
+    conn: sqlite3.Connection | None = None
+    try:
+        conn, _ = _open(path)
+        rows = conn.execute(
+            """
+            SELECT * FROM podcast_episodes
+            WHERE pending_device_sync = 1 AND local_path != ''
+            ORDER BY retrieved_at ASC, pub_date DESC, id ASC
+            """
+        ).fetchall()
+        return [_episode_from_row(r) for r in rows]
+    except sqlite3.Error as e:
+        logger.warning("list_pending_device_sync_episodes failed: %s", e)
+        return []
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def set_podcast_auto_settings(
+    podcast_id: int,
+    *,
+    auto_update: bool | None = None,
+    schedule_time: str | None = None,
+    schedule_days: str | None = None,
+    path: Path | None = None,
+) -> Podcast | None:
+    """Update per-show auto-update settings. None fields are left unchanged."""
+    now = _utc_now()
+    conn: sqlite3.Connection | None = None
+    try:
+        conn, _ = _open(path)
+        with conn:
+            row = conn.execute(
+                "SELECT * FROM podcasts WHERE id = ?", (int(podcast_id),)
+            ).fetchone()
+            if row is None:
+                return None
+            keys = set(row.keys())
+            au = (
+                (1 if auto_update else 0)
+                if auto_update is not None
+                else int(row["auto_update"] if "auto_update" in keys else 1)
+            )
+            st = (
+                str(schedule_time or "").strip()
+                if schedule_time is not None
+                else str(row["schedule_time"] if "schedule_time" in keys else "")
+            )
+            sd = (
+                str(schedule_days or "").strip()
+                if schedule_days is not None
+                else str(row["schedule_days"] if "schedule_days" in keys else "")
+            )
+            conn.execute(
+                """
+                UPDATE podcasts SET
+                  auto_update = ?, schedule_time = ?, schedule_days = ?,
+                  updated_at = ?
+                WHERE id = ?
+                """,
+                (au, st, sd, now, int(podcast_id)),
+            )
+        return get_podcast(podcast_id, path=path)
+    except sqlite3.Error as e:
+        logger.warning("set_podcast_auto_settings failed: %s", e)
+        return None
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def set_podcast_auto_last_run(
+    podcast_id: int,
+    local_date: str,
+    *,
+    path: Path | None = None,
+) -> None:
+    """Record last successful schedule pass local date (YYYY-MM-DD)."""
+    now = _utc_now()
+    day = str(local_date or "").strip()[:10]
+    conn: sqlite3.Connection | None = None
+    try:
+        conn, _ = _open(path)
+        with conn:
+            conn.execute(
+                "UPDATE podcasts SET auto_last_run_local_date = ?, updated_at = ? "
+                "WHERE id = ?",
+                (day, now, int(podcast_id)),
+            )
+    except sqlite3.Error as e:
+        logger.warning("set_podcast_auto_last_run failed: %s", e)
     finally:
         if conn is not None:
             conn.close()
