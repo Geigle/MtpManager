@@ -271,6 +271,10 @@ class AppController:
         # Path → Track for the active batch (progress status label).
         self._batch_track_by_path: dict[str, Track] = {}
         self._populate_after_id: str | None = None
+        # Debounced library toolbar fuzzy search (Music / Video / Audiobooks).
+        self._library_search_after_id: str | None = None
+        self._library_search_query: str = ""
+        self._library_filter_shown_count: int | None = None
         self._device_populate_after_id: str | None = None
         self._device_poll_after_id: str | None = None
         self._device_poll_gen = 0
@@ -362,6 +366,10 @@ class AppController:
             on_manage_library=self.on_manage_library,
             on_manage_playlists=self.on_manage_playlists,
             on_podcast_settings=self.on_podcast_settings,
+        )
+        w.set_library_search_commands(
+            on_change=self.on_library_search_changed,
+            on_clear=self.on_library_search_clear,
         )
         w.set_transfer_menu_commands(
             on_sync_entire=self.action_entire_library,
@@ -4426,6 +4434,54 @@ class AppController:
         )
         self._device_audiobook_track_by_iid[iid] = track
 
+    def on_library_search_changed(self) -> None:
+        """Toolbar search typed — debounce rebuild (avoid per-keystroke thrash)."""
+        q = self.win.library_search_query()
+        self.win.set_library_search_clear_enabled(bool(q.strip()))
+        if self._library_search_after_id is not None:
+            try:
+                self.win.root.after_cancel(self._library_search_after_id)
+            except Exception:
+                pass
+            self._library_search_after_id = None
+        self._library_search_after_id = self.win.root.after(
+            200, self._apply_library_search
+        )
+
+    def on_library_search_clear(self) -> None:
+        """Clear toolbar search (button or Escape in the entry)."""
+        if self._library_search_after_id is not None:
+            try:
+                self.win.root.after_cancel(self._library_search_after_id)
+            except Exception:
+                pass
+            self._library_search_after_id = None
+        if not self.win.library_search_query() and not self._library_search_query:
+            self.win.set_library_search_clear_enabled(False)
+            return
+        self.win.set_library_search_query("")
+        self.win.set_library_search_clear_enabled(False)
+        self._library_search_query = ""
+        if not self._library_busy:
+            self._rebuild_track_tree()
+            self._sync_library_chrome()
+
+    def _apply_library_search(self) -> None:
+        self._library_search_after_id = None
+        from mtpmanager.domain.library_search import normalize_search_text
+
+        q = self.win.library_search_query()
+        norm = normalize_search_text(q)
+        prev = normalize_search_text(self._library_search_query)
+        if norm == prev:
+            self._library_search_query = q
+            return
+        self._library_search_query = q
+        if self._library_busy or self._index_stream_active:
+            return
+        self._rebuild_track_tree()
+        self._sync_library_chrome()
+
     def _rebuild_track_tree(self) -> None:
         """Rebuild Music + Video + Audiobooks trees from library."""
         self._cancel_populate()
@@ -4442,8 +4498,18 @@ class AppController:
         # Tree selection is gone; keep startup hint, else clear context label.
         self._refresh_selection_detail([])
         all_tracks = list(self.library.tracks)
+        query = (self._library_search_query or self.win.library_search_query() or "")
+        self._library_search_query = query
+        if query.strip():
+            from mtpmanager.domain.library_search import filter_library_tracks
+
+            all_tracks = filter_library_tracks(all_tracks, query)
+            self._library_filter_shown_count = len(all_tracks)
+        else:
+            self._library_filter_shown_count = None
         if not all_tracks:
             self.win.set_tracks_usable(self._library_root_reachable())
+            self._sync_library_chrome()
             return
 
         music_tracks, video_tracks, audiobook_tracks = partition_library_media(
@@ -6400,11 +6466,20 @@ class AppController:
             self._refresh_manage_library_dialog()
             return
         reachable = self._library_root_reachable()
+        total = len(self.library)
+        q = (self._library_search_query or self.win.library_search_query() or "").strip()
+        filter_on = bool(q)
+        shown = self._library_filter_shown_count
+        if filter_on and shown is None:
+            shown = 0
         self.win.set_library_status(
-            track_count=len(self.library),
+            track_count=total,
             root_paths=list(self.library.root_paths),
             root_reachable=reachable if self.library.root_paths else True,
+            shown_count=shown if filter_on else None,
+            filter_active=filter_on,
         )
+        self.win.set_library_search_clear_enabled(filter_on)
         # Manage Library stays available so the user can add a first root
         # even when none are reachable yet.
         self.win.set_library_menu_state(manage_enabled=True)

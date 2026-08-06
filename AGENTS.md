@@ -53,6 +53,7 @@ Do **not**:
 | UI actions, mode, recovery dialogs | `mtpmanager/ui/controllers.py`, `window.py`, `dialogs.py` (incl. Manage Library) |
 | Exclusive MTP/USB ownership (auto-connect vs sync) | `mtpmanager/app/device_io_gate.py` + poll/transfer/seed paths in `ui/controllers.py` |
 | Artist/album selection | `mtpmanager/domain/library.py` |
+| Library fuzzy search (toolbar) | `domain/library_search.py`, toolbar entry in `ui/window.py`, debounce + filter in `ui/controllers.py` (`on_library_search_*`, `_rebuild_track_tree`) |
 | Scan / tags | `app/scan_library.py`, `infra/mutagen_tags.py` |
 | Album art thumbs | `infra/album_art.py` (mutagen + Pillow; album header rows only) |
 | Library index (SQLite + GUID; multi-root) | `infra/library_index.py`, `domain/library.py` (`root_paths`), `app/scan_library.py`, `domain/track_id.py`, `infra/app_paths.py` |
