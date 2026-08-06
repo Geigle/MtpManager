@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import math
-from typing import Literal
+import sys
+from typing import Callable, Literal
 
 from pathlib import Path
 
@@ -168,10 +169,54 @@ CTX_EXCLUDE_GROUP_FOLDER = "Exclude this folder…"
 
 # Playlists tab context menu
 CTX_PLAYLIST_REMOVE = "Remove from Playlist"
-CTX_PLAYLIST_MOVE_UP = "Move Up"
-CTX_PLAYLIST_MOVE_DOWN = "Move Down"
+# Linux: Alt+arrows; macOS: Option (⌥)+arrows — both bound (see _bind_playlist_reorder_keys).
+if sys.platform == "darwin":
+    CTX_PLAYLIST_MOVE_UP = "Move Up (⌥↑)"
+    CTX_PLAYLIST_MOVE_DOWN = "Move Down (⌥↓)"
+else:
+    CTX_PLAYLIST_MOVE_UP = "Move Up (Alt+↑)"
+    CTX_PLAYLIST_MOVE_DOWN = "Move Down (Alt+↓)"
 CTX_PLAYLIST_PLAY_TRACK = "Play This Track"
 CTX_PLAYLIST_SYNC = "Sync playlist to device"
+
+
+def _bind_playlist_reorder_keys(
+    widget,
+    *,
+    on_up: Callable[[], None] | None,
+    on_down: Callable[[], None] | None,
+) -> None:
+    """Bind Alt (Linux) / Option (macOS ⌥) + Up/Down for playlist reorder.
+
+    Aqua Tk accepts both ``Alt`` and ``Option`` as names for the Option key, but
+    which sequence actually fires varies by build — register every common form.
+    Plain Up/Down still move the tree selection (not rebound here).
+    """
+
+    def _call(cb: Callable[[], None] | None):
+        def _handler(_event=None):
+            if cb is not None:
+                cb()
+            return "break"
+
+        return _handler
+
+    up_h = _call(on_up)
+    down_h = _call(on_down)
+    for seq, handler in (
+        ("<Alt-Up>", up_h),
+        ("<Option-Up>", up_h),
+        ("<Alt-Key-Up>", up_h),
+        ("<Option-Key-Up>", up_h),
+        ("<Alt-Down>", down_h),
+        ("<Option-Down>", down_h),
+        ("<Alt-Key-Down>", down_h),
+        ("<Option-Key-Down>", down_h),
+    ):
+        try:
+            widget.bind(seq, handler)
+        except Exception:
+            pass
 
 # Device media context menus (on-device Music / Video / Audiobooks trees)
 CTX_DEVICE_DELETE = "Delete from device…"
@@ -1946,15 +1991,27 @@ class MainWindow:
             self.menu_playlist_ctx.entryconfig(
                 CTX_PLAYLIST_MOVE_UP, command=on_move_up
             )
-            self.playlist_tree.bind("<Alt-Up>", lambda _e: on_move_up() or "break")
         if on_move_down is not None:
             self.btn_playlist_move_down.configure(command=on_move_down)
             self.menu_playlist_ctx.entryconfig(
                 CTX_PLAYLIST_MOVE_DOWN, command=on_move_down
             )
-            self.playlist_tree.bind(
-                "<Alt-Down>", lambda _e: on_move_down() or "break"
+        if on_move_up is not None or on_move_down is not None:
+            _bind_playlist_reorder_keys(
+                self.playlist_tree,
+                on_up=on_move_up,
+                on_down=on_move_down,
             )
+            # Also on the tab so a click on empty chrome still has a path when
+            # the tree later receives focus; primary target remains the tree.
+            try:
+                _bind_playlist_reorder_keys(
+                    self.playlists_tab,
+                    on_up=on_move_up,
+                    on_down=on_move_down,
+                )
+            except Exception:
+                pass
         if on_play_track is not None:
             self.menu_playlist_ctx.entryconfig(
                 CTX_PLAYLIST_PLAY_TRACK, command=on_play_track
