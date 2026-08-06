@@ -16,6 +16,7 @@ from mtpmanager.domain.playlist_m3u import (
     append_entries,
     empty_m3u,
     entry_from_track,
+    move_paths,
     parse_m3u,
     remove_paths,
     serialize_m3u,
@@ -302,6 +303,25 @@ def remove_paths_from_playlist(
     if pl is None:
         raise ValueError(f"Playlist id {playlist_id} not found")
     new_text = remove_paths(pl.m3u_text, list(paths))
+    return set_playlist_m3u(playlist_id, new_text, path=path)
+
+
+def move_paths_in_playlist(
+    playlist_id: int,
+    paths: Iterable[str],
+    *,
+    delta: int,
+    path: Path | None = None,
+) -> Playlist:
+    """Move selected tracks up (*delta* < 0) or down (*delta* > 0) in the M3U.
+
+    Local host order only; the on-device playlist is updated on the next
+    “Sync playlist to device” (full overwrite with host order).
+    """
+    pl = get_playlist(playlist_id, path=path)
+    if pl is None:
+        raise ValueError(f"Playlist id {playlist_id} not found")
+    new_text = move_paths(pl.m3u_text, list(paths), delta=int(delta))
     return set_playlist_m3u(playlist_id, new_text, path=path)
 
 

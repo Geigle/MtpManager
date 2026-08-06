@@ -168,6 +168,8 @@ CTX_EXCLUDE_GROUP_FOLDER = "Exclude this folder…"
 
 # Playlists tab context menu
 CTX_PLAYLIST_REMOVE = "Remove from Playlist"
+CTX_PLAYLIST_MOVE_UP = "Move Up"
+CTX_PLAYLIST_MOVE_DOWN = "Move Down"
 CTX_PLAYLIST_PLAY_TRACK = "Play This Track"
 CTX_PLAYLIST_SYNC = "Sync playlist to device"
 
@@ -469,6 +471,8 @@ class MainWindow:
         self.menu_playlist_ctx = Menu(self.root, tearoff=0)
         self.menu_playlist_ctx.add_command(label=CTX_PLAYLIST_PLAY_TRACK)
         self.menu_playlist_ctx.add_command(label=CTX_PLAYLIST_REMOVE)
+        self.menu_playlist_ctx.add_command(label=CTX_PLAYLIST_MOVE_UP)
+        self.menu_playlist_ctx.add_command(label=CTX_PLAYLIST_MOVE_DOWN)
         self.menu_playlist_ctx.add_separator()
         self.menu_playlist_ctx.add_command(label=CTX_PLAYLIST_SYNC)
 
@@ -879,6 +883,14 @@ class MainWindow:
             pl_toolbar, text="Sync playlist to device", state=DISABLED
         )
         self.btn_playlist_sync.pack(side=LEFT, padx=(8, 2))
+        self.btn_playlist_move_up = Button(
+            pl_toolbar, text="↑", width=3, state=DISABLED
+        )
+        self.btn_playlist_move_up.pack(side=LEFT, padx=(8, 1))
+        self.btn_playlist_move_down = Button(
+            pl_toolbar, text="↓", width=3, state=DISABLED
+        )
+        self.btn_playlist_move_down.pack(side=LEFT, padx=1)
         self.lbl_playlist_status = Label(pl_toolbar, text="", anchor="w")
         self.lbl_playlist_status.pack(side=LEFT, fill=X, expand=True, padx=6)
 
@@ -1905,6 +1917,8 @@ class MainWindow:
         on_rename=None,
         on_sync=None,
         on_remove_tracks=None,
+        on_move_up=None,
+        on_move_down=None,
         on_play_track=None,
     ) -> None:
         """Wire Playlists tab toolbar + context menu."""
@@ -1926,6 +1940,20 @@ class MainWindow:
         if on_remove_tracks is not None:
             self.menu_playlist_ctx.entryconfig(
                 CTX_PLAYLIST_REMOVE, command=on_remove_tracks
+            )
+        if on_move_up is not None:
+            self.btn_playlist_move_up.configure(command=on_move_up)
+            self.menu_playlist_ctx.entryconfig(
+                CTX_PLAYLIST_MOVE_UP, command=on_move_up
+            )
+            self.playlist_tree.bind("<Alt-Up>", lambda _e: on_move_up() or "break")
+        if on_move_down is not None:
+            self.btn_playlist_move_down.configure(command=on_move_down)
+            self.menu_playlist_ctx.entryconfig(
+                CTX_PLAYLIST_MOVE_DOWN, command=on_move_down
+            )
+            self.playlist_tree.bind(
+                "<Alt-Down>", lambda _e: on_move_down() or "break"
             )
         if on_play_track is not None:
             self.menu_playlist_ctx.entryconfig(
@@ -1953,6 +1981,8 @@ class MainWindow:
             self.btn_playlist_rename.configure(state=DISABLED)
             self.btn_playlist_delete.configure(state=DISABLED)
             self.btn_playlist_sync.configure(state=DISABLED)
+            self.btn_playlist_move_up.configure(state=DISABLED)
+            self.btn_playlist_move_down.configure(state=DISABLED)
             return
         self.playlist_combo.configure(values=values, state="readonly")
         pick = selected if selected in values else values[0]
@@ -1960,6 +1990,8 @@ class MainWindow:
         self.btn_playlist_rename.configure(state=NORMAL)
         self.btn_playlist_delete.configure(state=NORMAL)
         self.btn_playlist_sync.configure(state=NORMAL)
+        self.btn_playlist_move_up.configure(state=NORMAL)
+        self.btn_playlist_move_down.configure(state=NORMAL)
 
     def clear_playlist_tree(self) -> None:
         tree = self.playlist_tree

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections import deque
 from dataclasses import dataclass
 
 from mtpmanager.domain.library import primary_artist
@@ -148,6 +149,88 @@ def remove_paths(text: str, paths: list[str] | set[str]) -> str:
         e for e in parse_m3u(text) if os.path.normpath(e.path) not in drop
     ]
     return serialize_m3u(kept) if kept else empty_m3u()
+
+
+def move_paths(
+    text: str,
+    paths: list[str] | set[str],
+    *,
+    delta: int,
+) -> str:
+    """Move selected paths one step up (*delta* < 0) or down (*delta* > 0).
+
+    Multi-select moves each selected index by one step in *delta*'s direction,
+    processing from the end that avoids collisions (standard list reorder).
+    Paths are matched by normpath; only the first occurrence of each path is
+    selected when *paths* is a set of path strings. Duplicate path rows: all
+    matching occurrences whose path is in *paths* move together.
+    """
+    if not delta:
+        return serialize_m3u(parse_m3u(text)) if text.strip() else empty_m3u()
+    entries = parse_m3u(text)
+    if len(entries) < 2:
+        return serialize_m3u(entries) if entries else empty_m3u()
+
+    want = {os.path.normpath(p) for p in paths if p}
+    if not want:
+        return serialize_m3u(entries)
+
+    selected = [
+        i
+        for i, e in enumerate(entries)
+        if os.path.normpath(e.path) in want
+    ]
+    if not selected:
+        return serialize_m3u(entries)
+
+    items = list(entries)
+    step = -1 if delta < 0 else 1
+    if step < 0:
+        # Move up: lowest indices first.
+        if min(selected) == 0:
+            return serialize_m3u(items)
+        for i in sorted(selected):
+            j = i - 1
+            items[i], items[j] = items[j], items[i]
+    else:
+        # Move down: highest indices first.
+        if max(selected) >= len(items) - 1:
+            return serialize_m3u(items)
+        for i in sorted(selected, reverse=True):
+            j = i + 1
+            items[i], items[j] = items[j], items[i]
+    return serialize_m3u(items)
+
+
+def reorder_by_paths(text: str, ordered_paths: list[str]) -> str:
+    """Rewrite playlist order from an ordered path list.
+
+    Each path in *ordered_paths* consumes the next unused matching entry from
+    *text* (normpath). Entries never listed are appended in prior order.
+    """
+    entries = parse_m3u(text)
+    if not entries:
+        return empty_m3u()
+    pools: dict[str, deque[PlaylistEntry]] = {}
+    for e in entries:
+        pools.setdefault(os.path.normpath(e.path), deque()).append(e)
+
+    out: list[PlaylistEntry] = []
+    taken: set[int] = set()
+    for raw in ordered_paths:
+        key = os.path.normpath(raw or "")
+        if not key:
+            continue
+        pool = pools.get(key)
+        if not pool:
+            continue
+        e = pool.popleft()
+        out.append(e)
+        taken.add(id(e))
+    for e in entries:
+        if id(e) not in taken:
+            out.append(e)
+    return serialize_m3u(out) if out else empty_m3u()
 
 
 def paths_in_m3u(text: str) -> list[str]:
