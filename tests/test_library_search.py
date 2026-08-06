@@ -6,10 +6,13 @@ import unittest
 
 from mtpmanager.domain.library_search import (
     filter_library_tracks,
+    filter_library_tracks_scored,
     normalize_search_text,
+    reorder_groups_by_score,
     score_query_against_text,
     score_track,
 )
+from mtpmanager.domain.library_sort import GroupNode
 from mtpmanager.domain.models import Track, TrackMetadata
 
 
@@ -79,6 +82,41 @@ class LibrarySearchTests(unittest.TestCase):
             album="Powerslave",
         )
         self.assertGreater(score_track("powerslave", t), 0.5)
+
+    def test_reorder_groups_by_score(self) -> None:
+        weak = _t("/w.mp3", title="Weak", artist="A", album="One")
+        strong = _t("/s.mp3", title="Nightfall", artist="B", album="Two")
+        mid = _t("/m.mp3", title="Night something", artist="A", album="One")
+        _tracks, scores = filter_library_tracks_scored(
+            [weak, strong, mid], "nightfall"
+        )
+        # Force scores for a deterministic group order check.
+        scores = {
+            weak.path: 0.2,
+            mid.path: 0.5,
+            strong.path: 1.0,
+        }
+        groups = [
+            GroupNode(
+                key="a",
+                label="A",
+                children=(
+                    GroupNode(key="a1", label="One", tracks=(weak, mid)),
+                ),
+            ),
+            GroupNode(
+                key="b",
+                label="B",
+                children=(
+                    GroupNode(key="b1", label="Two", tracks=(strong,)),
+                ),
+            ),
+        ]
+        ranked = reorder_groups_by_score(groups, scores)
+        self.assertEqual(ranked[0].key, "b")
+        # Tracks inside A/One ordered strong-first among that album.
+        one = ranked[1].children[0]
+        self.assertEqual([t.path for t in one.tracks], [mid.path, weak.path])
 
 
 if __name__ == "__main__":

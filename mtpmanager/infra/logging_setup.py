@@ -48,11 +48,21 @@ def get_log_dir() -> Path:
     return default_log_dir()
 
 
-def _console_level() -> int:
+def debug_ui_enabled() -> bool:
+    """True when developer/debug UI extras should appear.
+
+    Matches console DEBUG: ``MTP_MANAGER_DEBUG=1`` or ``-v`` / ``--verbose``.
+    """
     debug = os.environ.get("MTP_MANAGER_DEBUG", "").strip().lower()
     if debug in ("1", "true", "yes", "on"):
-        return logging.DEBUG
+        return True
     if "--verbose" in sys.argv or "-v" in sys.argv:
+        return True
+    return False
+
+
+def _console_level() -> int:
+    if debug_ui_enabled():
         return logging.DEBUG
     return logging.INFO
 

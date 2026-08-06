@@ -97,6 +97,32 @@ def score_track(query: str, track: Track) -> float:
     return score_query_against_text(query, track_search_blob(track))
 
 
+def filter_library_tracks_scored(
+    tracks: Sequence[Track],
+    query: str,
+    *,
+    min_score: float = 0.12,
+) -> tuple[list[Track], dict[str, float]]:
+    """Return (tracks best-first, path→score) for *query*.
+
+    Empty / whitespace *query* returns all *tracks* in original order and an
+    empty score map.
+    """
+    q = normalize_search_text(query)
+    if not q:
+        return list(tracks), {}
+
+    scored: list[tuple[float, str, Track]] = []
+    for t in tracks:
+        s = score_track(q, t)
+        if s >= min_score:
+            scored.append((s, t.path or "", t))
+    scored.sort(key=lambda row: (-row[0], row[1].casefold()))
+    out = [t for _s, _p, t in scored]
+    scores = {p: s for s, p, _t in scored if p}
+    return out, scores
+
+
 def filter_library_tracks(
     tracks: Sequence[Track],
     query: str,
@@ -108,15 +134,77 @@ def filter_library_tracks(
     Empty / whitespace *query* returns a shallow copy of *tracks* in the
     original order (no scoring).
     """
-    q = normalize_search_text(query)
-    if not q:
-        return list(tracks)
+    out, _scores = filter_library_tracks_scored(
+        tracks, query, min_score=min_score
+    )
+    return out
 
-    scored: list[tuple[float, str, Track]] = []
-    for t in tracks:
-        s = score_track(q, t)
-        if s >= min_score:
-            scored.append((s, t.path or "", t))
-    # Highest score first; stable path tie-break.
-    scored.sort(key=lambda row: (-row[0], row[1].casefold()))
-    return [t for _s, _p, t in scored]
+
+def sort_tracks_by_score(
+    tracks: Sequence[Track],
+    scores: dict[str, float],
+) -> list[Track]:
+    """Stable order: highest score first, then path."""
+    return sorted(
+        tracks,
+        key=lambda t: (
+            -float(scores.get(t.path or "", 0.0)),
+            (t.path or "").casefold(),
+        ),
+    )
+
+
+def _group_best_score(node, scores: dict[str, float]) -> float:
+    """Max track score under a :class:`~mtpmanager.domain.library_sort.GroupNode`."""
+    best = 0.0
+    for t in getattr(node, "tracks", ()) or ():
+        best = max(best, float(scores.get(t.path or "", 0.0)))
+    for child in getattr(node, "children", ()) or ():
+        best = max(best, _group_best_score(child, scores))
+    return best
+
+
+def reorder_groups_by_score(groups: Sequence, scores: dict[str, float]) -> list:
+    """Reorder group tree so strongest matches surface first.
+
+    *groups* are :class:`~mtpmanager.domain.library_sort.GroupNode` instances.
+    Within each group, tracks are sorted by score; sibling groups by best score.
+    """
+    from mtpmanager.domain.library_sort import GroupNode
+
+    if not scores:
+        return list(groups)
+
+    def reorder_node(node: GroupNode) -> GroupNode:
+        if node.children:
+            kids = [reorder_node(c) for c in node.children]
+            kids.sort(
+                key=lambda n: (
+                    -_group_best_score(n, scores),
+                    (n.label or "").casefold(),
+                    n.key,
+                )
+            )
+            return GroupNode(
+                key=node.key,
+                label=node.label,
+                tracks=(),
+                children=tuple(kids),
+            )
+        ordered = sort_tracks_by_score(node.tracks, scores)
+        return GroupNode(
+            key=node.key,
+            label=node.label,
+            tracks=tuple(ordered),
+            children=(),
+        )
+
+    out = [reorder_node(g) for g in groups]
+    out.sort(
+        key=lambda n: (
+            -_group_best_score(n, scores),
+            (n.label or "").casefold(),
+            n.key,
+        )
+    )
+    return out
