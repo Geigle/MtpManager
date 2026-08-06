@@ -1648,14 +1648,12 @@ class AppController:
             self._refresh_podcast_tab()
             if self._selected_podcast_id is not None:
                 self._load_podcast_episodes(self._selected_podcast_id)
-            # Drain any leftovers not streamed (device was busy / disconnected).
-            self._maybe_auto_sync_pending_podcasts()
-            if (
-                not self._podcast_auto_device_inflight
-                and not self._transfer_busy
-                and self._pending_day_podcast_playlist is not None
-            ):
-                self._try_publish_day_podcast_playlist()
+            # Drain leftovers / publish after quiet if transfer is idle.
+            if self._transfer_busy or self._podcast_auto_device_inflight:
+                # Live stream still owns the pipeline; finish path will drain.
+                pass
+            else:
+                self._schedule_podcast_leftover_drain()
 
         def on_error(exc: BaseException) -> None:
             self._podcast_auto_host_inflight = False
@@ -1668,8 +1666,9 @@ class AppController:
                 pass
             logger.exception("Podcast full sync host pass failed: %s", exc)
             messagebox.showerror("Podcast", f"{label} failed:\n{exc}")
-            # Still try to sync whatever landed on disk.
-            self._maybe_auto_sync_pending_podcasts()
+            # Still try to sync whatever landed on disk (after quiet).
+            if not self._transfer_busy:
+                self._schedule_podcast_leftover_drain()
 
         self._bg.submit(
             work,
@@ -1888,17 +1887,7 @@ class AppController:
         pending = self._pending_auto_podcast
         self._pending_auto_podcast = None
         self._podcast_auto_device_inflight = False
-        if not pending:
-            # Transfer ended without a tracked auto batch; still drain/publish.
-            if not self._podcast_auto_host_inflight:
-                self._maybe_auto_sync_pending_podcasts()
-                if (
-                    not self._podcast_auto_device_inflight
-                    and not self._transfer_busy
-                ):
-                    self._try_publish_day_podcast_playlist()
-            return
-        ids = list(pending.get("episode_ids") or [])
+        ids = list((pending or {}).get("episode_ids") or [])
         if ok and ids:
             # Only clear pending for episodes that actually landed (or vanished).
             # Streaming may attach episode_ids that never made the queue.
@@ -1930,15 +1919,63 @@ class AppController:
         # Host may still be downloading — wait to publish until host is done.
         if self._podcast_auto_host_inflight:
             return
-        # Race: queue drained while more episodes were about to stream, or
-        # leftovers never made it onto the live queue.
-        self._maybe_auto_sync_pending_podcasts()
-        if (
-            ok
-            and not self._podcast_auto_device_inflight
-            and not self._transfer_busy
-        ):
-            self._try_publish_day_podcast_playlist()
+        if not ok:
+            # ZEN session is often poisoned after PTP 02ff / LIBMTP panic.
+            # Do **not** auto-start another batch; leave pending for Resume /
+            # next schedule after the user reconnects.
+            try:
+                self._device_io.mark_quiet()
+            except Exception:
+                pass
+            logger.warning(
+                "Auto podcast batch incomplete — not auto-retrying "
+                "(reconnect / Resume Sync if more episodes remain)"
+            )
+            return
+        # Success: drain leftovers only after USB quiet window. Starting a
+        # second batch immediately after a long send often hits a dead session
+        # (LIBMTP panic / zero packet) and lands tracks under wrong parents.
+        self._schedule_podcast_leftover_drain()
+
+    def _schedule_podcast_leftover_drain(self) -> None:
+        """After a quiet pause, sync any still-pending episodes + publish day PL."""
+        try:
+            self._device_io.mark_quiet()
+        except Exception:
+            pass
+        remaining_ms = 0
+        try:
+            remaining_ms = int(self._device_io.quiet_remaining_s() * 1000)
+        except Exception:
+            remaining_ms = 0
+        # At least a few seconds after a multi-track podcast flood.
+        delay_ms = max(remaining_ms, 4_000)
+
+        def _run() -> None:
+            if self._podcast_auto_host_inflight or self._transfer_busy:
+                return
+            self._maybe_auto_sync_pending_podcasts()
+            if (
+                not self._podcast_auto_device_inflight
+                and not self._transfer_busy
+            ):
+                self._try_publish_day_podcast_playlist()
+
+        try:
+            self.win.lbl_podcast_status.configure(
+                text=(
+                    f"Podcast: waiting {delay_ms // 1000}s for device "
+                    "before remaining episodes…"
+                    if delay_ms >= 1000
+                    else "Podcast: checking for remaining episodes…"
+                )
+            )
+        except Exception:
+            pass
+        logger.info(
+            "Scheduling podcast leftover drain in %dms", delay_ms
+        )
+        self.win.root.after(delay_ms, _run)
 
     def _try_publish_day_podcast_playlist(self) -> None:
         """Push today's scheduled podcast playlist to the device (PyMTP).
@@ -7313,12 +7350,21 @@ class AppController:
         logger.info("Sync job failed: %s", job.summary_line())
 
     def _tracks_for_paths(self, paths: list[str]) -> list[Track]:
-        """Map source paths to Track objects (library first, else re-read tags)."""
+        """Map source paths to Track objects (library, podcast index, or tags).
+
+        Podcast cache files often have empty embedded tags; resume must pull
+        show/episode metadata (and GUID) from ``podcast_episodes`` so the
+        device does not get ``Unknown Artist``.
+        """
         by_path = {t.path: t for t in self.library.tracks}
         out: list[Track] = []
         for p in paths:
             if p in by_path:
                 out.append(by_path[p])
+                continue
+            pod = self._podcast_track_for_path(p)
+            if pod is not None:
+                out.append(pod)
                 continue
             if os.path.isfile(p):
                 try:
@@ -7326,10 +7372,53 @@ class AppController:
                 except Exception:
                     logger.warning("Could not read tags for resume path %s", p)
                     meta = TrackMetadata()
-                out.append(Track(path=p, meta=meta))
+                # Prefer GUID from basename when present (device ObjectFileName).
+                stem = os.path.splitext(os.path.basename(p))[0]
+                guid = stem.lower() if is_track_guid(stem) else ""
+                out.append(Track(path=p, meta=meta, guid=guid))
             else:
                 logger.warning("Resume: skipping missing path %s", p)
         return out
+
+    def _podcast_track_for_path(self, path: str) -> Track | None:
+        """Build a transfer Track from podcast cache path or episode GUID stem."""
+        p = (path or "").strip()
+        if not p:
+            return None
+        try:
+            from dataclasses import replace
+
+            from mtpmanager.app.podcast_ops import episode_as_track
+            from mtpmanager.infra.podcast_index import get_episode_by_guid
+
+            stem = os.path.splitext(os.path.basename(p))[0]
+            # Cache layout: …/podcasts/{show_id}/{guid}.mp3
+            guid = ""
+            if is_track_guid(stem):
+                guid = stem.lower()
+            else:
+                g = guid_from_remote_name(os.path.basename(p))
+                if g:
+                    guid = g
+            if not guid:
+                return None
+            ep = get_episode_by_guid(guid)
+            if ep is None:
+                return None
+            show = get_podcast(int(ep.podcast_id))
+            if show is None:
+                return None
+            # Prefer the on-disk path we were given for the send.
+            if p and os.path.isfile(p) and (ep.local_path or "") != p:
+                ep = replace(ep, local_path=p)
+            return episode_as_track(ep, show)
+        except FileNotFoundError:
+            return None
+        except Exception:
+            logger.debug(
+                "podcast track resolve failed path=%s", path, exc_info=True
+            )
+            return None
 
     def _skip_missing_job_head(self, job: SyncJobState) -> None:
         """Advance past missing files at the resume head so we do not stall."""

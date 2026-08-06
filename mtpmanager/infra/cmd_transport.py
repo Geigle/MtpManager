@@ -248,13 +248,12 @@ class CmdTransport:
         preferred_basename: str | None = None,
     ) -> int | None:
         _, file_extension = os.path.splitext(path)
-        # GUID mode: always flat under Music (ignore artist/album parents).
-        if guid:
-            folder_id = int(self.music_folder_id)
+        # Explicit parent wins (podcast ZENcast). GUID only sets ObjectFileName;
+        # music defaults to Music when parent_id is omitted.
+        if parent_id is not None and int(parent_id) > 0:
+            folder_id = int(parent_id)
         else:
-            folder_id = (
-                int(parent_id) if parent_id is not None else int(self.music_folder_id)
-            )
+            folder_id = int(self.music_folder_id)
         remote = build_remote_path(
             meta,
             file_extension or ".mp3",
