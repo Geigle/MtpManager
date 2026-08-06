@@ -177,6 +177,9 @@ else:
     CTX_PLAYLIST_MOVE_UP = "Move Up (Alt+↑)"
     CTX_PLAYLIST_MOVE_DOWN = "Move Down (Alt+↓)"
 CTX_PLAYLIST_PLAY_TRACK = "Play This Track"
+CTX_PLAYLIST_SHUFFLE_ARTIST = "Shuffle by Artist (Merge)…"
+CTX_PLAYLIST_SHUFFLE_ALBUM = "Shuffle by Album…"
+CTX_PLAYLIST_SHUFFLE_SPOTIFY = "Shuffle (Spotify-style)…"
 CTX_PLAYLIST_SYNC = "Sync playlist to device"
 
 
@@ -518,6 +521,13 @@ class MainWindow:
         self.menu_playlist_ctx.add_command(label=CTX_PLAYLIST_REMOVE)
         self.menu_playlist_ctx.add_command(label=CTX_PLAYLIST_MOVE_UP)
         self.menu_playlist_ctx.add_command(label=CTX_PLAYLIST_MOVE_DOWN)
+        self.menu_playlist_shuffle = Menu(self.menu_playlist_ctx, tearoff=0)
+        self.menu_playlist_shuffle.add_command(label=CTX_PLAYLIST_SHUFFLE_ARTIST)
+        self.menu_playlist_shuffle.add_command(label=CTX_PLAYLIST_SHUFFLE_ALBUM)
+        self.menu_playlist_shuffle.add_command(label=CTX_PLAYLIST_SHUFFLE_SPOTIFY)
+        self.menu_playlist_ctx.add_cascade(
+            label="Shuffle playlist…", menu=self.menu_playlist_shuffle
+        )
         self.menu_playlist_ctx.add_separator()
         self.menu_playlist_ctx.add_command(label=CTX_PLAYLIST_SYNC)
 
@@ -1964,6 +1974,9 @@ class MainWindow:
         on_remove_tracks=None,
         on_move_up=None,
         on_move_down=None,
+        on_shuffle_artist=None,
+        on_shuffle_album=None,
+        on_shuffle_spotify=None,
         on_play_track=None,
     ) -> None:
         """Wire Playlists tab toolbar + context menu."""
@@ -2012,6 +2025,18 @@ class MainWindow:
                 )
             except Exception:
                 pass
+        if on_shuffle_artist is not None:
+            self.menu_playlist_shuffle.entryconfig(
+                CTX_PLAYLIST_SHUFFLE_ARTIST, command=on_shuffle_artist
+            )
+        if on_shuffle_album is not None:
+            self.menu_playlist_shuffle.entryconfig(
+                CTX_PLAYLIST_SHUFFLE_ALBUM, command=on_shuffle_album
+            )
+        if on_shuffle_spotify is not None:
+            self.menu_playlist_shuffle.entryconfig(
+                CTX_PLAYLIST_SHUFFLE_SPOTIFY, command=on_shuffle_spotify
+            )
         if on_play_track is not None:
             self.menu_playlist_ctx.entryconfig(
                 CTX_PLAYLIST_PLAY_TRACK, command=on_play_track

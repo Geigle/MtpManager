@@ -325,6 +325,17 @@ def move_paths_in_playlist(
     return set_playlist_m3u(playlist_id, new_text, path=path)
 
 
+def replace_playlist_tracks(
+    playlist_id: int,
+    tracks: Iterable[Track],
+    *,
+    path: Path | None = None,
+) -> Playlist:
+    """Replace playlist membership/order with *tracks* (host M3U only)."""
+    body = serialize_m3u(list(tracks))
+    return set_playlist_m3u(playlist_id, body, path=path)
+
+
 def resolve_playlist_tracks(
     playlist: Playlist,
     *,
