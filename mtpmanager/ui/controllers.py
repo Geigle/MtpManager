@@ -1451,7 +1451,7 @@ class AppController:
         )
         if result.run_full_sync_now:
             self._start_full_podcast_sync(
-                podcast_ids=None, force_all=True, label="Full Podcast Sync"
+                podcast_ids=None, label="Full Podcast Sync"
             )
         else:
             self.win.root.after(200, self._podcast_schedule_tick)
@@ -1527,7 +1527,6 @@ class AppController:
             return
         self._start_full_podcast_sync(
             podcast_ids=[p.id for p in due],
-            force_all=False,
             label="Scheduled Podcast Sync",
             quiet=quiet,
         )
@@ -1536,14 +1535,14 @@ class AppController:
         self,
         *,
         podcast_ids: list[int] | None,
-        force_all: bool,
         label: str,
         quiet: bool = False,
     ) -> None:
-        """Refresh feeds + download N newest new episodes (host pass).
+        """Host pass: refresh feeds; download ≤N episodes published since last full sync.
 
-        *force_all*: manual Full Sync Now — all shows with auto_update (or
-        every subscribed show when ids is None).
+        *podcast_ids*: ``None`` = every subscribed show (manual Full Sync Now);
+        otherwise only those ids (scheduled due shows). Cap N never backfills
+        older catalog items outside the publish window.
 
         *quiet*: scheduled/auto path — no dialogs if already busy or library
         is still loading (caller retries later).
@@ -1572,14 +1571,10 @@ class AppController:
         stems = self._device_guid_stems_for_skip() or set()
         max_n = int(self._config.podcast_max_new_per_show or 1)
         fmt = self._target_format()
-        # Manual full sync has no lower pub_date bound (all missing up to N).
-        # Scheduled passes use last full-sync day as the “since” window.
-        if force_all:
-            since = ""
-            ids = podcast_ids
-        else:
-            since = (self._config.podcast_last_full_sync_local_date or "").strip()
-            ids = podcast_ids
+        # Cap N applies only inside the “published since last full sync” window.
+        # Empty stamp → host pass floors to today (no catalog backfill).
+        since = (self._config.podcast_last_full_sync_local_date or "").strip()
+        ids = podcast_ids
         try:
             self.win.lbl_podcast_status.configure(text=f"{label}: updating…")
             self.win.set_progress_status(

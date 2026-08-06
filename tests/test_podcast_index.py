@@ -182,12 +182,36 @@ class PodcastIndexTests(unittest.TestCase):
             )
             self.assertEqual(len(picks2), 1)
             self.assertEqual(picks2[0].feed_guid, "e1")
-            # Since window excludes older episode.
+            # Since window excludes older episode — limit does not backfill.
             picks3 = pick_new_not_on_device(
                 p.id, set(), limit=2, path=db, since_iso="2026-08-03"
             )
             self.assertEqual(len(picks3), 1)
             self.assertEqual(picks3[0].feed_guid, "e2")
+            # Only one episode in window even when limit=2 (no older fillers).
+            picks4 = pick_new_not_on_device(
+                p.id, set(), limit=2, path=db, since_iso="2026-08-04"
+            )
+            self.assertEqual(len(picks4), 1)
+            self.assertEqual(picks4[0].feed_guid, "e2")
+            # Undated items must not pad the since-window quota.
+            upsert_episodes(
+                p.id,
+                [
+                    {
+                        "feed_guid": "e-undated",
+                        "title": "No Date",
+                        "pub_date": "",
+                        "enclosure_url": "https://x/e0.mp3",
+                    },
+                ],
+                path=db,
+            )
+            picks5 = pick_new_not_on_device(
+                p.id, set(), limit=2, path=db, since_iso="2026-08-03"
+            )
+            self.assertEqual(len(picks5), 1)
+            self.assertEqual(picks5[0].feed_guid, "e2")
 
     def test_get_tracks_by_podcast_guids(self) -> None:
         """Device ObjectFileName GUID → podcast_episodes metadata (not tracks)."""

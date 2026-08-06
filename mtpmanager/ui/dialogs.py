@@ -1937,8 +1937,9 @@ def show_podcast_settings_dialog(
         body,
         text=(
             "While MtpManager is open, check subscribed feeds on a schedule "
-            "and download the N most recent new episodes since the last full "
-            "sync. Missed times catch up after launch or wake. Use Full Sync "
+            "and download at most N episodes published since the last full "
+            "sync (never older catalog fillers). Missed times catch up after "
+            "launch or wake. Use Full Sync "
             "Now to run the same pass immediately."
         ),
         justify=LEFT,

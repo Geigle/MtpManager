@@ -406,9 +406,12 @@ def pick_new_not_on_device(
 ) -> list[PodcastEpisode]:
     """Up to *limit* newest episodes not already on the device (by host GUID).
 
+    *limit* is a cap **within** the publish window, not a fill-to-N quota.
     When *since_iso* is set (YYYY-MM-DD or ISO prefix), only episodes whose
-    ``pub_date`` sorts at or after that stamp are considered — the window
-    “since last full sync”. Empty *since_iso* means no lower bound (first run).
+    ``pub_date`` sorts at or after that stamp are candidates. Older catalog
+    items are never used to pad the list up to *limit*. Episodes without a
+    ``pub_date`` are excluded when a window is set (undated cannot be proven
+    “new since last sync”). Empty *since_iso* means no lower bound.
 
     When *require_download* is True, only return episodes whose local media
     is missing.
@@ -426,8 +429,9 @@ def pick_new_not_on_device(
             continue
         if since:
             pub = (ep.pub_date or "").strip()
-            # Allow undated items through so feed quirks do not starve the run.
-            if pub and pub[: len(since)] < since:
+            # Require a dated pub stamp inside the window — do not treat
+            # undated feed items as “new” fillers.
+            if not pub or pub[: len(since)] < since:
                 continue
         if require_download:
             if ep.local_path and os.path.isfile(ep.local_path):
@@ -489,11 +493,16 @@ def run_full_sync_host_pass(
     since_last_full_sync: str = "",
     on_episode_ready: Callable[[PodcastEpisode, Track], None] | None = None,
 ) -> HostPassResult:
-    """Refresh feeds, download up to N newest new episodes, mark pending sync.
+    """Refresh feeds, download up to N new-since-window episodes, mark pending.
 
     Does not touch MTP. Marks each processed show's ``auto_last_run_local_date``.
-    *since_last_full_sync* limits candidates to episodes at/after that stamp
-    (empty = no lower bound — first full sync).
+
+    *max_new_per_show* caps how many episodes **published in the window** are
+    taken per show — it never backfills older catalog items to reach N.
+
+    *since_last_full_sync* is the lower pub_date bound (YYYY-MM-DD). Empty
+    means first full sync: use *now_local*'s local calendar day so history
+    is not dumped into the queue.
 
     *on_episode_ready* (optional) is invoked on the caller/worker thread after
     each episode is on disk and marked pending — so the UI can enqueue device
@@ -506,6 +515,9 @@ def run_full_sync_host_pass(
     when = now_local or datetime.now().astimezone()
     local_day = when.date().isoformat()
     since = (since_last_full_sync or "").strip()
+    if not since:
+        # First full sync: only today's publications — not catalog history.
+        since = local_day
 
     if podcast_ids is None:
         shows = list_podcasts(path=path)
