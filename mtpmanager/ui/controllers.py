@@ -76,7 +76,6 @@ from mtpmanager.domain.device_media import (
     enrich_refs_from_host,
     expand_podcast_parent_ids,
     looks_like_track,
-    podcast_folder_label,
     refs_needing_device_tags,
     resolve_device_tracks_for_display,
     track_meta_is_usable,
@@ -4688,7 +4687,12 @@ class AppController:
         refs: list[DeviceTrackRef],
         by_guid: dict[str, Track] | None = None,
     ) -> None:
-        """Chunked Treeview insert for Device → Podcasts (folder → episodes)."""
+        """Chunked Treeview insert for Device → Podcasts.
+
+        Hierarchy: network → podcast (``{show} - {network}``) → episodes.
+        Episodes are reverse-chronological (pub date / year desc). Device
+        folder parents (Music / ZENcast) are not shown.
+        """
         self._cancel_device_podcast_populate()
         self.win.clear_device_podcasts_tree()
         self._device_podcast_track_by_iid.clear()
@@ -4698,46 +4702,90 @@ class AppController:
         if not refs:
             return
 
-        by_folder: dict[int, list[DeviceTrackRef]] = {}
-        for ref in refs:
-            pid = int(ref.parent_id or 0)
-            by_folder.setdefault(pid, []).append(ref)
+        display = resolve_device_tracks_for_display(refs, by_guid)
+        # network_key → podcast_key → list of (ref, track)
+        by_network: dict[str, dict[str, list[tuple[DeviceTrackRef, Track]]]] = {}
+        # Stable display labels for keys
+        network_label: dict[str, str] = {}
+        podcast_label: dict[tuple[str, str], str] = {}
 
-        layout = self._folder_layout_or_legacy()
-        podcast_root = layout.podcast_id
+        for ref, track in zip(refs, display):
+            meta = track.meta
+            show = (meta.album or "").strip() or "Unknown podcast"
+            author = (meta.artist or "").strip()
+            # episode_display_track falls back artist→show when author empty;
+            # avoid "Show - Show" and treat that as no network.
+            if (
+                author
+                and author.casefold() != show.casefold()
+                and author.casefold() not in ("unknown artist", "podcast")
+            ):
+                net = author
+            else:
+                net = "Other"
+            net_key = net.casefold()
+            show_key = show.casefold()
+            network_label[net_key] = net
+            row_label = f"{show} - {net}" if net != "Other" else show
+            podcast_label[(net_key, show_key)] = row_label
+            by_network.setdefault(net_key, {}).setdefault(show_key, []).append(
+                (ref, track)
+            )
 
-        def folder_sort_key(pid: int) -> tuple:
-            if pid == podcast_root:
-                return (0, pid)
-            return (1, (layout.name_for(pid) or "").casefold(), pid)
+        def episode_sort_key(pair: tuple[DeviceTrackRef, Track]) -> tuple:
+            _ref, track = pair
+            # ISO-ish dates sort lexicographically with reverse=True → newest first.
+            date = (track.meta.date or "").strip()
+            return (
+                date,
+                (track.meta.title or "").casefold(),
+                int(_ref.item_id or 0),
+            )
 
         ops: list = []
-        for pid in sorted(by_folder.keys(), key=folder_sort_key):
-            folder_refs = by_folder[pid]
-            folder_iid = f"dp:folder:{pid}"
-            label = podcast_folder_label(
-                pid, layout=layout, podcast_root=podcast_root
-            )
+        # Networks A–Z; "Other" last.
+        def net_sort_key(nk: str) -> tuple:
+            lab = network_label.get(nk, nk)
+            if lab == "Other":
+                return (1, lab.casefold())
+            return (0, lab.casefold())
+
+        for nk in sorted(by_network.keys(), key=net_sort_key):
+            net_iid = f"dp:net:{nk}"
             ops.append(
                 (
                     "group",
                     "",
-                    folder_iid,
-                    label,
-                    ("group", "group_folder"),
+                    net_iid,
+                    network_label[nk],
+                    ("group", "group_network"),
                 )
             )
-            display = resolve_device_tracks_for_display(folder_refs, by_guid)
-            paired = list(zip(folder_refs, display))
-            paired.sort(
-                key=lambda pair: (
-                    (pair[1].meta.title or "").casefold(),
-                    (pair[0].name or "").casefold(),
-                    int(pair[0].item_id or 0),
+            shows = by_network[nk]
+            for sk in sorted(
+                shows.keys(), key=lambda k: podcast_label[(nk, k)].casefold()
+            ):
+                show_iid = f"dp:show:{nk}:{sk}"
+                ops.append(
+                    (
+                        "group",
+                        net_iid,
+                        show_iid,
+                        podcast_label[(nk, sk)],
+                        ("group", "group_podcast"),
+                    )
                 )
-            )
-            for _ref, track in paired:
-                ops.append(("track", folder_iid, track))
+                paired = list(shows[sk])
+                # Newest first; undated (empty date) last.
+                paired.sort(key=episode_sort_key, reverse=True)
+                dated = [
+                    p for p in paired if (p[1].meta.date or "").strip()
+                ]
+                undated = [
+                    p for p in paired if not (p[1].meta.date or "").strip()
+                ]
+                for _ref, track in dated + undated:
+                    ops.append(("track", show_iid, track))
 
         chunks = fibonacci_chunk_bounds(len(ops))
         if not chunks:
