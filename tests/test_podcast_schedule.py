@@ -81,6 +81,25 @@ class PodcastScheduleTests(unittest.TestCase):
         self.assertIn("weekdays", summary)
         self.assertIn("6:30 AM", summary)
 
+    def test_next_run_aware_now_local(self) -> None:
+        """UI passes datetime.now().astimezone(); candidates must match tz."""
+        now = datetime.now().astimezone().replace(
+            year=2026, month=8, day=5, hour=5, minute=0, second=0, microsecond=0
+        )
+        nxt = next_run_after(
+            now_local=now,
+            days=WEEKDAY_KEYS,
+            time_hhmm="06:30",
+            last_run_local_date="",
+        )
+        self.assertIsNotNone(nxt)
+        assert nxt is not None
+        self.assertEqual(nxt.tzinfo, now.tzinfo)
+        self.assertEqual(nxt.hour, 6)
+        self.assertEqual(nxt.minute, 30)
+        # Must be comparable without TypeError.
+        self.assertTrue(nxt > now)
+
     def test_day_playlist_name(self) -> None:
         self.assertEqual(
             podcast_day_playlist_name(datetime(2026, 8, 5, 7, 30)),

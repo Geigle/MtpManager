@@ -137,6 +137,26 @@ def podcast_day_playlist_name(when: datetime | date | None = None) -> str:
     return f"Podcasts {d.strftime('%b')} {d.day}, {d.year}"
 
 
+def _at_local_time(
+    day: date,
+    hour: int,
+    minute: int,
+    *,
+    like: datetime,
+) -> datetime:
+    """Build a datetime on *day* at HH:MM matching *like*'s tz awareness."""
+    return datetime(
+        day.year,
+        day.month,
+        day.day,
+        hour,
+        minute,
+        0,
+        0,
+        tzinfo=like.tzinfo,
+    )
+
+
 def next_run_after(
     *,
     now_local: datetime,
@@ -144,7 +164,10 @@ def next_run_after(
     time_hhmm: str,
     last_run_local_date: str = "",
 ) -> datetime | None:
-    """Next local fire time at or after *now_local* (or catch-up if due now)."""
+    """Next local fire time at or after *now_local* (or catch-up if due now).
+
+    Returned datetimes use the same tzinfo as *now_local* (aware or naive).
+    """
     day_keys = set(normalize_schedule_days(days))
     if not day_keys:
         return None
@@ -161,14 +184,14 @@ def next_run_after(
     start = now_local.date()
     today_key = day_key_for_date(start)
     if today_key in day_keys:
-        candidate = datetime(start.year, start.month, start.day, hour, minute)
+        candidate = _at_local_time(start, hour, minute, like=now_local)
         last = (last_run_local_date or "").strip()[:10]
         if candidate > now_local and last != start.isoformat():
             return candidate
     for offset in range(1, 15):
         d = start + timedelta(days=offset)
         if day_key_for_date(d) in day_keys:
-            return datetime(d.year, d.month, d.day, hour, minute)
+            return _at_local_time(d, hour, minute, like=now_local)
     return None
 
 
