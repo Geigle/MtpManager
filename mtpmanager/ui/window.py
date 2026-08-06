@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import math
-from typing import Literal
+import sys
+from typing import Callable, Literal
 
 from pathlib import Path
 
@@ -168,8 +169,56 @@ CTX_EXCLUDE_GROUP_FOLDER = "Exclude this folder…"
 
 # Playlists tab context menu
 CTX_PLAYLIST_REMOVE = "Remove from Playlist"
+# Linux: Alt+arrows; macOS: Option (⌥)+arrows — both bound (see _bind_playlist_reorder_keys).
+if sys.platform == "darwin":
+    CTX_PLAYLIST_MOVE_UP = "Move Up (⌥↑)"
+    CTX_PLAYLIST_MOVE_DOWN = "Move Down (⌥↓)"
+else:
+    CTX_PLAYLIST_MOVE_UP = "Move Up (Alt+↑)"
+    CTX_PLAYLIST_MOVE_DOWN = "Move Down (Alt+↓)"
 CTX_PLAYLIST_PLAY_TRACK = "Play This Track"
+CTX_PLAYLIST_SHUFFLE_ARTIST = "Shuffle by Artist (Merge)…"
+CTX_PLAYLIST_SHUFFLE_SPOTIFY = "Shuffle (Spotify-style)…"
 CTX_PLAYLIST_SYNC = "Sync playlist to device"
+
+
+def _bind_playlist_reorder_keys(
+    widget,
+    *,
+    on_up: Callable[[], None] | None,
+    on_down: Callable[[], None] | None,
+) -> None:
+    """Bind Alt (Linux) / Option (macOS ⌥) + Up/Down for playlist reorder.
+
+    Aqua Tk accepts both ``Alt`` and ``Option`` as names for the Option key, but
+    which sequence actually fires varies by build — register every common form.
+    Plain Up/Down still move the tree selection (not rebound here).
+    """
+
+    def _call(cb: Callable[[], None] | None):
+        def _handler(_event=None):
+            if cb is not None:
+                cb()
+            return "break"
+
+        return _handler
+
+    up_h = _call(on_up)
+    down_h = _call(on_down)
+    for seq, handler in (
+        ("<Alt-Up>", up_h),
+        ("<Option-Up>", up_h),
+        ("<Alt-Key-Up>", up_h),
+        ("<Option-Key-Up>", up_h),
+        ("<Alt-Down>", down_h),
+        ("<Option-Down>", down_h),
+        ("<Alt-Key-Down>", down_h),
+        ("<Option-Key-Down>", down_h),
+    ):
+        try:
+            widget.bind(seq, handler)
+        except Exception:
+            pass
 
 # Device media context menus (on-device Music / Video / Audiobooks trees)
 CTX_DEVICE_DELETE = "Delete from device…"
@@ -469,6 +518,14 @@ class MainWindow:
         self.menu_playlist_ctx = Menu(self.root, tearoff=0)
         self.menu_playlist_ctx.add_command(label=CTX_PLAYLIST_PLAY_TRACK)
         self.menu_playlist_ctx.add_command(label=CTX_PLAYLIST_REMOVE)
+        self.menu_playlist_ctx.add_command(label=CTX_PLAYLIST_MOVE_UP)
+        self.menu_playlist_ctx.add_command(label=CTX_PLAYLIST_MOVE_DOWN)
+        self.menu_playlist_shuffle = Menu(self.menu_playlist_ctx, tearoff=0)
+        self.menu_playlist_shuffle.add_command(label=CTX_PLAYLIST_SHUFFLE_ARTIST)
+        self.menu_playlist_shuffle.add_command(label=CTX_PLAYLIST_SHUFFLE_SPOTIFY)
+        self.menu_playlist_ctx.add_cascade(
+            label="Shuffle playlist…", menu=self.menu_playlist_shuffle
+        )
         self.menu_playlist_ctx.add_separator()
         self.menu_playlist_ctx.add_command(label=CTX_PLAYLIST_SYNC)
 
@@ -879,6 +936,14 @@ class MainWindow:
             pl_toolbar, text="Sync playlist to device", state=DISABLED
         )
         self.btn_playlist_sync.pack(side=LEFT, padx=(8, 2))
+        self.btn_playlist_move_up = Button(
+            pl_toolbar, text="↑", width=3, state=DISABLED
+        )
+        self.btn_playlist_move_up.pack(side=LEFT, padx=(8, 1))
+        self.btn_playlist_move_down = Button(
+            pl_toolbar, text="↓", width=3, state=DISABLED
+        )
+        self.btn_playlist_move_down.pack(side=LEFT, padx=1)
         self.lbl_playlist_status = Label(pl_toolbar, text="", anchor="w")
         self.lbl_playlist_status.pack(side=LEFT, fill=X, expand=True, padx=6)
 
@@ -1905,6 +1970,10 @@ class MainWindow:
         on_rename=None,
         on_sync=None,
         on_remove_tracks=None,
+        on_move_up=None,
+        on_move_down=None,
+        on_shuffle_artist=None,
+        on_shuffle_spotify=None,
         on_play_track=None,
     ) -> None:
         """Wire Playlists tab toolbar + context menu."""
@@ -1926,6 +1995,40 @@ class MainWindow:
         if on_remove_tracks is not None:
             self.menu_playlist_ctx.entryconfig(
                 CTX_PLAYLIST_REMOVE, command=on_remove_tracks
+            )
+        if on_move_up is not None:
+            self.btn_playlist_move_up.configure(command=on_move_up)
+            self.menu_playlist_ctx.entryconfig(
+                CTX_PLAYLIST_MOVE_UP, command=on_move_up
+            )
+        if on_move_down is not None:
+            self.btn_playlist_move_down.configure(command=on_move_down)
+            self.menu_playlist_ctx.entryconfig(
+                CTX_PLAYLIST_MOVE_DOWN, command=on_move_down
+            )
+        if on_move_up is not None or on_move_down is not None:
+            _bind_playlist_reorder_keys(
+                self.playlist_tree,
+                on_up=on_move_up,
+                on_down=on_move_down,
+            )
+            # Also on the tab so a click on empty chrome still has a path when
+            # the tree later receives focus; primary target remains the tree.
+            try:
+                _bind_playlist_reorder_keys(
+                    self.playlists_tab,
+                    on_up=on_move_up,
+                    on_down=on_move_down,
+                )
+            except Exception:
+                pass
+        if on_shuffle_artist is not None:
+            self.menu_playlist_shuffle.entryconfig(
+                CTX_PLAYLIST_SHUFFLE_ARTIST, command=on_shuffle_artist
+            )
+        if on_shuffle_spotify is not None:
+            self.menu_playlist_shuffle.entryconfig(
+                CTX_PLAYLIST_SHUFFLE_SPOTIFY, command=on_shuffle_spotify
             )
         if on_play_track is not None:
             self.menu_playlist_ctx.entryconfig(
@@ -1953,6 +2056,8 @@ class MainWindow:
             self.btn_playlist_rename.configure(state=DISABLED)
             self.btn_playlist_delete.configure(state=DISABLED)
             self.btn_playlist_sync.configure(state=DISABLED)
+            self.btn_playlist_move_up.configure(state=DISABLED)
+            self.btn_playlist_move_down.configure(state=DISABLED)
             return
         self.playlist_combo.configure(values=values, state="readonly")
         pick = selected if selected in values else values[0]
@@ -1960,6 +2065,8 @@ class MainWindow:
         self.btn_playlist_rename.configure(state=NORMAL)
         self.btn_playlist_delete.configure(state=NORMAL)
         self.btn_playlist_sync.configure(state=NORMAL)
+        self.btn_playlist_move_up.configure(state=NORMAL)
+        self.btn_playlist_move_down.configure(state=NORMAL)
 
     def clear_playlist_tree(self) -> None:
         tree = self.playlist_tree

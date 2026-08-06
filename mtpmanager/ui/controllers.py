@@ -126,14 +126,21 @@ from mtpmanager.infra.library_index import (
     save_library_index,
     untrack_library_roots,
 )
+from mtpmanager.domain.playlist_shuffle import (
+    merge_shuffle,
+    rng_from_seed_track,
+    spotify_shuffle,
+)
 from mtpmanager.infra.playlists import (
     append_tracks_to_playlist,
     create_playlist,
     delete_playlist,
     get_playlist,
     list_playlists,
+    move_paths_in_playlist,
     remove_paths_from_playlist,
     rename_playlist,
+    replace_playlist_tracks,
     resolve_playlist_tracks,
 )
 from mtpmanager.infra.podcast_index import (
@@ -488,6 +495,10 @@ class AppController:
             on_rename=self.on_playlist_rename,
             on_sync=self.action_sync_current_playlist,
             on_remove_tracks=self.action_playlist_remove_selected,
+            on_move_up=lambda: self.action_playlist_move_selected(-1),
+            on_move_down=lambda: self.action_playlist_move_selected(1),
+            on_shuffle_artist=lambda: self.action_playlist_shuffle("artist"),
+            on_shuffle_spotify=lambda: self.action_playlist_shuffle("spotify"),
             on_play_track=self.action_playlist_play_selected,
         )
         try:
@@ -3530,10 +3541,17 @@ class AppController:
         except Exception:
             pass
 
-    def _populate_playlist_tree(self, tracks: list[Track]) -> None:
+    def _populate_playlist_tree(
+        self,
+        tracks: list[Track],
+        *,
+        select_paths: list[str] | None = None,
+    ) -> None:
         self.win.clear_playlist_tree()
         self._playlist_track_by_iid.clear()
         tree = self.win.playlist_tree
+        want = {os.path.normpath(p) for p in (select_paths or []) if p}
+        select_iids: list[str] = []
         for i, track in enumerate(tracks, start=1):
             num, title, artist, album, year = iter_track_cells(track)
             iid = f"pl:{i}:{track.path}"
@@ -3549,6 +3567,15 @@ class AppController:
                 tags=tuple(tags),
             )
             self._playlist_track_by_iid[iid] = track
+            if track.path and os.path.normpath(track.path) in want:
+                select_iids.append(iid)
+        if select_iids:
+            try:
+                tree.selection_set(select_iids)
+                tree.focus(select_iids[0])
+                tree.see(select_iids[0])
+            except Exception:
+                pass
 
     def on_playlist_new(self) -> None:
         from mtpmanager.ui.dialogs import ask_text
@@ -3634,6 +3661,121 @@ class AppController:
         name = (self.win.var_playlist_choice.get() or "").strip()
         if name:
             self._load_playlist_by_name(name)
+
+    def action_playlist_move_selected(self, delta: int) -> None:
+        """Reorder selected host-playlist tracks (local M3U); device on next sync."""
+        pid = self._current_playlist_id
+        if pid is None:
+            return
+        try:
+            sel = list(self.win.playlist_tree.selection())
+        except Exception:
+            sel = []
+        paths: list[str] = []
+        for iid in sel:
+            t = self._playlist_track_by_iid.get(iid)
+            if t and t.path:
+                paths.append(t.path)
+        if not paths:
+            messagebox.showinfo(
+                "Playlist",
+                "Select track(s) to reorder.\n\n"
+                "Host order is saved immediately; use Sync playlist to device "
+                "to overwrite the on-device playlist.",
+            )
+            return
+        try:
+            pl = move_paths_in_playlist(pid, paths, delta=int(delta))
+        except Exception as e:
+            messagebox.showerror("Playlist", f"Could not reorder tracks:\n{e}")
+            return
+        tracks = resolve_playlist_tracks(pl)
+        self._populate_playlist_tree(tracks, select_paths=paths)
+        n = len(tracks)
+        try:
+            self.win.lbl_playlist_status.configure(
+                text=f"{n} track{'s' if n != 1 else ''} · order saved (sync device to apply)"
+            )
+        except Exception:
+            pass
+
+    def _playlist_seed_track(self) -> Track | None:
+        """Track for shuffle RNG seed: tree focus, else first selection."""
+        tree = self.win.playlist_tree
+        try:
+            focus = tree.focus()
+        except Exception:
+            focus = ""
+        if focus:
+            t = self._playlist_track_by_iid.get(focus)
+            if t is not None:
+                return t
+        try:
+            sel = list(tree.selection())
+        except Exception:
+            sel = []
+        for iid in sel:
+            t = self._playlist_track_by_iid.get(iid)
+            if t is not None:
+                return t
+        return None
+
+    def action_playlist_shuffle(self, algorithm: str) -> None:
+        """Reorder whole host playlist via merge or Spotify-style shuffle.
+
+        The focused/selected row seeds the RNG so re-running with the same seed
+        track is reproducible. Saves local M3U only; device updates on Sync.
+        """
+        pid = self._current_playlist_id
+        if pid is None:
+            messagebox.showinfo("Playlist", "Select a playlist first.")
+            return
+        pl = get_playlist(pid)
+        if pl is None:
+            return
+        tracks = resolve_playlist_tracks(pl)
+        if len(tracks) < 2:
+            messagebox.showinfo("Playlist", "Need at least two tracks to shuffle.")
+            return
+        seed = self._playlist_seed_track()
+        if seed is None:
+            seed = tracks[0]
+        algo = (algorithm or "").strip().lower()
+        rng = rng_from_seed_track(seed, extra=algo)
+        if algo in ("artist", "merge", "merge_shuffle", "merge_artist"):
+            shuffled = merge_shuffle(tracks, rng=rng)
+            label = "artist"
+        elif algo in ("spotify", "spotify_shuffle", "dither"):
+            shuffled = spotify_shuffle(tracks, rng=rng)
+            label = "spotify"
+        else:
+            messagebox.showerror("Playlist", f"Unknown shuffle algorithm: {algorithm!r}")
+            return
+        try:
+            pl = replace_playlist_tracks(pid, shuffled)
+        except Exception as e:
+            messagebox.showerror("Playlist", f"Could not shuffle playlist:\n{e}")
+            return
+        keep = [seed.path] if seed.path else None
+        resolved = resolve_playlist_tracks(pl)
+        self._populate_playlist_tree(resolved, select_paths=keep)
+        n = len(resolved)
+        try:
+            self.win.lbl_playlist_status.configure(
+                text=(
+                    f"{n} tracks · {label} shuffle (seed track kept selected; "
+                    "sync device to apply)"
+                )
+            )
+        except Exception:
+            pass
+        logger.info(
+            "Playlist shuffle algorithm=%s id=%s tracks=%d seed=%s",
+            label,
+            pid,
+            n,
+            (seed.path or "")[:80],
+        )
 
     def action_playlist_play_selected(self) -> None:
         try:

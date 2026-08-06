@@ -15,6 +15,7 @@ from mtpmanager.infra.playlists import (
     delete_playlist,
     get_playlist,
     list_playlists,
+    move_paths_in_playlist,
     remove_paths_from_playlist,
     rename_playlist,
     resolve_playlist_tracks,
@@ -64,6 +65,11 @@ class PlaylistsDbTests(unittest.TestCase):
             tracks = resolve_playlist_tracks(pl, path=db)
             self.assertEqual(len(tracks), 2)
             self.assertEqual(tracks[0].guid, t1.guid)
+
+            pl = move_paths_in_playlist(pl.id, [t2.path], delta=-1, path=db)
+            moved = parse_m3u(pl.m3u_text)
+            self.assertEqual(moved[0].path, os.path.normpath(t2.path))
+            self.assertEqual(moved[1].path, os.path.normpath(t1.path))
 
             pl = remove_paths_from_playlist(pl.id, [t1.path], path=db)
             self.assertEqual(len(parse_m3u(pl.m3u_text)), 1)
