@@ -128,7 +128,6 @@ from mtpmanager.infra.library_index import (
 )
 from mtpmanager.domain.playlist_shuffle import (
     merge_shuffle,
-    merge_shuffle_by_album,
     rng_from_seed_track,
     spotify_shuffle,
 )
@@ -499,7 +498,6 @@ class AppController:
             on_move_up=lambda: self.action_playlist_move_selected(-1),
             on_move_down=lambda: self.action_playlist_move_selected(1),
             on_shuffle_artist=lambda: self.action_playlist_shuffle("artist"),
-            on_shuffle_album=lambda: self.action_playlist_shuffle("album"),
             on_shuffle_spotify=lambda: self.action_playlist_shuffle("spotify"),
             on_play_track=self.action_playlist_play_selected,
         )
@@ -3745,13 +3743,8 @@ class AppController:
         algo = (algorithm or "").strip().lower()
         rng = rng_from_seed_track(seed, extra=algo)
         if algo in ("artist", "merge", "merge_shuffle", "merge_artist"):
-            # Individual tracks by artist — albums may split.
-            shuffled = merge_shuffle(tracks, rng=rng, hierarchical=False)
+            shuffled = merge_shuffle(tracks, rng=rng)
             label = "artist"
-        elif algo in ("album", "merge_album", "by_album"):
-            # Album blocks stay together; blocks merge-shuffled by artist.
-            shuffled = merge_shuffle_by_album(tracks, rng=rng)
-            label = "album"
         elif algo in ("spotify", "spotify_shuffle", "dither"):
             shuffled = spotify_shuffle(tracks, rng=rng)
             label = "spotify"

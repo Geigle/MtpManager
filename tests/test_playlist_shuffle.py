@@ -8,10 +8,8 @@ from collections import Counter
 
 from mtpmanager.domain.models import Track, TrackMetadata
 from mtpmanager.domain.playlist_shuffle import (
-    album_key,
     artist_key,
     merge_shuffle,
-    merge_shuffle_by_album,
     seed_from_track,
     spotify_shuffle,
 )
@@ -67,7 +65,7 @@ class PlaylistShuffleTests(unittest.TestCase):
             + [_t(f"/b{i}.mp3", "B") for i in range(3)]
             + [_t(f"/c{i}.mp3", "C") for i in range(2)]
         )
-        out = merge_shuffle(tracks, rng=random.Random(7), hierarchical=False)
+        out = merge_shuffle(tracks, rng=random.Random(7))
 
         def max_run(seq: list[Track]) -> int:
             best = cur = 1
@@ -87,42 +85,6 @@ class PlaylistShuffleTests(unittest.TestCase):
         tracks = [_t(f"/a{i}.mp3", "Only") for i in range(5)]
         out = merge_shuffle(tracks, rng=random.Random(1))
         self.assertEqual(sorted(t.path for t in out), sorted(t.path for t in tracks))
-
-    def test_album_shuffle_keeps_album_blocks(self) -> None:
-        tracks = [
-            _t("/a1.mp3", "A", album="Alb1", title="a1"),
-            _t("/a2.mp3", "A", album="Alb1", title="a2"),
-            _t("/a3.mp3", "A", album="Alb2", title="a3"),
-            _t("/a4.mp3", "A", album="Alb2", title="a4"),
-            _t("/b1.mp3", "B", album="B-one", title="b1"),
-            _t("/b2.mp3", "B", album="B-one", title="b2"),
-        ]
-        out = merge_shuffle_by_album(tracks, rng=random.Random(3))
-        self.assertEqual(len(out), len(tracks))
-        # Each album's tracks must form a contiguous span.
-        positions: dict[tuple[str, str], list[int]] = {}
-        for i, t in enumerate(out):
-            key = (artist_key(t), album_key(t))
-            positions.setdefault(key, []).append(i)
-        for key, idxs in positions.items():
-            self.assertEqual(
-                idxs,
-                list(range(min(idxs), max(idxs) + 1)),
-                f"album {key} not contiguous: {idxs}",
-            )
-
-    def test_artist_shuffle_can_split_albums(self) -> None:
-        # Same artist, two albums — pure artist merge may interleave albums.
-        tracks = [
-            _t(f"/a{i}.mp3", "A", album="One") for i in range(3)
-        ] + [
-            _t(f"/b{i}.mp3", "B", album="Two") for i in range(3)
-        ] + [
-            _t(f"/c{i}.mp3", "A", album="Three") for i in range(3)
-        ]
-        # Membership only for default (artist) path; album contiguity not required.
-        out = merge_shuffle(tracks, rng=random.Random(11), hierarchical=False)
-        self.assertEqual({t.path for t in out}, {t.path for t in tracks})
 
     def test_spotify_preserves_membership(self) -> None:
         tracks = [

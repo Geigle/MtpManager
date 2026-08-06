@@ -3,9 +3,7 @@
 Two algorithms:
 
 * **merge_shuffle** — merge partitions by artist (tracks free to leave album
-  order); optional hierarchical mode keeps albums as blocks.
-* **merge_shuffle_by_album** — hierarchical merge: shuffle within each album,
-  keep album blocks together, merge-shuffle those blocks by artist.
+  order) to reduce consecutive same-artist runs when possible.
 * **spotify_shuffle** — 2014-style dithered / balanced positions per artist.
 
 Both take a sequence of :class:`~mtpmanager.domain.models.Track` (or any object
@@ -20,7 +18,6 @@ import hashlib
 import random
 from collections import defaultdict
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
 from typing import TypeVar
 
 from mtpmanager.domain.library import primary_artist
@@ -45,18 +42,6 @@ def artist_key(track: object) -> str:
     s = (raw or "").strip()
     if not s or s.casefold() in {"unknown", "unknown artist"}:
         return _UNKNOWN
-    return s
-
-
-def album_key(track: object) -> str:
-    """Album label for hierarchical merge-shuffle."""
-    meta = getattr(track, "meta", None)
-    if isinstance(meta, TrackMetadata):
-        s = (meta.album or "").strip()
-    else:
-        s = (getattr(track, "album", None) or "").strip()
-    if not s or s.casefold() in {"unknown", "unknown album"}:
-        return "Unknown Album"
     return s
 
 
@@ -253,72 +238,20 @@ def merge_shuffle_by_key(
     return result
 
 
-@dataclass
-class _AlbumBundle:
-    """Super-track for hierarchical merge-shuffle (one album under one artist)."""
-
-    artist: str
-    tracks: list[Track]
-
-
 def merge_shuffle(
     tracks: Sequence[Track],
     *,
     rng: random.Random | None = None,
-    hierarchical: bool = False,
 ) -> list[Track]:
-    """Merge-shuffle by artist (default: individual tracks, not album blocks).
+    """Merge-shuffle by artist (individual tracks; albums may split).
 
-    Spreads artists to reduce consecutive same-artist plays. Tracks from the
-    same album may separate. Pass *hierarchical=True* (or use
-    :func:`merge_shuffle_by_album`) to keep each album as a contiguous block.
+    Spreads artists to reduce consecutive same-artist plays when possible.
     """
     rng = rng if rng is not None else random.Random()
     items = list(tracks)
     if len(items) <= 1:
         return items
-
-    if not hierarchical:
-        return merge_shuffle_by_key(items, artist_key, rng)
-
-    # Group by (artist, album); preserve first-seen order for stability.
-    album_groups: dict[tuple[str, str], list[Track]] = {}
-    album_order: list[tuple[str, str]] = []
-    for t in items:
-        key = (artist_key(t), album_key(t))
-        if key not in album_groups:
-            album_groups[key] = []
-            album_order.append(key)
-        album_groups[key].append(t)
-
-    bundles: list[_AlbumBundle] = []
-    for key in album_order:
-        art, _alb = key
-        shuffled = fisher_yates(album_groups[key], rng)
-        bundles.append(_AlbumBundle(artist=art, tracks=shuffled))
-
-    def bundle_artist(b: _AlbumBundle) -> str:
-        return b.artist
-
-    ordered = merge_shuffle_by_key(bundles, bundle_artist, rng)
-    out: list[Track] = []
-    for b in ordered:
-        out.extend(b.tracks)
-    return out
-
-
-def merge_shuffle_by_album(
-    tracks: Sequence[Track],
-    *,
-    rng: random.Random | None = None,
-) -> list[Track]:
-    """Merge-shuffle that keeps each album as a contiguous block.
-
-    Within each album tracks are Fisher–Yates shuffled; album blocks are then
-    merge-shuffled by artist (same-artist albums may still interleave with
-    other artists' blocks).
-    """
-    return merge_shuffle(tracks, rng=rng, hierarchical=True)
+    return merge_shuffle_by_key(items, artist_key, rng)
 
 
 def spotify_shuffle(
