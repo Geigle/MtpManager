@@ -648,6 +648,10 @@ class PymtpDevice:
         )
         return entry
 
+    # This call is risky! Rapidly calling this on many objects can trigger a
+    # LIBMTP Panic and poison the session, which will require a 
+    # disconnect/replug to recover. Use with care.
+    # This function may need work to avoid LIBMTP panics.
     def get_track_metadata(self, object_id: int) -> DeviceTrackInfo:
         """Experimental: on-device track tags via patched get_track_metadata."""
         oid = int(object_id)
@@ -1127,22 +1131,23 @@ class PymtpDevice:
         """Transport.send_track — push audio with metadata via libmtp.
 
         Uses the same ZEN remote contract as CmdTransport: numeric folder parent
-        (Music under GUID mode), explicit storage id, and a short object
-        basename (GUID when provided; else preferred_basename for retail
-        restore). Tags keep full title/artist/album.
+        (Music by default; explicit *parent_id* for ZENcast/podcasts/video),
+        explicit storage id, and a short object basename (GUID when provided;
+        else preferred_basename for retail restore). Tags keep full
+        title/artist/album.
 
         On failure raises TransportError (fatal). Does not fall back to CMD.
         Returns the new object id when libmtp reports one.
         """
         _, ext = os.path.splitext(path)
         ext = ext or ".mp3"
-        # GUID mode: always flat under Music (ignore artist/album parents).
-        if guid:
-            folder_id = int(self.music_folder_id)
+        # Explicit parent wins (podcast ZENcast, video, etc.). GUID only
+        # controls ObjectFileName, not the parent folder — music stays flat
+        # under Music when parent_id is omitted.
+        if parent_id is not None and int(parent_id) > 0:
+            folder_id = int(parent_id)
         else:
-            folder_id = (
-                int(parent_id) if parent_id is not None else int(self.music_folder_id)
-            )
+            folder_id = int(self.music_folder_id)
         remote = build_remote_path(
             meta,
             ext,

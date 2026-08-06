@@ -142,6 +142,36 @@ def get_playlist(playlist_id: int, *, path: Path | None = None) -> Playlist | No
             conn.close()
 
 
+def get_playlist_by_name(name: str, *, path: Path | None = None) -> Playlist | None:
+    """Case-insensitive lookup by playlist name."""
+    clean = (name or "").strip()
+    if not clean:
+        return None
+    conn: sqlite3.Connection | None = None
+    try:
+        conn, _dest = _open(path)
+        row = conn.execute(
+            "SELECT id, name, m3u_text, created_at, updated_at "
+            "FROM playlists WHERE name = ? COLLATE NOCASE",
+            (clean,),
+        ).fetchone()
+        if row is None:
+            return None
+        return Playlist(
+            id=int(row["id"]),
+            name=str(row["name"] or ""),
+            m3u_text=str(row["m3u_text"] or empty_m3u()),
+            created_at=str(row["created_at"] or ""),
+            updated_at=str(row["updated_at"] or ""),
+        )
+    except sqlite3.Error as e:
+        logger.warning("get_playlist_by_name failed: %s", e)
+        return None
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 def create_playlist(name: str, *, path: Path | None = None) -> Playlist:
     """Create an empty playlist. Raises ValueError on bad/duplicate name."""
     clean = (name or "").strip()

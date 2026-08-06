@@ -1,9 +1,8 @@
 """Subscribe, refresh, download, and prepare podcast episodes for transfer.
 
 # TODO(follow-up): OPML import/export
-# TODO(follow-up): auto-refresh on a timer
 # TODO(follow-up): Device → Podcasts inventory browser
-# TODO(follow-up): per-show auto-download rules beyond “latest”
+# TODO(follow-up): OS login item / launchd so full-sync can run without UI
 """
 
 from __future__ import annotations
@@ -11,14 +10,26 @@ from __future__ import annotations
 import logging
 import os
 import urllib.request
-from collections.abc import Collection, Sequence
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
+from mtpmanager.app.podcast_schedule import (
+    effective_schedule,
+    is_due,
+    podcast_day_playlist_name,
+)
 from mtpmanager.domain.library import is_video_file
 from mtpmanager.domain.models import Track, TrackMetadata
 from mtpmanager.domain.track_id import is_track_guid
+from mtpmanager.infra.playlists import (
+    Playlist,
+    append_tracks_to_playlist,
+    create_playlist,
+    get_playlist_by_name,
+)
 from mtpmanager.infra.podcast_feed import (
     FeedChannel,
     episode_to_row_dict,
@@ -28,17 +39,22 @@ from mtpmanager.infra.podcast_index import (
     Podcast,
     PodcastEpisode,
     clear_all_episode_local_paths,
+    clear_pending_device_sync_for_ids,
     create_or_update_podcast,
     episode_cache_dir,
+    episode_display_track,
     get_episode,
     get_podcast,
     known_feed_guids,
     latest_episode,
     list_episodes,
+    list_pending_device_sync_episodes,
     list_podcasts,
     normalize_feed_url,
     podcasts_cache_root,
     set_episode_local_path,
+    set_episode_pending_device_sync,
+    set_podcast_auto_last_run,
     upsert_episodes,
 )
 
@@ -375,11 +391,328 @@ def pick_latest_not_on_device(
     path: Path | None = None,
 ) -> PodcastEpisode | None:
     """Newest episode whose host GUID is not in *device_guids*."""
+    eps = pick_new_not_on_device(podcast_id, device_guids, limit=1, path=path)
+    return eps[0] if eps else None
+
+
+def pick_new_not_on_device(
+    podcast_id: int,
+    device_guids: Collection[str],
+    *,
+    limit: int = 1,
+    path: Path | None = None,
+    require_download: bool = False,
+    since_iso: str = "",
+) -> list[PodcastEpisode]:
+    """Up to *limit* newest episodes not already on the device (by host GUID).
+
+    *limit* is a cap **within** the publish window, not a fill-to-N quota.
+    When *since_iso* is set (YYYY-MM-DD or ISO prefix), only episodes whose
+    ``pub_date`` sorts at or after that stamp are candidates. Older catalog
+    items are never used to pad the list up to *limit*. Episodes without a
+    ``pub_date`` are excluded when a window is set (undated cannot be proven
+    “new since last sync”). Empty *since_iso* means no lower bound.
+
+    When *require_download* is True, only return episodes whose local media
+    is missing.
+    """
     stems = {g for g in device_guids if is_track_guid(g)}
+    n = max(1, int(limit))
+    since = (since_iso or "").strip()[:19]
+    out: list[PodcastEpisode] = []
     for ep in list_episodes(podcast_id, path=path):
-        if ep.guid and ep.guid not in stems and ep.enclosure_url:
-            return ep
-    return None
+        if not ep.guid or not is_track_guid(ep.guid):
+            continue
+        if ep.guid in stems:
+            continue
+        if not (ep.enclosure_url or ep.video_enclosure_url):
+            continue
+        if since:
+            pub = (ep.pub_date or "").strip()
+            # Require a dated pub stamp inside the window — do not treat
+            # undated feed items as “new” fillers.
+            if not pub or pub[: len(since)] < since:
+                continue
+        if require_download:
+            if ep.local_path and os.path.isfile(ep.local_path):
+                continue
+        out.append(ep)
+        if len(out) >= n:
+            break
+    return out
+
+
+@dataclass
+class HostPassResult:
+    """Outcome of a full-sync host-side refresh/download pass."""
+
+    downloaded: list[PodcastEpisode] = field(default_factory=list)
+    refreshed_ids: list[int] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+    shows_processed: int = 0
+
+
+def due_podcasts_for_schedule(
+    *,
+    now_local: datetime,
+    global_days: Sequence[str],
+    global_time: str,
+    path: Path | None = None,
+) -> list[Podcast]:
+    """Shows that should run a full-sync host pass now (schedule + catch-up)."""
+    due: list[Podcast] = []
+    for show in list_podcasts(path=path):
+        eff = effective_schedule(
+            global_days=global_days,
+            global_time=global_time,
+            show_auto_update=bool(show.auto_update),
+            show_schedule_time=show.schedule_time or "",
+            show_schedule_days=show.schedule_days or "",
+        )
+        if eff is None:
+            continue
+        if is_due(
+            now_local=now_local,
+            days=eff.days,
+            time_hhmm=eff.time_hhmm,
+            last_run_local_date=show.auto_last_run_local_date or "",
+        ):
+            due.append(show)
+    return due
+
+
+def run_full_sync_host_pass(
+    *,
+    podcast_ids: Sequence[int] | None = None,
+    max_new_per_show: int = 1,
+    device_guids: Collection[str] | None = None,
+    path: Path | None = None,
+    data_dir: Path | None = None,
+    target_audio_format: str = "mp3",
+    now_local: datetime | None = None,
+    since_last_full_sync: str = "",
+    on_episode_ready: Callable[[PodcastEpisode, Track], None] | None = None,
+) -> HostPassResult:
+    """Refresh feeds, download up to N new-since-window episodes, mark pending.
+
+    Does not touch MTP. Marks each processed show's ``auto_last_run_local_date``.
+
+    *max_new_per_show* caps how many episodes **published in the window** are
+    taken per show — it never backfills older catalog items to reach N.
+
+    *since_last_full_sync* is the lower pub_date bound (YYYY-MM-DD). Empty
+    means first full sync: use *now_local*'s local calendar day so history
+    is not dumped into the queue.
+
+    *on_episode_ready* (optional) is invoked on the caller/worker thread after
+    each episode is on disk and marked pending — so the UI can enqueue device
+    transfer while later shows are still downloading. Arguments are the ready
+    :class:`PodcastEpisode` and a :class:`Track` for the transfer pipeline.
+    """
+    result = HostPassResult()
+    stems = {g for g in (device_guids or ()) if is_track_guid(g)}
+    limit = max(1, int(max_new_per_show))
+    when = now_local or datetime.now().astimezone()
+    local_day = when.date().isoformat()
+    since = (since_last_full_sync or "").strip()
+    if not since:
+        # First full sync: only today's publications — not catalog history.
+        since = local_day
+
+    if podcast_ids is None:
+        shows = list_podcasts(path=path)
+    else:
+        shows = []
+        for pid in podcast_ids:
+            p = get_podcast(int(pid), path=path)
+            if p is not None:
+                shows.append(p)
+
+    def _notify_ready(ready: PodcastEpisode, show: Podcast) -> None:
+        if on_episode_ready is None:
+            return
+        try:
+            if not ready.local_path or not os.path.isfile(ready.local_path):
+                return
+            track = episode_as_track(ready, show)
+        except Exception:
+            logger.debug(
+                "full sync on_episode_ready track build failed id=%s",
+                ready.id,
+                exc_info=True,
+            )
+            return
+        try:
+            on_episode_ready(ready, track)
+        except Exception:
+            logger.exception(
+                "full sync on_episode_ready callback failed id=%s", ready.id
+            )
+
+    for show in shows:
+        result.shows_processed += 1
+        try:
+            refresh_podcast(show.id, path=path)
+            result.refreshed_ids.append(show.id)
+        except Exception as e:
+            logger.exception("full sync refresh failed podcast_id=%s", show.id)
+            result.errors.append(f"{show.title or show.id}: refresh: {e}")
+            # Still mark run so a broken feed does not retry every minute.
+            set_podcast_auto_last_run(show.id, local_day, path=path)
+            continue
+
+        candidates = pick_new_not_on_device(
+            show.id,
+            stems,
+            limit=limit,
+            path=path,
+            require_download=False,
+            since_iso=since,
+        )
+        for ep in candidates:
+            try:
+                had_file = bool(ep.local_path and os.path.isfile(ep.local_path))
+                ready = ensure_episode_audio_file(
+                    ep,
+                    path=path,
+                    data_dir=data_dir,
+                    target_format=target_audio_format,
+                )
+                if not had_file and ready.local_path and os.path.isfile(
+                    ready.local_path
+                ):
+                    set_episode_local_path(
+                        ready.id,
+                        ready.local_path,
+                        path=path,
+                        stamp_retrieved=True,
+                        mark_pending_device_sync=True,
+                    )
+                    ready = get_episode(ready.id, path=path) or ready
+                    result.downloaded.append(ready)
+                    _notify_ready(ready, show)
+                else:
+                    if ready.guid and ready.guid not in stems:
+                        set_episode_pending_device_sync(
+                            ready.id, True, path=path
+                        )
+                        ready = get_episode(ready.id, path=path) or ready
+                        result.downloaded.append(ready)
+                        _notify_ready(ready, show)
+            except Exception as e:
+                logger.exception(
+                    "full sync download failed episode_id=%s", ep.id
+                )
+                result.errors.append(
+                    f"{show.title or show.id}: {ep.title or ep.id}: {e}"
+                )
+
+        set_podcast_auto_last_run(show.id, local_day, path=path)
+
+    return result
+
+
+@dataclass(frozen=True)
+class DayPlaylistResult:
+    """Host day-playlist created/extended for a scheduled capture."""
+
+    playlist: Playlist
+    name: str
+    guids: tuple[str, ...]
+    added: int
+
+
+def upsert_scheduled_day_playlist(
+    episodes: Sequence[PodcastEpisode],
+    *,
+    when: datetime | None = None,
+    path: Path | None = None,
+) -> DayPlaylistResult | None:
+    """Create or extend today's ``Podcasts {Mon} {D}, {YYYY}`` host playlist.
+
+    *episodes* are those captured by a full-sync host pass. Same-day re-runs
+    append new membership (skip paths already present). Returns None when
+    nothing with a GUID was provided.
+    """
+    if not episodes:
+        return None
+    show_cache: dict[int, Podcast | None] = {}
+    tracks: list[Track] = []
+    for ep in episodes:
+        g = (ep.guid or "").strip().lower()
+        if not is_track_guid(g):
+            continue
+        show = show_cache.get(int(ep.podcast_id))
+        if int(ep.podcast_id) not in show_cache:
+            show = get_podcast(int(ep.podcast_id), path=path)
+            show_cache[int(ep.podcast_id)] = show
+        display = episode_display_track(ep, show)
+        # Stable ``podcast:<guid>`` path so membership keeps host identity
+        # even when a local enclosure path is present (device push is GUID-based).
+        tracks.append(
+            Track(path=f"podcast:{g}", meta=display.meta, guid=g)
+        )
+    if not tracks:
+        return None
+
+    name = podcast_day_playlist_name(when)
+    existing = get_playlist_by_name(name, path=path)
+    if existing is None:
+        pl = create_playlist(name, path=path)
+        pl = append_tracks_to_playlist(
+            pl.id, tracks, skip_existing=False, path=path
+        )
+        added = len(tracks)
+    else:
+        before = len(existing.entries())
+        pl = append_tracks_to_playlist(
+            existing.id, tracks, skip_existing=True, path=path
+        )
+        added = max(0, len(pl.entries()) - before)
+
+    guids: list[str] = []
+    seen: set[str] = set()
+    for e in pl.entries():
+        p = (e.path or "").strip()
+        g = ""
+        if p.startswith("podcast:"):
+            g = p.split(":", 1)[-1].strip().lower()
+        if is_track_guid(g) and g not in seen:
+            seen.add(g)
+            guids.append(g)
+
+    return DayPlaylistResult(
+        playlist=pl,
+        name=pl.name or name,
+        guids=tuple(guids),
+        added=added,
+    )
+
+
+def pending_episodes_for_device_sync(
+    *,
+    device_guids: Collection[str] | None = None,
+    path: Path | None = None,
+) -> list[PodcastEpisode]:
+    """Pending auto-sync episodes that still need to land on the device."""
+    stems = {g for g in (device_guids or ()) if is_track_guid(g)}
+    out: list[PodcastEpisode] = []
+    for ep in list_pending_device_sync_episodes(path=path):
+        if not ep.local_path or not os.path.isfile(ep.local_path):
+            continue
+        if ep.guid and is_track_guid(ep.guid) and ep.guid in stems:
+            set_episode_pending_device_sync(ep.id, False, path=path)
+            continue
+        out.append(ep)
+    return out
+
+
+def mark_episodes_device_synced(
+    episode_ids: Sequence[int],
+    *,
+    path: Path | None = None,
+) -> int:
+    return clear_pending_device_sync_for_ids(episode_ids, path=path)
 
 
 def ensure_podcast_artwork(

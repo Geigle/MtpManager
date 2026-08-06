@@ -87,6 +87,7 @@ TREE_COLS = ("title", "artist", "album", "year")
 # Library menu labels (used for entryconfig by label).
 MENU_MANAGE_LIBRARY = "Manage Library…"
 MENU_MANAGE_PLAYLISTS = "Manage Playlists…"
+MENU_PODCAST_SETTINGS = "Podcast Settings…"
 # Back-compat aliases (older docs / call sites).
 MENU_SELECT_ROOT = MENU_MANAGE_LIBRARY
 MENU_UPDATE_LIBRARY = MENU_MANAGE_LIBRARY
@@ -174,6 +175,7 @@ CTX_PLAYLIST_SYNC = "Sync playlist to device"
 CTX_DEVICE_DELETE = "Delete from device…"
 CTX_DEVICE_PULL = "Pull to library…"
 CTX_DEVICE_PULL_FOLDER = "Pull to folder…"
+CTX_DEVICE_FETCH_TAGS = "Fetch track tags…"
 CTX_DEVICE_DELETE_ARTIST = "Delete all from Artist…"
 CTX_DEVICE_DELETE_ALBUM = "Delete album from device…"
 CTX_DEVICE_DELETE_FOLDER = "Delete all in folder…"
@@ -394,6 +396,7 @@ class MainWindow:
         self.menubar.add_cascade(label="Library", menu=self.menu_library)
         self.menu_library.add_command(label=MENU_MANAGE_LIBRARY)
         self.menu_library.add_command(label=MENU_MANAGE_PLAYLISTS)
+        self.menu_library.add_command(label=MENU_PODCAST_SETTINGS)
 
         self.menu_transfer = Menu(self.menubar, tearoff=0)
         self.menubar.add_cascade(label="Transfer", menu=self.menu_transfer)
@@ -480,10 +483,11 @@ class MainWindow:
             label=CTX_PODCAST_REVEAL_DOWNLOAD, state=DISABLED
         )
 
-        # Device on-media context menus (delete / pull).
+        # Device on-media context menus (delete / pull / on-demand tags).
         self.menu_device_track_ctx = Menu(self.root, tearoff=0)
         self.menu_device_track_ctx.add_command(label=CTX_DEVICE_PULL)
         self.menu_device_track_ctx.add_command(label=CTX_DEVICE_PULL_FOLDER)
+        self.menu_device_track_ctx.add_command(label=CTX_DEVICE_FETCH_TAGS)
         self.menu_device_track_ctx.add_separator()
         self.menu_device_track_ctx.add_command(label=CTX_DEVICE_DELETE)
 
@@ -756,7 +760,8 @@ class MainWindow:
         ab_tree_frame.pack(fill=BOTH, expand=True)
 
         # Podcasts tab: subscriptions + episodes + Sync Latest.
-        # TODO(follow-up): OPML import/export, auto-refresh timer, in-app playback
+        # Full-sync schedule: Library → Podcast Settings…
+        # TODO(follow-up): OPML import/export
         pod_outer = Frame(self.podcastsLibrary_tab)
         pod_outer.pack(fill=BOTH, expand=True, padx=4, pady=4)
 
@@ -1348,6 +1353,7 @@ class MainWindow:
         *,
         on_manage_library,
         on_manage_playlists=None,
+        on_podcast_settings=None,
         on_select_root=None,
         on_update=None,
     ) -> None:
@@ -1355,6 +1361,7 @@ class MainWindow:
 
         *on_manage_library* opens the roots manager (add/remove/update).
         *on_manage_playlists* focuses the Playlists notebook tab.
+        *on_podcast_settings* opens Podcast Settings (schedule / full sync).
         *on_select_root* / *on_update* are ignored legacy kwargs.
         """
         del on_select_root, on_update
@@ -1364,6 +1371,10 @@ class MainWindow:
         if on_manage_playlists is not None:
             self.menu_library.entryconfig(
                 MENU_MANAGE_PLAYLISTS, command=on_manage_playlists
+            )
+        if on_podcast_settings is not None:
+            self.menu_library.entryconfig(
+                MENU_PODCAST_SETTINGS, command=on_podcast_settings
             )
 
     def set_transfer_menu_commands(
@@ -2664,6 +2675,7 @@ class MainWindow:
         on_delete=None,
         on_pull=None,
         on_pull_folder=None,
+        on_fetch_tags=None,
         on_delete_artist=None,
         on_delete_album=None,
         on_delete_folder=None,
@@ -2678,6 +2690,10 @@ class MainWindow:
         if on_pull_folder is not None:
             self.menu_device_track_ctx.entryconfig(
                 CTX_DEVICE_PULL_FOLDER, command=on_pull_folder
+            )
+        if on_fetch_tags is not None:
+            self.menu_device_track_ctx.entryconfig(
+                CTX_DEVICE_FETCH_TAGS, command=on_fetch_tags
             )
         if on_delete is not None:
             self.menu_device_track_ctx.entryconfig(

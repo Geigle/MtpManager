@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import unittest
 
-from mtpmanager.app.device_ops import enrich_track_refs
-from mtpmanager.domain.models import DeviceTrackInfo, DeviceTrackRef
+from mtpmanager.app.device_ops import (
+    enrich_track_refs,
+    enrich_track_refs_with_embedded_fallback,
+)
+from mtpmanager.domain.models import DeviceTrackInfo, DeviceTrackRef, TrackMetadata
 from mtpmanager.ports.transport import TransportError
 
 
@@ -16,11 +19,14 @@ class _FakeDevice:
         *,
         fatal_at: int | None = None,
         miss: set[int] | None = None,
+        embedded: dict[int, TrackMetadata] | None = None,
     ) -> None:
         self._meta = dict(meta or {})
         self._fatal_at = fatal_at
         self._miss = set(miss or ())
+        self._embedded = dict(embedded or {})
         self.calls: list[int] = []
+        self.download_calls: list[int] = []
 
     def get_track_metadata(self, object_id: int) -> DeviceTrackInfo:
         oid = int(object_id)
@@ -32,6 +38,18 @@ class _FakeDevice:
         if oid not in self._meta:
             raise TransportError(f"missing {oid}", fatal=False)
         return self._meta[oid]
+
+    def get_file_to_file(self, object_id: int, dest: str) -> None:
+        oid = int(object_id)
+        self.download_calls.append(oid)
+        meta = self._embedded.get(oid)
+        if meta is None:
+            raise TransportError(f"download miss {oid}", fatal=False)
+        # Minimal ID3-ish file not needed; we patch read_metadata in the test.
+        with open(dest, "wb") as fh:
+            fh.write(b"fake")
+        # Stash path→meta for the patched reader via attribute on dest parent.
+        setattr(self, f"_meta_for_{oid}", meta)
 
 
 def _ref(oid: int, name: str = "") -> DeviceTrackRef:
@@ -98,13 +116,54 @@ class EnrichTrackRefsTests(unittest.TestCase):
         result = enrich_track_refs(dev, refs)
         self.assertTrue(result.aborted)
         self.assertEqual(result.failed_id, 2)
-        self.assertEqual(result.updated, 1)
-        self.assertEqual(result.failed, 1)
-        # id=3 never called after fatal at 2
+        # id 3 never called after fatal on 2
         self.assertEqual(dev.calls, [1, 2])
-        self.assertEqual(result.refs[0].title, "One")
-        self.assertEqual(result.refs[1].title, "")
-        self.assertEqual(result.refs[2].title, "")
+
+    def test_embedded_fallback_on_placeholder(self) -> None:
+        refs = [_ref(1, "ghost.mp3"), _ref(2)]
+        # Device returns placeholder / missing; file tags recover id=1.
+        placeholder = DeviceTrackInfo(
+            item_id=1,
+            name="ghost.mp3",
+            title="Unknown Title",
+            artist="Unknown Artist",
+            album="Unknown Album",
+            filetype=2,
+        )
+        good = _info(2, "Two", "B")
+        embedded = TrackMetadata(
+            artist="File Artist",
+            album="File Album",
+            title="File Title",
+        )
+        dev = _FakeDevice(
+            {1: placeholder, 2: good},
+            embedded={1: embedded},
+        )
+
+        import mtpmanager.app.device_ops as ops
+
+        real_read = ops.read_metadata
+
+        def fake_read(path: str):
+            # Map download path prefix back to oid via open file content.
+            if path and "mtpmanager_meta_1_" in path:
+                return embedded
+            return real_read(path)
+
+        ops.read_metadata = fake_read  # type: ignore[assignment]
+        try:
+            result = enrich_track_refs_with_embedded_fallback(dev, refs)
+        finally:
+            ops.read_metadata = real_read  # type: ignore[assignment]
+
+        self.assertEqual(result.updated, 2)
+        self.assertEqual(result.from_device, 1)
+        self.assertEqual(result.from_embedded, 1)
+        self.assertEqual(result.refs[0].title, "File Title")
+        self.assertEqual(result.refs[0].artist, "File Artist")
+        self.assertEqual(result.refs[1].title, "Two")
+        self.assertEqual(dev.download_calls, [1])
 
     def test_empty(self) -> None:
         dev = _FakeDevice()

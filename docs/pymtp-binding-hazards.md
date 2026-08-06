@@ -138,9 +138,9 @@ On pure PyMTP send failure: log errorstack, raise `TransportError`, UI points at
 
 ---
 
-### 8. Get Track Info / `Get_Trackmetadata` — **patched** (C + product)
+### 8. Get Track Info / `Get_Trackmetadata` — **patched** (C + product); auto bulk **disabled**
 
-**Surface:** Device → Get Track Info (experimental). Picker prefers audio/video-ish listing entries; calls patched `get_track_metadata`.
+**Surface:** Device → Get Track Info (experimental); Device media tree context → **Fetch track tags…** (multi-select; then download/mutagen fallback). **Not** auto-run after inventory refresh (bulk per-id calls panic/poison ZEN).
 
 **libmtp behavior:**
 

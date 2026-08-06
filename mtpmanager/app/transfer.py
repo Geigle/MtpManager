@@ -143,12 +143,24 @@ def _resolve_parent(
     *,
     guid: str | None = None,
 ) -> int | None:
-    # GUID ObjectFileName mode is always flat under Music 100.
-    if guid and is_track_guid(guid):
-        return None
+    """Resolve MTP parent folder id for a send.
+
+    Music with a host GUID stays flat under Music (resolver artist/album
+    nesting is ignored). Podcasts always consult the resolver so they land
+    under ZENcast even though ObjectFileName is still the episode GUID.
+    """
     if resolver is None:
         return None
-    return resolver(meta)
+    parent = resolver(meta)
+    if parent is None:
+        return None
+    genre = (getattr(meta, "genre", None) or "").strip().casefold()
+    if genre == "podcast":
+        return parent
+    # Music GUID ObjectFileName mode: flat under Music (ignore artist folders).
+    if guid and is_track_guid(guid):
+        return None
+    return parent
 
 
 def _guid_already_on_device(
