@@ -589,6 +589,13 @@ class MainWindow:
             width=22,
         )
         self.entry_library_search.pack(side=LEFT, padx=(0, 2), pady=3)
+        self._library_search_tip = _HoverTip(self.entry_library_search)
+        self._library_search_tip.set_text(
+            "Fuzzy search (flat ranked list).\n"
+            "Field boosts: artist: album: title: genre: …\n"
+            "Example: artist:nightwish ocean\n"
+            "⌘F / Ctrl+F focus · Esc clear"
+        )
         self.btn_library_search_clear = Button(
             library_toolbar, text="×", width=2, state=DISABLED
         )

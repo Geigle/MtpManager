@@ -4556,13 +4556,14 @@ class AppController:
             all_tracks
         )
         # Fixed hierarchies for secondary tabs (independent of Music sort).
+        # Search mode: flat relevance lists (no headers) on all media tabs.
         self._rebuild_videos_tree(
-            video_tracks, search_scores=search_scores, expand_groups=filter_active
+            video_tracks, search_scores=search_scores, flat_search=filter_active
         )
         self._rebuild_audiobooks_tree(
             audiobook_tracks,
             search_scores=search_scores,
-            expand_groups=filter_active,
+            flat_search=filter_active,
         )
 
         tracks = music_tracks
@@ -4572,24 +4573,19 @@ class AppController:
             return
 
         primary = self._sort_primary
-        # While filtering, relevance order wins over reverse heading sort.
-        reverse = self._sort_reverse and not filter_active
-        open_groups = filter_active
+        reverse = self._sort_reverse
 
         # Build insert plan as list of ops for chunked UI work.
         # group op: ("group", parent, iid, label, tags, seed_track|None)
         # track op: ("track", parent, track)
         ops: list = []
 
-        def _maybe_rank_groups(groups):
-            if not filter_active or not search_scores:
-                return groups
-            from mtpmanager.domain.library_search import reorder_groups_by_score
-
-            return reorder_groups_by_score(groups, search_scores)
-
-        if primary == SortPrimary.DIRECTORY:
-            groups = _maybe_rank_groups(group_by_directory(tracks))
+        if filter_active:
+            # Flat list, strongest matches first (filter_library_tracks_scored order).
+            for t in tracks:
+                ops.append(("track", "", t))
+        elif primary == SortPrimary.DIRECTORY:
+            groups = group_by_directory(tracks)
             if reverse:
                 groups = list(reversed(groups))
             for g in groups:
@@ -4612,7 +4608,7 @@ class AppController:
                 for t in gtracks:
                     ops.append(("track", g.key, t))
         elif primary == SortPrimary.ARTIST:
-            groups = _maybe_rank_groups(group_by_artist_album(tracks))
+            groups = group_by_artist_album(tracks)
             if reverse:
                 groups = list(reversed(groups))
             for ag in groups:
@@ -4655,7 +4651,7 @@ class AppController:
                         ops.append(("track", album.key, t))
         elif primary == SortPrimary.ARTIST_ALBUM_COMBO:
             # "{artist} - {album}" → tracks (multi-artist dirs → Various Artists)
-            groups = _maybe_rank_groups(group_by_artist_dash_album(tracks))
+            groups = group_by_artist_dash_album(tracks)
             if reverse:
                 groups = list(reversed(groups))
             for g in groups:
@@ -4670,7 +4666,7 @@ class AppController:
                     ops.append(("track", g.key, t))
         elif primary == SortPrimary.ALBUM:
             # "{album} - {artist}" → tracks
-            groups = _maybe_rank_groups(group_by_album(tracks))
+            groups = group_by_album(tracks)
             if reverse:
                 groups = list(reversed(groups))
             for g in groups:
@@ -4684,7 +4680,7 @@ class AppController:
                 for t in gtracks:
                     ops.append(("track", g.key, t))
         elif primary == SortPrimary.YEAR:
-            groups = _maybe_rank_groups(group_by_year(tracks))
+            groups = group_by_year(tracks)
             if reverse:
                 groups = list(reversed(groups))
             for g in groups:
@@ -4699,17 +4695,12 @@ class AppController:
                     ops.append(("track", g.key, t))
         else:
             # TITLE or ARTIST_ALBUM flat
-            if filter_active and search_scores:
-                from mtpmanager.domain.library_search import sort_tracks_by_score
-
-                ordered = sort_tracks_by_score(tracks, search_scores)
-            else:
-                flat_primary = (
-                    SortPrimary.ARTIST_ALBUM
-                    if primary == SortPrimary.ARTIST_ALBUM
-                    else SortPrimary.TITLE
-                )
-                ordered = sort_tracks_flat(tracks, flat_primary, reverse=reverse)
+            flat_primary = (
+                SortPrimary.ARTIST_ALBUM
+                if primary == SortPrimary.ARTIST_ALBUM
+                else SortPrimary.TITLE
+            )
+            ordered = sort_tracks_flat(tracks, flat_primary, reverse=reverse)
             for t in ordered:
                 ops.append(("track", "", t))
 
@@ -4740,18 +4731,15 @@ class AppController:
                                 image = photo
                             else:
                                 self._pending_album_art.append((iid, seed.path))
-                        group_text = ""
-                        if show_score_col and seed is not None:
-                            group_text = self._search_score_tree_text(seed, "")
                         tree.insert(
                             parent,
                             "end",
                             iid=iid,
-                            text=group_text,
+                            text="",
                             image=image,
                             values=(label, "", "", ""),
                             tags=tags,
-                            open=open_groups,
+                            open=False,
                         )
                         if seed is not None:
                             self._group_seed_by_iid[iid] = seed
@@ -4767,33 +4755,15 @@ class AppController:
                 self.win.set_tracks_usable(self._library_root_reachable())
                 self._start_background_album_art()
                 self._refresh_playing_highlight()
-                if open_groups:
-                    self._expand_all_tree_groups(self.win.tree)
 
         run_chunk(0)
-
-    def _expand_all_tree_groups(self, tree) -> None:
-        """Open every group header (used after a search-filter rebuild)."""
-        try:
-            stack = list(tree.get_children(""))
-            while stack:
-                iid = stack.pop()
-                kids = tree.get_children(iid)
-                if kids:
-                    try:
-                        tree.item(iid, open=True)
-                    except Exception:
-                        pass
-                    stack.extend(kids)
-        except Exception:
-            pass
 
     def _rebuild_videos_tree(
         self,
         tracks: list[Track],
         *,
         search_scores: dict[str, float] | None = None,
-        expand_groups: bool = False,
+        flat_search: bool = False,
     ) -> None:
         """Rebuild Library → Video (TV series by show title; else folder)."""
         self._cancel_videos_populate()
@@ -4802,32 +4772,32 @@ class AppController:
             return
 
         ops: list = []
-        groups = group_videos_for_library(tracks)
-        scores = search_scores or {}
-        if expand_groups and scores:
-            from mtpmanager.domain.library_search import reorder_groups_by_score
-
-            groups = reorder_groups_by_score(groups, scores)
-        for g in groups:
-            folder_iid = f"vl:{g.key}"
-            seed = g.tracks[0] if g.tracks else None
-            # TV series and plain folders both use group_directory so exclude
-            # / sync-folder actions keep working on the parent row.
-            tags = ("group", "group_directory")
-            if g.key.startswith("tv:"):
-                tags = ("group", "group_directory", "group_tv_series")
-            ops.append(
-                (
-                    "group",
-                    "",
-                    folder_iid,
-                    g.label,
-                    tags,
-                    seed,
+        if flat_search:
+            # Search: flat relevance order (already sorted by filter).
+            for t in tracks:
+                ops.append(("track", "", t))
+        else:
+            groups = group_videos_for_library(tracks)
+            for g in groups:
+                folder_iid = f"vl:{g.key}"
+                seed = g.tracks[0] if g.tracks else None
+                # TV series and plain folders both use group_directory so exclude
+                # / sync-folder actions keep working on the parent row.
+                tags = ("group", "group_directory")
+                if g.key.startswith("tv:"):
+                    tags = ("group", "group_directory", "group_tv_series")
+                ops.append(
+                    (
+                        "group",
+                        "",
+                        folder_iid,
+                        g.label,
+                        tags,
+                        seed,
+                    )
                 )
-            )
-            for t in g.tracks:
-                ops.append(("track", folder_iid, t))
+                for t in g.tracks:
+                    ops.append(("track", folder_iid, t))
 
         chunks = fibonacci_chunk_bounds(len(ops))
         if not chunks:
@@ -4849,7 +4819,7 @@ class AppController:
                             text="",
                             values=(label,),
                             tags=tags,
-                            open=expand_groups,
+                            open=False,
                         )
                         if seed is not None:
                             self._group_seed_by_iid[iid] = seed
@@ -4861,8 +4831,6 @@ class AppController:
                 self._videos_populate_after_id = self.win.root.after(
                     1, lambda i=nxt: run_chunk(i)
                 )
-            elif expand_groups:
-                self._expand_all_tree_groups(self.win.videos_tree)
 
         run_chunk(0)
 
@@ -4871,7 +4839,7 @@ class AppController:
         tracks: list[Track],
         *,
         search_scores: dict[str, float] | None = None,
-        expand_groups: bool = False,
+        flat_search: bool = False,
     ) -> None:
         """Rebuild Library → Audiobooks (genre Audiobook; Author → Album - Year)."""
         self._cancel_audiobooks_populate()
@@ -4880,45 +4848,44 @@ class AppController:
             return
 
         ops: list = []
-        groups = group_by_artist_album_year(tracks)
-        scores = search_scores or {}
-        if expand_groups and scores:
-            from mtpmanager.domain.library_search import reorder_groups_by_score
-
-            groups = reorder_groups_by_score(groups, scores)
-        for ag in groups:
-            # Prefix group iids so they never collide with Music tree maps.
-            artist_iid = f"ab:{ag.key}"
-            artist_seed = None
-            for release in ag.children:
-                if release.tracks:
-                    artist_seed = release.tracks[0]
-                    break
-            ops.append(
-                (
-                    "group",
-                    "",
-                    artist_iid,
-                    ag.label,
-                    ("group", "group_artist"),
-                    artist_seed,
-                )
-            )
-            for release in ag.children:
-                release_iid = f"ab:{release.key}"
-                release_seed = release.tracks[0] if release.tracks else None
+        if flat_search:
+            for t in tracks:
+                ops.append(("track", "", t))
+        else:
+            groups = group_by_artist_album_year(tracks)
+            for ag in groups:
+                # Prefix group iids so they never collide with Music tree maps.
+                artist_iid = f"ab:{ag.key}"
+                artist_seed = None
+                for release in ag.children:
+                    if release.tracks:
+                        artist_seed = release.tracks[0]
+                        break
                 ops.append(
                     (
                         "group",
+                        "",
                         artist_iid,
-                        release_iid,
-                        release.label,
-                        ("group", "group_album"),
-                        release_seed,
+                        ag.label,
+                        ("group", "group_artist"),
+                        artist_seed,
                     )
                 )
-                for t in release.tracks:
-                    ops.append(("track", release_iid, t))
+                for release in ag.children:
+                    release_iid = f"ab:{release.key}"
+                    release_seed = release.tracks[0] if release.tracks else None
+                    ops.append(
+                        (
+                            "group",
+                            artist_iid,
+                            release_iid,
+                            release.label,
+                            ("group", "group_album"),
+                            release_seed,
+                        )
+                    )
+                    for t in release.tracks:
+                        ops.append(("track", release_iid, t))
 
         chunks = fibonacci_chunk_bounds(len(ops))
         if not chunks:
@@ -4940,7 +4907,7 @@ class AppController:
                             text="",
                             values=(label, "", "", ""),
                             tags=tags,
-                            open=expand_groups,
+                            open=False,
                         )
                         if seed is not None:
                             self._group_seed_by_iid[iid] = seed
@@ -4954,8 +4921,6 @@ class AppController:
                 )
             else:
                 self._refresh_playing_highlight()
-                if expand_groups:
-                    self._expand_all_tree_groups(self.win.audiobooks_tree)
 
         run_chunk(0)
 

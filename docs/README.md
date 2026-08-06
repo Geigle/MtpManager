@@ -41,6 +41,7 @@ This folder is the **design and incident** map. For run instructions, logs, and 
 | [device-contract.md](./device-contract.md) | MTP/ZEN remote path, storage, basename, tags vs filename — **do not rebreak** |
 | [basename-limit-evidence.md](./basename-limit-evidence.md) | Why `MAX_REMOTE_BASENAME=56`: external vs empirical evidence; long on-device names |
 | [transfer-and-modes.md](./transfer-and-modes.md) | Scan → transcode → send; Stable vs Experimental; batch abort; tests |
+| [library-search.md](./library-search.md) | Toolbar fuzzy search: flat results, field keywords (`artist:`, `album:`, …), debug scores |
 | [pymtp-binding-hazards.md](./pymtp-binding-hazards.md) | Living catalog: PyMTP breakage patterns, confirmed fixes, predicted next failures |
 | [libmtp-api-coverage.md](./libmtp-api-coverage.md) | libmtp vs stock pymtp vs MtpManager: what is implemented, stubbed, or unbound |
 | [debrief-zen-track-send-failure.md](./debrief-zen-track-send-failure.md) | Incident: CMD 99% finalize, hang, batch abort (forensic detail) |
