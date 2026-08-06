@@ -23,6 +23,7 @@ from tkinter import (
     WORD,
     X,
     Y,
+    Entry,
     Frame,
     Label,
     Listbox,
@@ -565,9 +566,10 @@ class MainWindow:
 
         self._prepare_device_context_menu = None
 
-        # Status toolbar: path + track count only (no duplicate title header).
+        # Status toolbar: path + fuzzy search + track count.
         library_toolbar = Frame(self.root, borderwidth=1, relief="sunken")
         library_toolbar.pack(side=TOP, fill=X, padx=2, pady=2)
+        self.library_toolbar = library_toolbar
 
         Label(library_toolbar, text="Library:").pack(side=LEFT, padx=(6, 2), pady=4)
 
@@ -579,8 +581,30 @@ class MainWindow:
         self.lbl_library_path.pack(side=LEFT, fill=X, expand=True, padx=2, pady=4)
         self._library_path_tip = _HoverTip(self.lbl_library_path)
 
+        Label(library_toolbar, text="Search:").pack(side=LEFT, padx=(8, 2), pady=4)
+        self.var_library_search = StringVar(value="")
+        self.entry_library_search = Entry(
+            library_toolbar,
+            textvariable=self.var_library_search,
+            width=22,
+        )
+        self.entry_library_search.pack(side=LEFT, padx=(0, 2), pady=3)
+        self._library_search_tip = _HoverTip(self.entry_library_search)
+        self._library_search_tip.set_text(
+            "Fuzzy search (flat ranked list).\n"
+            "Field boosts: artist: album: title: genre: …\n"
+            "Example: artist:nightwish ocean\n"
+            "⌘F / Ctrl+F focus · Esc clear"
+        )
+        self.btn_library_search_clear = Button(
+            library_toolbar, text="×", width=2, state=DISABLED
+        )
+        self.btn_library_search_clear.pack(side=LEFT, padx=(0, 4), pady=2)
+        self._on_library_search_change = None
+        self._on_library_search_clear = None
+
         self.lbl_library_count = Label(library_toolbar, text="0 tracks")
-        self.lbl_library_count.pack(side=LEFT, padx=(6, 8), pady=4)
+        self.lbl_library_count.pack(side=LEFT, padx=(4, 8), pady=4)
 
         # Pack bottom bar *before* the expanding body so it always keeps a
         # visible strip (Tk expand can otherwise starve a late BOTTOM pack).
@@ -2429,6 +2453,58 @@ class MainWindow:
             state=NORMAL if manage_enabled else DISABLED,
         )
 
+    def set_library_search_commands(
+        self,
+        *,
+        on_change=None,
+        on_clear=None,
+    ) -> None:
+        """Wire library toolbar search entry (debounced change handled by controller)."""
+        self._on_library_search_change = on_change
+        self._on_library_search_clear = on_clear
+        if on_change is not None:
+            self.var_library_search.trace_add(
+                "write", lambda *_a: on_change()
+            )
+        if on_clear is not None:
+            self.btn_library_search_clear.configure(command=on_clear)
+            self.entry_library_search.bind("<Escape>", lambda _e: on_clear())
+        # Focus search: Cmd/Ctrl+F (macOS Command is often Meta/Command).
+        try:
+            self.root.bind_all("<Control-f>", self._focus_library_search)
+            self.root.bind_all("<Command-f>", self._focus_library_search)
+            self.root.bind_all("<Meta-f>", self._focus_library_search)
+        except Exception:
+            pass
+
+    def _focus_library_search(self, _event=None):
+        try:
+            self.entry_library_search.focus_set()
+            self.entry_library_search.selection_range(0, END)
+        except Exception:
+            pass
+        return "break"
+
+    def library_search_query(self) -> str:
+        try:
+            return str(self.var_library_search.get() or "")
+        except Exception:
+            return ""
+
+    def set_library_search_query(self, text: str) -> None:
+        try:
+            self.var_library_search.set(text or "")
+        except Exception:
+            pass
+
+    def set_library_search_clear_enabled(self, enabled: bool) -> None:
+        try:
+            self.btn_library_search_clear.configure(
+                state=NORMAL if enabled else DISABLED
+            )
+        except Exception:
+            pass
+
     def set_library_status(
         self,
         root_path: str = "",
@@ -2437,6 +2513,8 @@ class MainWindow:
         root_paths: list[str] | None = None,
         root_reachable: bool = True,
         busy_message: str | None = None,
+        shown_count: int | None = None,
+        filter_active: bool = False,
     ) -> None:
         """Update toolbar path label and track count.
 
@@ -2446,6 +2524,9 @@ class MainWindow:
 
         When *busy_message* is set (e.g. during a background scan), the count
         label shows that status instead of a numeric track total.
+
+        When *filter_active* and *shown_count* are set, shows
+        ``N of M tracks`` for the fuzzy search filter.
         """
         if root_paths is not None:
             paths = [p for p in root_paths if p]
@@ -2472,6 +2553,11 @@ class MainWindow:
 
         if busy_message:
             self.lbl_library_count.configure(text=busy_message)
+            return
+        if filter_active and shown_count is not None:
+            self.lbl_library_count.configure(
+                text=f"{shown_count} of {track_count} tracks"
+            )
             return
         noun = "track" if track_count == 1 else "tracks"
         self.lbl_library_count.configure(text=f"{track_count} {noun}")

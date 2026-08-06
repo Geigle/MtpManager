@@ -271,6 +271,12 @@ class AppController:
         # Path → Track for the active batch (progress status label).
         self._batch_track_by_path: dict[str, Track] = {}
         self._populate_after_id: str | None = None
+        # Debounced library toolbar fuzzy search (Music / Video / Audiobooks).
+        self._library_search_after_id: str | None = None
+        self._library_search_query: str = ""
+        self._library_filter_shown_count: int | None = None
+        # Path → score for active filter (debug UI shows scores in #0).
+        self._active_search_scores: dict[str, float] = {}
         self._device_populate_after_id: str | None = None
         self._device_poll_after_id: str | None = None
         self._device_poll_gen = 0
@@ -362,6 +368,10 @@ class AppController:
             on_manage_library=self.on_manage_library,
             on_manage_playlists=self.on_manage_playlists,
             on_podcast_settings=self.on_podcast_settings,
+        )
+        w.set_library_search_commands(
+            on_change=self.on_library_search_changed,
+            on_clear=self.on_library_search_clear,
         )
         w.set_transfer_menu_commands(
             on_sync_entire=self.action_entire_library,
@@ -4301,6 +4311,32 @@ class AppController:
             return candidate
         return ""
 
+    def _search_score_tree_text(self, track: Track, default: str = "") -> str:
+        """#0 cell text: fuzzy score in debug mode when a search is active."""
+        from mtpmanager.infra.logging_setup import debug_ui_enabled
+
+        if not debug_ui_enabled() or not self._active_search_scores:
+            return default
+        s = self._active_search_scores.get(track.path or "")
+        if s is None:
+            return default
+        return f"{float(s):.2f}"
+
+    def _set_library_tree_score_headers(self, *, show_scores: bool) -> None:
+        """Toggle #0 heading between track # and search score (debug)."""
+        label = "score" if show_scores else "#"
+        for tree in (
+            self.win.tree,
+            self.win.audiobooks_tree,
+            self.win.videos_tree,
+        ):
+            try:
+                tree.heading("#0", text=label if tree is not self.win.videos_tree else (
+                    "score" if show_scores else ""
+                ))
+            except Exception:
+                pass
+
     def _insert_track_row(
         self,
         parent: str,
@@ -4320,7 +4356,7 @@ class AppController:
             parent,
             "end",
             iid=iid,
-            text=num,
+            text=self._search_score_tree_text(track, num),
             values=(title, artist, album, year),
             tags=tags,
             open=False,
@@ -4338,7 +4374,7 @@ class AppController:
             parent,
             "end",
             iid=iid,
-            text="",
+            text=self._search_score_tree_text(track, ""),
             values=(video_display_title(track),),
             tags=("track", "video"),
             open=False,
@@ -4426,6 +4462,54 @@ class AppController:
         )
         self._device_audiobook_track_by_iid[iid] = track
 
+    def on_library_search_changed(self) -> None:
+        """Toolbar search typed — debounce rebuild (avoid per-keystroke thrash)."""
+        q = self.win.library_search_query()
+        self.win.set_library_search_clear_enabled(bool(q.strip()))
+        if self._library_search_after_id is not None:
+            try:
+                self.win.root.after_cancel(self._library_search_after_id)
+            except Exception:
+                pass
+            self._library_search_after_id = None
+        self._library_search_after_id = self.win.root.after(
+            200, self._apply_library_search
+        )
+
+    def on_library_search_clear(self) -> None:
+        """Clear toolbar search (button or Escape in the entry)."""
+        if self._library_search_after_id is not None:
+            try:
+                self.win.root.after_cancel(self._library_search_after_id)
+            except Exception:
+                pass
+            self._library_search_after_id = None
+        if not self.win.library_search_query() and not self._library_search_query:
+            self.win.set_library_search_clear_enabled(False)
+            return
+        self.win.set_library_search_query("")
+        self.win.set_library_search_clear_enabled(False)
+        self._library_search_query = ""
+        if not self._library_busy:
+            self._rebuild_track_tree()
+            self._sync_library_chrome()
+
+    def _apply_library_search(self) -> None:
+        self._library_search_after_id = None
+        from mtpmanager.domain.library_search import normalize_search_text
+
+        q = self.win.library_search_query()
+        norm = normalize_search_text(q)
+        prev = normalize_search_text(self._library_search_query)
+        if norm == prev:
+            self._library_search_query = q
+            return
+        self._library_search_query = q
+        if self._library_busy or self._index_stream_active:
+            return
+        self._rebuild_track_tree()
+        self._sync_library_chrome()
+
     def _rebuild_track_tree(self) -> None:
         """Rebuild Music + Video + Audiobooks trees from library."""
         self._cancel_populate()
@@ -4442,16 +4526,45 @@ class AppController:
         # Tree selection is gone; keep startup hint, else clear context label.
         self._refresh_selection_detail([])
         all_tracks = list(self.library.tracks)
+        query = (self._library_search_query or self.win.library_search_query() or "")
+        self._library_search_query = query
+        search_scores: dict[str, float] = {}
+        filter_active = bool(query.strip())
+        if filter_active:
+            from mtpmanager.domain.library_search import filter_library_tracks_scored
+
+            all_tracks, search_scores = filter_library_tracks_scored(
+                all_tracks, query
+            )
+            self._library_filter_shown_count = len(all_tracks)
+            self._active_search_scores = dict(search_scores)
+        else:
+            self._library_filter_shown_count = None
+            self._active_search_scores = {}
+        from mtpmanager.infra.logging_setup import debug_ui_enabled
+
+        show_score_col = filter_active and debug_ui_enabled() and bool(
+            self._active_search_scores
+        )
+        self._set_library_tree_score_headers(show_scores=show_score_col)
         if not all_tracks:
             self.win.set_tracks_usable(self._library_root_reachable())
+            self._sync_library_chrome()
             return
 
         music_tracks, video_tracks, audiobook_tracks = partition_library_media(
             all_tracks
         )
         # Fixed hierarchies for secondary tabs (independent of Music sort).
-        self._rebuild_videos_tree(video_tracks)
-        self._rebuild_audiobooks_tree(audiobook_tracks)
+        # Search mode: flat relevance lists (no headers) on all media tabs.
+        self._rebuild_videos_tree(
+            video_tracks, search_scores=search_scores, flat_search=filter_active
+        )
+        self._rebuild_audiobooks_tree(
+            audiobook_tracks,
+            search_scores=search_scores,
+            flat_search=filter_active,
+        )
 
         tracks = music_tracks
         if not tracks:
@@ -4467,7 +4580,11 @@ class AppController:
         # track op: ("track", parent, track)
         ops: list = []
 
-        if primary == SortPrimary.DIRECTORY:
+        if filter_active:
+            # Flat list, strongest matches first (filter_library_tracks_scored order).
+            for t in tracks:
+                ops.append(("track", "", t))
+        elif primary == SortPrimary.DIRECTORY:
             groups = group_by_directory(tracks)
             if reverse:
                 groups = list(reversed(groups))
@@ -4641,7 +4758,13 @@ class AppController:
 
         run_chunk(0)
 
-    def _rebuild_videos_tree(self, tracks: list[Track]) -> None:
+    def _rebuild_videos_tree(
+        self,
+        tracks: list[Track],
+        *,
+        search_scores: dict[str, float] | None = None,
+        flat_search: bool = False,
+    ) -> None:
         """Rebuild Library → Video (TV series by show title; else folder)."""
         self._cancel_videos_populate()
         self.win.clear_videos_tree()
@@ -4649,27 +4772,32 @@ class AppController:
             return
 
         ops: list = []
-        groups = group_videos_for_library(tracks)
-        for g in groups:
-            folder_iid = f"vl:{g.key}"
-            seed = g.tracks[0] if g.tracks else None
-            # TV series and plain folders both use group_directory so exclude
-            # / sync-folder actions keep working on the parent row.
-            tags = ("group", "group_directory")
-            if g.key.startswith("tv:"):
-                tags = ("group", "group_directory", "group_tv_series")
-            ops.append(
-                (
-                    "group",
-                    "",
-                    folder_iid,
-                    g.label,
-                    tags,
-                    seed,
+        if flat_search:
+            # Search: flat relevance order (already sorted by filter).
+            for t in tracks:
+                ops.append(("track", "", t))
+        else:
+            groups = group_videos_for_library(tracks)
+            for g in groups:
+                folder_iid = f"vl:{g.key}"
+                seed = g.tracks[0] if g.tracks else None
+                # TV series and plain folders both use group_directory so exclude
+                # / sync-folder actions keep working on the parent row.
+                tags = ("group", "group_directory")
+                if g.key.startswith("tv:"):
+                    tags = ("group", "group_directory", "group_tv_series")
+                ops.append(
+                    (
+                        "group",
+                        "",
+                        folder_iid,
+                        g.label,
+                        tags,
+                        seed,
+                    )
                 )
-            )
-            for t in g.tracks:
-                ops.append(("track", folder_iid, t))
+                for t in g.tracks:
+                    ops.append(("track", folder_iid, t))
 
         chunks = fibonacci_chunk_bounds(len(ops))
         if not chunks:
@@ -4706,7 +4834,13 @@ class AppController:
 
         run_chunk(0)
 
-    def _rebuild_audiobooks_tree(self, tracks: list[Track]) -> None:
+    def _rebuild_audiobooks_tree(
+        self,
+        tracks: list[Track],
+        *,
+        search_scores: dict[str, float] | None = None,
+        flat_search: bool = False,
+    ) -> None:
         """Rebuild Library → Audiobooks (genre Audiobook; Author → Album - Year)."""
         self._cancel_audiobooks_populate()
         self.win.clear_audiobooks_tree()
@@ -4714,40 +4848,44 @@ class AppController:
             return
 
         ops: list = []
-        groups = group_by_artist_album_year(tracks)
-        for ag in groups:
-            # Prefix group iids so they never collide with Music tree maps.
-            artist_iid = f"ab:{ag.key}"
-            artist_seed = None
-            for release in ag.children:
-                if release.tracks:
-                    artist_seed = release.tracks[0]
-                    break
-            ops.append(
-                (
-                    "group",
-                    "",
-                    artist_iid,
-                    ag.label,
-                    ("group", "group_artist"),
-                    artist_seed,
-                )
-            )
-            for release in ag.children:
-                release_iid = f"ab:{release.key}"
-                release_seed = release.tracks[0] if release.tracks else None
+        if flat_search:
+            for t in tracks:
+                ops.append(("track", "", t))
+        else:
+            groups = group_by_artist_album_year(tracks)
+            for ag in groups:
+                # Prefix group iids so they never collide with Music tree maps.
+                artist_iid = f"ab:{ag.key}"
+                artist_seed = None
+                for release in ag.children:
+                    if release.tracks:
+                        artist_seed = release.tracks[0]
+                        break
                 ops.append(
                     (
                         "group",
+                        "",
                         artist_iid,
-                        release_iid,
-                        release.label,
-                        ("group", "group_album"),
-                        release_seed,
+                        ag.label,
+                        ("group", "group_artist"),
+                        artist_seed,
                     )
                 )
-                for t in release.tracks:
-                    ops.append(("track", release_iid, t))
+                for release in ag.children:
+                    release_iid = f"ab:{release.key}"
+                    release_seed = release.tracks[0] if release.tracks else None
+                    ops.append(
+                        (
+                            "group",
+                            artist_iid,
+                            release_iid,
+                            release.label,
+                            ("group", "group_album"),
+                            release_seed,
+                        )
+                    )
+                    for t in release.tracks:
+                        ops.append(("track", release_iid, t))
 
         chunks = fibonacci_chunk_bounds(len(ops))
         if not chunks:
@@ -6400,11 +6538,20 @@ class AppController:
             self._refresh_manage_library_dialog()
             return
         reachable = self._library_root_reachable()
+        total = len(self.library)
+        q = (self._library_search_query or self.win.library_search_query() or "").strip()
+        filter_on = bool(q)
+        shown = self._library_filter_shown_count
+        if filter_on and shown is None:
+            shown = 0
         self.win.set_library_status(
-            track_count=len(self.library),
+            track_count=total,
             root_paths=list(self.library.root_paths),
             root_reachable=reachable if self.library.root_paths else True,
+            shown_count=shown if filter_on else None,
+            filter_active=filter_on,
         )
+        self.win.set_library_search_clear_enabled(filter_on)
         # Manage Library stays available so the user can add a first root
         # even when none are reachable yet.
         self.win.set_library_menu_state(manage_enabled=True)
