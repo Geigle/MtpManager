@@ -73,13 +73,10 @@ from mtpmanager.domain.device_folders import (
     legacy_zen_vision_m_layout,
 )
 from mtpmanager.domain.device_media import (
-    apply_host_meta,
     enrich_refs_from_host,
     expand_podcast_parent_ids,
-    looks_like_music,
     looks_like_track,
     podcast_folder_label,
-    ref_tags_look_placeholder,
     refs_needing_device_tags,
     resolve_device_tracks_for_display,
     track_meta_is_usable,
@@ -284,10 +281,6 @@ class AppController:
         self._device_tree_refresh_after_id: str | None = None
         self._device_context_tree = None
         self._device_context_row: str | None = None
-        # Object ids we already asked (or ran) embedded-tag recovery for.
-        self._file_meta_probe_asked: set[int] = set()
-        self._file_meta_probe_after_id: str | None = None
-        self._file_meta_probe_inflight = False
         # Live Music/Video/TV folder ids from list_folders name match.
         self._folder_layout: DeviceFolderLayout = legacy_zen_vision_m_layout()
         # folder_id → parent_id from last list_folders (podcast show folders).
@@ -499,6 +492,7 @@ class AppController:
             on_delete=self.action_device_delete_selected,
             on_pull=self.action_device_pull_selected,
             on_pull_folder=self.action_device_pull_to_folder,
+            on_fetch_tags=self.action_device_fetch_tags_selected,
             on_delete_artist=self.action_device_delete_artist_group,
             on_delete_album=self.action_device_delete_album_group,
             on_delete_folder=self.action_device_delete_folder_group,
@@ -2360,20 +2354,12 @@ class AppController:
         self._refresh_selection_detail(tracks)
 
     def _on_device_tree_selection_changed(self, event=None) -> None:
-        """Update selection detail + maybe offer embedded-tag recovery."""
+        """Update left-panel detail for a single device track selection."""
         tree = event.widget if event is not None else self.win.active_device_tree()
         try:
             selection = list(tree.selection())
         except Exception:
             selection = []
-        # Debounce: wait until selection settles (rapid multi-click).
-        if self._file_meta_probe_after_id is not None:
-            try:
-                self.win.root.after_cancel(self._file_meta_probe_after_id)
-            except Exception:
-                pass
-            self._file_meta_probe_after_id = None
-
         if len(selection) != 1:
             return
         iid = selection[0]
@@ -2381,7 +2367,6 @@ class AppController:
         if "track" not in tags:
             return
 
-        # Show host-shaped detail when we can.
         by_iid = self._device_track_map_for_tree(tree)
         track = by_iid.get(iid)
         if track is not None:
@@ -2392,187 +2377,6 @@ class AppController:
                 )
             except Exception:
                 pass
-
-        self._file_meta_probe_after_id = self.win.root.after(
-            350,
-            lambda t=tree, i=iid: self._maybe_offer_embedded_meta_probe(t, i),
-        )
-
-    def _maybe_offer_embedded_meta_probe(self, tree, iid: str) -> None:
-        """If a single device audio row has placeholder tags, ask to probe file."""
-        self._file_meta_probe_after_id = None
-        if self.win.active_mode() == "stable":
-            return
-        if not self.device.is_connected():
-            return
-        if (
-            self._transfer_busy
-            or self._file_meta_probe_inflight
-            or self._device_io.is_held()
-        ):
-            return
-        try:
-            sel = list(tree.selection())
-            if sel != [iid]:
-                return
-        except Exception:
-            return
-        tags = set(tree.item(iid, "tags") or ())
-        if "track" not in tags:
-            return
-        # Video tab / video rows: skip (not the mass-storage audio case).
-        if "video" in tags or tree is self.win.device_video_tree:
-            return
-
-        by_iid = self._device_track_map_for_tree(tree)
-        track = by_iid.get(iid)
-        if track is None:
-            return
-        oid = self._item_id_from_device_track(track)
-        if oid is None or oid in self._file_meta_probe_asked:
-            return
-
-        refs = self._device_refs_for_tracks([track])
-        if not refs:
-            return
-        ref = refs[0]
-
-        # Prefer audio-looking objects (music + audiobook).
-        if not looks_like_music(ref) and not looks_like_track(ref):
-            self._file_meta_probe_asked.add(oid)
-            return
-
-        # Host GUID join already has real tags — nothing to recover.
-        if track.guid and is_track_guid(track.guid):
-            try:
-                host = get_tracks_by_guids([track.guid])
-            except Exception:
-                host = {}
-            hit = host.get(track.guid) if host else None
-            if hit is not None and track_meta_is_usable(hit.meta):
-                self._file_meta_probe_asked.add(oid)
-                return
-
-        # Listing/ref tags are authoritative for "device listed Unknown…".
-        # Display may substitute the filename for Unknown Title.
-        needs = ref_tags_look_placeholder(ref)
-        if not needs:
-            self._file_meta_probe_asked.add(oid)
-            return
-
-        name = (ref.name or track.meta.title or f"id={oid}").strip()
-        self._file_meta_probe_asked.add(oid)
-        if not messagebox.askyesno(
-            "Fetch file metadata?",
-            "This track has empty or placeholder tags on the device "
-            "(Unknown Artist / Album / Title).\n\n"
-            "That often happens when files were copied as if the player "
-            "were a mass-storage drive instead of MTP.\n\n"
-            f"Download “{name}” to a temporary folder and read tags "
-            "from the file itself?\n\n"
-            "(The temp copy is discarded after reading.)",
-            default=messagebox.YES,
-        ):
-            return
-
-        self._start_embedded_meta_probe(ref)
-
-    def _start_embedded_meta_probe(self, ref: DeviceTrackRef) -> None:
-        """Background: download temp copy + mutagen; update device tree on hit."""
-        if self._file_meta_probe_inflight or self._transfer_busy:
-            messagebox.showinfo(
-                "Fetch file metadata",
-                "A transfer or device job is already in progress.",
-            )
-            return
-        if not self._require_device_ready():
-            return
-        if not self._device_io.try_acquire("embedded-meta"):
-            messagebox.showinfo(
-                "Fetch file metadata",
-                "The device is busy with another USB operation. Try again "
-                "in a moment.",
-            )
-            return
-
-        oid = int(ref.item_id or 0)
-        self._file_meta_probe_inflight = True
-        device = self.device
-        batch_ref = ref
-        gate_reason = "embedded-meta"
-
-        def work():
-            return device_ops.probe_embedded_metadata(device, batch_ref)
-
-        def on_done(result) -> None:
-            self._file_meta_probe_inflight = False
-            self._device_io.release(
-                reason=gate_reason, quiet_s=_DEVICE_USB_COOLDOWN_S
-            )
-            try:
-                self.win.set_progress_status("")
-            except Exception:
-                pass
-            if not result.usable or result.meta is None:
-                messagebox.showinfo(
-                    "Fetch file metadata",
-                    "Could not recover usable tags from the downloaded file.\n"
-                    "The device listing is unchanged.",
-                )
-                return
-            meta = result.meta
-            updated = apply_host_meta(batch_ref, meta)
-
-            def _merge(refs: list[DeviceTrackRef]) -> list[DeviceTrackRef]:
-                out: list[DeviceTrackRef] = []
-                for r in refs:
-                    if int(r.item_id or 0) == oid:
-                        out.append(updated)
-                    else:
-                        out.append(r)
-                return out
-
-            self._device_music_refs = _merge(self._device_music_refs)
-            self._device_audiobook_refs = _merge(self._device_audiobook_refs)
-            # Re-partition in case genre appeared.
-            audio = list(self._device_music_refs) + list(
-                self._device_audiobook_refs
-            )
-            by_guid = self._host_tracks_by_guid_for_refs(audio)
-            music, ab = self._split_device_music_and_audiobook_refs(
-                audio, by_guid
-            )
-            self._device_music_refs = music
-            self._device_audiobook_refs = ab
-            self._rebuild_device_music_tree(music, by_guid)
-            self._rebuild_device_audiobooks_tree(ab, by_guid)
-            messagebox.showinfo(
-                "Fetch file metadata",
-                "Updated tags from the file:\n\n"
-                f"Artist: {meta.artist or '—'}\n"
-                f"Album: {meta.album or '—'}\n"
-                f"Title: {meta.title or '—'}",
-            )
-
-        def on_error(exc: BaseException) -> None:
-            self._file_meta_probe_inflight = False
-            self._device_io.release(
-                reason=gate_reason, quiet_s=_DEVICE_USB_COOLDOWN_S
-            )
-            try:
-                self.win.set_progress_status("")
-            except Exception:
-                pass
-            logger.exception("embedded meta probe failed id=%s", oid)
-            messagebox.showerror("Fetch file metadata", str(exc))
-
-        self.win.set_progress_status("Downloading temp copy for tag read…")
-        self._bg.submit(
-            work,
-            on_done=on_done,
-            on_error=on_error,
-            name="device-embedded-meta-probe",
-        )
 
     def _refresh_selection_detail(self, tracks: list[Track] | None = None) -> None:
         """Update left-panel label from the current tree selection.
@@ -2793,7 +2597,15 @@ class AppController:
                     label=f"Pull {n} {noun} to folder…",
                 )
                 self.win.menu_device_track_ctx.entryconfig(
-                    3,
+                    2,
+                    label=(
+                        f"Fetch tags for {n} {noun}…"
+                        if n > 1
+                        else "Fetch track tags…"
+                    ),
+                )
+                self.win.menu_device_track_ctx.entryconfig(
+                    4,
                     label=f"Delete {n} {noun} from device…",
                 )
             else:
@@ -2804,7 +2616,10 @@ class AppController:
                     1, label="Pull to folder…"
                 )
                 self.win.menu_device_track_ctx.entryconfig(
-                    3, label="Delete from device…"
+                    2, label="Fetch track tags…"
+                )
+                self.win.menu_device_track_ctx.entryconfig(
+                    4, label="Delete from device…"
                 )
         except Exception:
             pass
@@ -4381,7 +4196,7 @@ class AppController:
 
         self._device_tree_refresh_after_id = self.win.root.after(delay_ms, _fire)
 
-    def _refresh_device_music_tree(self, *, enrich_missing_tags: bool = True) -> None:
+    def _refresh_device_music_tree(self, *, enrich_missing_tags: bool = False) -> None:
         """Compatibility wrapper — refresh music and video device trees."""
         self._refresh_device_media_trees(enrich_missing_tags=enrich_missing_tags)
 
@@ -4401,15 +4216,17 @@ class AppController:
                 music.append(ref)
         return music, audiobooks
 
-    def _refresh_device_media_trees(self, *, enrich_missing_tags: bool = True) -> None:
+    def _refresh_device_media_trees(self, *, enrich_missing_tags: bool = False) -> None:
         """Rebuild Device → Music / Video / Audiobooks / Podcasts from index.
 
         Music/Audiobooks: GUID basename → host library tags, then device tags,
         then filename. Audiobooks are audio objects whose genre is Audiobook
         (host or device tags). Video: Video/TV parents only (not ZENcast).
-        Podcasts: ZENcast (+ show subfolders). When *enrich_missing_tags* is
-        True, objects still missing titles are filled via
-        ``get_track_metadata`` after the USB quiet window.
+        Podcasts: ZENcast (+ show subfolders).
+
+        Automatic ``get_track_metadata`` is **off** by default: bulk calls
+        panic/poison ZEN sessions. Use device context → **Fetch track tags…**
+        (optional *enrich_missing_tags* remains for diagnostics only).
         """
         serial = self._device_serial
         if not serial:
@@ -4938,19 +4755,76 @@ class AppController:
 
         threading.Thread(target=runner, name="device-album-art", daemon=True).start()
 
-    def _start_device_tag_enrich(self, need: list[DeviceTrackRef]) -> None:
-        """Background Get_Trackmetadata for Device music/video rows without tags."""
+    def action_device_fetch_tags_selected(self) -> None:
+        """Context menu: Get_Trackmetadata (+ download/mutagen fallback) for selection."""
+        if not self._require_device_ready():
+            return
+        if self._transfer_busy or self._device_tag_enrich_inflight:
+            messagebox.showinfo(
+                "Fetch track tags",
+                "A transfer or device job is already in progress.",
+            )
+            return
+        tree = self._device_context_tree or self.win.active_device_tree()
+        tracks = self._device_tracks_from_tree_selection(tree)
+        refs = self._device_refs_for_tracks(tracks)
+        if not refs:
+            messagebox.showinfo("Fetch track tags", "No tracks selected.")
+            return
+        # Deduplicate by item_id (multi-select may repeat under groups).
+        seen: set[int] = set()
+        batch: list[DeviceTrackRef] = []
+        for ref in refs:
+            oid = int(ref.item_id or 0)
+            if oid <= 0 or oid in seen:
+                continue
+            seen.add(oid)
+            batch.append(ref)
+        if not batch:
+            messagebox.showinfo("Fetch track tags", "No tracks selected.")
+            return
+        n = len(batch)
+        if n > 1 and not messagebox.askyesno(
+            "Fetch track tags",
+            f"Fetch tags for {n} selected items?\n\n"
+            "Each object uses Get_Trackmetadata; if tags are empty or "
+            "placeholder, the file is downloaded temporarily and read with "
+            "mutagen.\n\n"
+            "Large batches can stress the USB session — keep selections "
+            "small when possible.",
+            default=messagebox.YES,
+        ):
+            return
+        self._start_device_tag_enrich(batch, interactive=True)
+
+    def _start_device_tag_enrich(
+        self,
+        need: list[DeviceTrackRef],
+        *,
+        interactive: bool = False,
+    ) -> None:
+        """Background tag fetch for selected Device rows (explicit only).
+
+        Uses Get_Trackmetadata, then download+mutagen when tags are still
+        empty/placeholder. Never auto-started after inventory refresh.
+        """
         if not need or self._device_tag_enrich_inflight:
             return
         if not self.device.is_connected():
             return
-        # Best-effort: only when no other USB owner holds the device.
         if self._transfer_busy or not self._device_io.try_acquire("tag-enrich"):
-            logger.info(
-                "Device tag enrich deferred (busy holder=%s) count=%s",
-                self._device_io.holder,
-                len(need),
-            )
+            if interactive:
+                messagebox.showinfo(
+                    "Fetch track tags",
+                    "The device is busy with another USB operation. Try again "
+                    "in a moment.",
+                )
+            else:
+                logger.info(
+                    "Device tag enrich deferred (busy holder=%s) count=%s",
+                    self._device_io.holder,
+                    len(need),
+                )
             return
 
         self._device_tag_enrich_inflight = True
@@ -4958,64 +4832,120 @@ class AppController:
         device = self.device
         serial = self._device_serial
         gate_reason = "tag-enrich"
+        show_ui = bool(interactive)
 
         def work():
-            return device_ops.enrich_track_refs(device, batch, stop_on_fatal=True)
+            return device_ops.enrich_track_refs_with_embedded_fallback(
+                device, batch, stop_on_fatal=True
+            )
 
         def on_done(result) -> None:
             self._device_tag_enrich_inflight = False
             self._device_io.release(
                 reason=gate_reason, quiet_s=_DEVICE_USB_COOLDOWN_S
             )
+            try:
+                self.win.set_progress_status("")
+            except Exception:
+                pass
             if serial != self._device_serial:
                 return
             updated_by_id = {
-                int(r.item_id or 0): r for r in (result.refs or []) if r is not None
+                int(r.item_id or 0): r
+                for r in (result.refs or [])
+                if r is not None and int(r.item_id or 0) > 0
             }
-            if not updated_by_id:
-                return
+            # Always rebuild when any ref may have been updated.
+            if result.updated > 0 and updated_by_id:
 
-            def _merge(refs: list[DeviceTrackRef]) -> list[DeviceTrackRef]:
-                return [
-                    updated_by_id.get(int(ref.item_id or 0), ref) for ref in refs
-                ]
+                def _merge(refs: list[DeviceTrackRef]) -> list[DeviceTrackRef]:
+                    return [
+                        updated_by_id.get(int(ref.item_id or 0), ref)
+                        for ref in refs
+                    ]
 
-            music_merged = _merge(self._device_music_refs)
-            ab_merged = _merge(self._device_audiobook_refs)
-            video_merged = _merge(self._device_video_refs)
-            podcast_merged = _merge(self._device_podcast_refs)
-            # Re-partition audio after tags (genre may have arrived).
-            audio_merged = list(music_merged) + list(ab_merged)
-            audio_by_guid = self._host_tracks_by_guid_for_refs(audio_merged)
-            music_merged, ab_merged = self._split_device_music_and_audiobook_refs(
-                audio_merged, audio_by_guid
-            )
-            self._device_music_refs = music_merged
-            self._device_audiobook_refs = ab_merged
-            self._device_video_refs = video_merged
-            self._device_podcast_refs = podcast_merged
-            video_by_guid = self._host_tracks_by_guid_for_refs(video_merged)
-            podcast_by_guid = self._host_tracks_by_guid_for_refs(podcast_merged)
-            # Do not re-trigger enrich after this pass.
-            self._rebuild_device_music_tree(music_merged, audio_by_guid)
-            self._rebuild_device_audiobooks_tree(ab_merged, audio_by_guid)
-            self._rebuild_device_video_tree(video_merged, video_by_guid)
-            self._rebuild_device_podcasts_tree(podcast_merged, podcast_by_guid)
+                music_merged = _merge(self._device_music_refs)
+                ab_merged = _merge(self._device_audiobook_refs)
+                video_merged = _merge(self._device_video_refs)
+                podcast_merged = _merge(self._device_podcast_refs)
+                audio_merged = list(music_merged) + list(ab_merged)
+                audio_by_guid = self._host_tracks_by_guid_for_refs(audio_merged)
+                music_merged, ab_merged = self._split_device_music_and_audiobook_refs(
+                    audio_merged, audio_by_guid
+                )
+                self._device_music_refs = music_merged
+                self._device_audiobook_refs = ab_merged
+                self._device_video_refs = video_merged
+                self._device_podcast_refs = podcast_merged
+                video_by_guid = self._host_tracks_by_guid_for_refs(video_merged)
+                podcast_by_guid = self._host_tracks_by_guid_for_refs(
+                    podcast_merged
+                )
+                self._rebuild_device_music_tree(music_merged, audio_by_guid)
+                self._rebuild_device_audiobooks_tree(ab_merged, audio_by_guid)
+                self._rebuild_device_video_tree(video_merged, video_by_guid)
+                self._rebuild_device_podcasts_tree(
+                    podcast_merged, podcast_by_guid
+                )
             logger.info(
-                "Device media tags enriched updated=%s failed=%s aborted=%s",
+                "Device media tags fetched updated=%s failed=%s aborted=%s "
+                "device=%s embedded=%s",
                 result.updated,
                 result.failed,
                 result.aborted,
+                getattr(result, "from_device", 0),
+                getattr(result, "from_embedded", 0),
             )
+            if show_ui:
+                if result.aborted:
+                    messagebox.showerror(
+                        "Fetch track tags aborted",
+                        "A fatal MTP error stopped the batch "
+                        f"(object id {result.failed_id}).\n\n"
+                        f"Updated {result.updated} before abort; "
+                        f"{result.failed} failed.\n"
+                        "Reconnect if the session is poisoned.",
+                    )
+                elif result.updated == 0:
+                    messagebox.showinfo(
+                        "Fetch track tags",
+                        "Could not recover usable tags for the selection.\n"
+                        "Device listing is unchanged.",
+                    )
+                else:
+                    messagebox.showinfo(
+                        "Fetch track tags",
+                        f"Updated {result.updated} of {len(batch)} item(s).\n"
+                        f"From device metadata: {result.from_device}\n"
+                        f"From file tags (download): {result.from_embedded}\n"
+                        f"Unchanged/failed: {result.failed}",
+                    )
 
         def on_error(exc: BaseException) -> None:
             self._device_tag_enrich_inflight = False
             self._device_io.release(
                 reason=gate_reason, quiet_s=_DEVICE_USB_COOLDOWN_S
             )
+            try:
+                self.win.set_progress_status("")
+            except Exception:
+                pass
             logger.warning("Device tag enrich failed: %s", exc)
+            if show_ui:
+                messagebox.showerror("Fetch track tags", str(exc))
 
-        logger.info("Device media tag enrich start count=%s", len(batch))
+        logger.info(
+            "Device media tag fetch start count=%s interactive=%s",
+            len(batch),
+            interactive,
+        )
+        if show_ui:
+            try:
+                self.win.set_progress_status(
+                    f"Fetching tags for {len(batch)} item(s)…"
+                )
+            except Exception:
+                pass
         self._bg.submit(
             work,
             on_done=on_done,
@@ -5432,14 +5362,6 @@ class AppController:
         self._device_index_seeded = False
         self._device_index_seed_inflight = False
         self._device_tag_enrich_inflight = False
-        self._file_meta_probe_asked.clear()
-        self._file_meta_probe_inflight = False
-        if self._file_meta_probe_after_id is not None:
-            try:
-                self.win.root.after_cancel(self._file_meta_probe_after_id)
-            except Exception:
-                pass
-            self._file_meta_probe_after_id = None
         self._folder_layout = legacy_zen_vision_m_layout()
         try:
             self.device.music_folder_id = DEFAULT_MUSIC_FOLDER_ID
@@ -5555,8 +5477,8 @@ class AppController:
                 self._music_folder_id(),
                 self._podcast_folder_id(),
             )
-            # Populate Device media trees (GUID join; optional tag enrich).
-            self._refresh_device_music_tree(enrich_missing_tags=True)
+            # Populate Device media trees (GUID join only; tags on demand).
+            self._refresh_device_music_tree(enrich_missing_tags=False)
 
         def on_error(exc: BaseException) -> None:
             self._device_index_seed_inflight = False

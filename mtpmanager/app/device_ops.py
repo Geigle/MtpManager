@@ -58,6 +58,9 @@ class EnrichTracksResult:
     failed: int
     aborted: bool = False
     failed_id: int | None = None
+    # Populated by enrich_track_refs_with_embedded_fallback (0 for plain enrich).
+    from_device: int = 0
+    from_embedded: int = 0
 
 
 def connect(device: DevicePort) -> str:
@@ -205,7 +208,124 @@ def enrich_track_refs(
         failed,
         total,
     )
-    return EnrichTracksResult(refs=out, updated=updated, failed=failed)
+    return EnrichTracksResult(
+        refs=out, updated=updated, failed=failed, from_device=updated
+    )
+
+
+def enrich_track_refs_with_embedded_fallback(
+    device: DevicePort,
+    refs: Sequence[DeviceTrackRef],
+    *,
+    on_progress: EnrichProgressCallback | None = None,
+    stop_on_fatal: bool = True,
+) -> EnrichTracksResult:
+    """Get_Trackmetadata per ref; if empty/placeholder, download + mutagen.
+
+    Intended for **explicit** user actions (device context menu), not automatic
+    tree population — bulk Get_Trackmetadata can panic/poison ZEN sessions.
+
+    Fatal ``TransportError`` aborts the remainder of the batch.
+    """
+    batch = list(refs)
+    total = len(batch)
+    out: list[DeviceTrackRef] = []
+    updated = 0
+    failed = 0
+    from_device = 0
+    from_embedded = 0
+    logger.info(
+        "enrich_track_refs_with_embedded_fallback start total=%s", total
+    )
+
+    def _progress(done: int, message: str) -> None:
+        if on_progress is None:
+            return
+        try:
+            on_progress(done, total, message)
+        except Exception:
+            logger.debug(
+                "enrich_track_refs_with_embedded_fallback on_progress failed",
+                exc_info=True,
+            )
+
+    for i, ref in enumerate(batch):
+        oid = int(getattr(ref, "item_id", 0) or 0)
+        label = (ref.name or ref.title or "").strip() or f"id={oid}"
+        _progress(i, f"fetching tags… {i + 1}/{total}  {label}")
+        if oid <= 0:
+            out.append(ref)
+            failed += 1
+            continue
+        try:
+            info, file_meta, _path = resolve_tags_with_embedded_fallback(
+                device,
+                ref,
+                prefer_embedded_when_placeholder=True,
+                keep_download=False,
+            )
+        except TransportError as exc:
+            logger.warning(
+                "enrich+fallback failed id=%s label=%r fatal=%s: %s",
+                oid,
+                label,
+                exc.fatal,
+                exc,
+            )
+            out.append(ref)
+            failed += 1
+            if stop_on_fatal and exc.fatal:
+                out.extend(batch[i + 1 :])
+                _progress(i, f"aborted at id={oid}")
+                return EnrichTracksResult(
+                    refs=out,
+                    updated=updated,
+                    failed=failed,
+                    aborted=True,
+                    failed_id=oid,
+                    from_device=from_device,
+                    from_embedded=from_embedded,
+                )
+            continue
+        except Exception:
+            logger.exception(
+                "enrich+fallback unexpected id=%s label=%r", oid, label
+            )
+            out.append(ref)
+            failed += 1
+            continue
+
+        if info is not None and not track_info_looks_placeholder(info):
+            out.append(apply_track_info(ref, info))
+            updated += 1
+            if file_meta is not None:
+                from_embedded += 1
+            else:
+                from_device += 1
+        elif file_meta is not None and track_meta_is_usable(file_meta):
+            out.append(apply_host_meta(ref, file_meta))
+            updated += 1
+            from_embedded += 1
+        else:
+            out.append(ref)
+            failed += 1
+
+    _progress(total, f"updated {updated}/{total}")
+    logger.info(
+        "enrich+fallback done updated=%s failed=%s device=%s embedded=%s total=%s",
+        updated,
+        failed,
+        from_device,
+        from_embedded,
+        total,
+    )
+    return EnrichTracksResult(
+        refs=out,
+        updated=updated,
+        failed=failed,
+        from_device=from_device,
+        from_embedded=from_embedded,
+    )
 
 
 def delete_object(device: DevicePort, object_id: int) -> None:
