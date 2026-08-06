@@ -6,7 +6,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from mtpmanager.app.podcast_ops import pick_new_not_on_device
+from datetime import datetime
+
+from mtpmanager.app.podcast_ops import (
+    pick_new_not_on_device,
+    upsert_scheduled_day_playlist,
+)
+from mtpmanager.infra.playlists import get_playlist_by_name
 from mtpmanager.infra.podcast_index import (
     create_or_update_podcast,
     delete_podcast,
@@ -224,6 +230,51 @@ class PodcastIndexTests(unittest.TestCase):
 
             known = known_podcast_guids([guid, "0" * 32], path=db)
             self.assertEqual(known, {guid})
+
+    def test_upsert_scheduled_day_playlist(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "library_index.db"
+            p = create_or_update_podcast(
+                feed_url="https://example.com/rss2",
+                title="Daily",
+                author="Net",
+                path=db,
+            )
+            upsert_episodes(
+                p.id,
+                [
+                    {
+                        "feed_guid": "d1",
+                        "title": "One",
+                        "pub_date": "2026-08-05T08:00:00Z",
+                        "enclosure_url": "https://x/1.mp3",
+                    },
+                    {
+                        "feed_guid": "d2",
+                        "title": "Two",
+                        "pub_date": "2026-08-05T09:00:00Z",
+                        "enclosure_url": "https://x/2.mp3",
+                    },
+                ],
+                path=db,
+            )
+            eps = list_episodes(p.id, path=db)
+            when = datetime(2026, 8, 5, 10, 0, 0)
+            day = upsert_scheduled_day_playlist(eps[:1], when=when, path=db)
+            self.assertIsNotNone(day)
+            assert day is not None
+            self.assertEqual(day.name, "Podcasts Aug 5, 2026")
+            self.assertEqual(len(day.guids), 1)
+            self.assertEqual(day.added, 1)
+            hit = get_playlist_by_name(day.name, path=db)
+            self.assertIsNotNone(hit)
+
+            day2 = upsert_scheduled_day_playlist(eps, when=when, path=db)
+            self.assertIsNotNone(day2)
+            assert day2 is not None
+            self.assertEqual(day2.name, day.name)
+            self.assertEqual(len(day2.guids), 2)
+            self.assertEqual(day2.added, 1)
 
 
 if __name__ == "__main__":

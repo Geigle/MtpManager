@@ -34,6 +34,7 @@ from mtpmanager.app.podcast_ops import (
     run_full_sync_host_pass,
     send_podcast_video_to_zencast,
     subscribe_feed,
+    upsert_scheduled_day_playlist,
 )
 from mtpmanager.app.podcast_schedule import (
     format_schedule_summary,
@@ -330,6 +331,9 @@ class AppController:
         self._podcast_auto_host_inflight = False
         self._podcast_auto_device_inflight = False
         self._pending_auto_podcast: dict | None = None
+        # Day playlist from scheduled capture → push after device transfer.
+        # {name, guids} or None.
+        self._pending_day_podcast_playlist: dict | None = None
         self._podcast_schedule_after_id: str | None = None
         self._wire()
         # Defer restore so mainloop can start before any index I/O.
@@ -1560,19 +1564,50 @@ class AppController:
                 self.win.set_progress_status("")
             except Exception:
                 pass
-            n = len(getattr(result, "downloaded", None) or [])
+            downloaded = list(getattr(result, "downloaded", None) or [])
+            n = len(downloaded)
             errs = list(getattr(result, "errors", None) or [])
             from datetime import datetime, timezone
 
             now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-            local_day = datetime.now().astimezone().date().isoformat()
+            when_local = datetime.now().astimezone()
+            local_day = when_local.date().isoformat()
             self._config.podcast_last_full_sync_at = now
             self._config.podcast_last_full_sync_local_date = local_day
             try:
                 save_app_config(self._config)
             except Exception:
                 logger.debug("save last full podcast sync failed", exc_info=True)
-            msg = f"{label}: {n} episode(s) ready"
+
+            day_pl_note = ""
+            if downloaded:
+                try:
+                    day = upsert_scheduled_day_playlist(
+                        downloaded, when=when_local
+                    )
+                    if day is not None:
+                        self._pending_day_podcast_playlist = {
+                            "name": day.name,
+                            "guids": list(day.guids),
+                        }
+                        day_pl_note = f" · playlist “{day.name}”"
+                        logger.info(
+                            "Scheduled day podcast playlist name=%r "
+                            "guids=%s added=%s",
+                            day.name,
+                            len(day.guids),
+                            day.added,
+                        )
+                        try:
+                            self._refresh_playlist_tab()
+                        except Exception:
+                            pass
+                except Exception:
+                    logger.exception(
+                        "upsert_scheduled_day_playlist failed after full sync"
+                    )
+
+            msg = f"{label}: {n} episode(s) ready{day_pl_note}"
             if errs:
                 msg += f" · {len(errs)} error(s)"
             try:
@@ -1588,6 +1623,13 @@ class AppController:
             if self._selected_podcast_id is not None:
                 self._load_podcast_episodes(self._selected_podcast_id)
             self._maybe_auto_sync_pending_podcasts()
+            # If nothing left to transfer (already on device), still try
+            # publishing today's playlist membership.
+            if (
+                not self._podcast_auto_device_inflight
+                and self._pending_day_podcast_playlist is not None
+            ):
+                self._try_publish_day_podcast_playlist()
 
         def on_error(exc: BaseException) -> None:
             self._podcast_auto_host_inflight = False
@@ -1698,6 +1740,126 @@ class AppController:
             )
         except Exception:
             pass
+        if ok:
+            self._try_publish_day_podcast_playlist()
+
+    def _try_publish_day_podcast_playlist(self) -> None:
+        """Push today's scheduled podcast playlist to the device (PyMTP).
+
+        Requires Experimental mode + connected device. Leaves the pending
+        payload in place when object ids are not ready yet so a later
+        transfer/refresh can retry.
+        """
+        pending = self._pending_day_podcast_playlist
+        if not pending:
+            return
+        name = str(pending.get("name") or "").strip()
+        guids = [
+            g
+            for g in (pending.get("guids") or [])
+            if is_track_guid(str(g))
+        ]
+        if not name or not guids:
+            self._pending_day_podcast_playlist = None
+            return
+        if not self.device.is_connected():
+            logger.info(
+                "Day podcast playlist %r deferred: device not connected",
+                name,
+            )
+            return
+        if self.win.active_mode() != "experimental":
+            logger.info(
+                "Day podcast playlist %r created on host; on-device publish "
+                "needs Experimental mode (PyMTP)",
+                name,
+            )
+            # Host playlist is enough in Stable Mode; do not retry forever.
+            self._pending_day_podcast_playlist = None
+            return
+        serial = self._device_serial or ""
+        if not serial:
+            return
+
+        def work() -> object:
+            _ids, missing = resolve_track_object_ids(serial, guids)
+            if missing:
+                logger.info(
+                    "Day podcast playlist publish: %d GUID(s) unresolved — "
+                    "refreshing device file list",
+                    len(missing),
+                )
+                try:
+                    files = self.device.list_files()
+                    replace_device_listing(serial, files, source="list")
+                except Exception:
+                    logger.warning(
+                        "Day podcast playlist: list_files refresh failed",
+                        exc_info=True,
+                    )
+            parent = playlists_parent_id(self._folder_layout)
+            return push_playlist_to_device(
+                device=self.device,
+                serial=serial,
+                name=name,
+                guids_in_order=guids,
+                parent_id=parent,
+            )
+
+        def on_done(result) -> None:
+            self._pending_day_podcast_playlist = None
+            if result is None:
+                return
+            verb = "Created" if result.created else "Updated"
+            logger.info(
+                "Day podcast playlist on device %s id=%s name=%r tracks=%d "
+                "missing=%d",
+                verb.lower(),
+                result.playlist_id,
+                result.name,
+                result.resolved,
+                result.missing_guid,
+            )
+            try:
+                self.win.lbl_podcast_status.configure(
+                    text=(
+                        f"Device playlist “{result.name}” "
+                        f"({result.resolved} episode(s))"
+                    )
+                )
+            except Exception:
+                pass
+
+        def on_error(exc: BaseException) -> None:
+            # Keep pending only when membership could not resolve yet.
+            msg = str(exc).lower()
+            if "no on-device object" in msg or "object id" in msg:
+                logger.info(
+                    "Day podcast playlist %r not ready on device yet: %s",
+                    name,
+                    exc,
+                )
+                return
+            self._pending_day_podcast_playlist = None
+            logger.warning(
+                "Day podcast playlist publish failed name=%r: %s",
+                name,
+                exc,
+                exc_info=True,
+            )
+
+        try:
+            self.win.set_progress_status(
+                f"Publishing playlist “{name}” to device…"
+            )
+        except Exception:
+            pass
+        self._bg.submit(
+            work,
+            on_done=on_done,
+            on_error=on_error,
+            name="day-podcast-playlist",
+        )
 
     def on_podcast_sync_latest_all(self) -> None:
         ids = list(self._podcast_ids)

@@ -16,10 +16,20 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
-from mtpmanager.app.podcast_schedule import effective_schedule, is_due
+from mtpmanager.app.podcast_schedule import (
+    effective_schedule,
+    is_due,
+    podcast_day_playlist_name,
+)
 from mtpmanager.domain.library import is_video_file
 from mtpmanager.domain.models import Track, TrackMetadata
 from mtpmanager.domain.track_id import is_track_guid
+from mtpmanager.infra.playlists import (
+    Playlist,
+    append_tracks_to_playlist,
+    create_playlist,
+    get_playlist_by_name,
+)
 from mtpmanager.infra.podcast_feed import (
     FeedChannel,
     episode_to_row_dict,
@@ -32,6 +42,7 @@ from mtpmanager.infra.podcast_index import (
     clear_pending_device_sync_for_ids,
     create_or_update_podcast,
     episode_cache_dir,
+    episode_display_track,
     get_episode,
     get_podcast,
     known_feed_guids,
@@ -559,6 +570,83 @@ def run_full_sync_host_pass(
         set_podcast_auto_last_run(show.id, local_day, path=path)
 
     return result
+
+
+@dataclass(frozen=True)
+class DayPlaylistResult:
+    """Host day-playlist created/extended for a scheduled capture."""
+
+    playlist: Playlist
+    name: str
+    guids: tuple[str, ...]
+    added: int
+
+
+def upsert_scheduled_day_playlist(
+    episodes: Sequence[PodcastEpisode],
+    *,
+    when: datetime | None = None,
+    path: Path | None = None,
+) -> DayPlaylistResult | None:
+    """Create or extend today's ``Podcasts {Mon} {D}, {YYYY}`` host playlist.
+
+    *episodes* are those captured by a full-sync host pass. Same-day re-runs
+    append new membership (skip paths already present). Returns None when
+    nothing with a GUID was provided.
+    """
+    if not episodes:
+        return None
+    show_cache: dict[int, Podcast | None] = {}
+    tracks: list[Track] = []
+    for ep in episodes:
+        g = (ep.guid or "").strip().lower()
+        if not is_track_guid(g):
+            continue
+        show = show_cache.get(int(ep.podcast_id))
+        if int(ep.podcast_id) not in show_cache:
+            show = get_podcast(int(ep.podcast_id), path=path)
+            show_cache[int(ep.podcast_id)] = show
+        display = episode_display_track(ep, show)
+        # Stable ``podcast:<guid>`` path so membership keeps host identity
+        # even when a local enclosure path is present (device push is GUID-based).
+        tracks.append(
+            Track(path=f"podcast:{g}", meta=display.meta, guid=g)
+        )
+    if not tracks:
+        return None
+
+    name = podcast_day_playlist_name(when)
+    existing = get_playlist_by_name(name, path=path)
+    if existing is None:
+        pl = create_playlist(name, path=path)
+        pl = append_tracks_to_playlist(
+            pl.id, tracks, skip_existing=False, path=path
+        )
+        added = len(tracks)
+    else:
+        before = len(existing.entries())
+        pl = append_tracks_to_playlist(
+            existing.id, tracks, skip_existing=True, path=path
+        )
+        added = max(0, len(pl.entries()) - before)
+
+    guids: list[str] = []
+    seen: set[str] = set()
+    for e in pl.entries():
+        p = (e.path or "").strip()
+        g = ""
+        if p.startswith("podcast:"):
+            g = p.split(":", 1)[-1].strip().lower()
+        if is_track_guid(g) and g not in seen:
+            seen.add(g)
+            guids.append(g)
+
+    return DayPlaylistResult(
+        playlist=pl,
+        name=pl.name or name,
+        guids=tuple(guids),
+        added=added,
+    )
 
 
 def pending_episodes_for_device_sync(

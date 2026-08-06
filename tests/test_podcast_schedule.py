@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import unittest
-from datetime import datetime
+from datetime import date, datetime
 
 from mtpmanager.app.podcast_schedule import (
     components_to_hhmm,
@@ -11,6 +11,7 @@ from mtpmanager.app.podcast_schedule import (
     hhmm_to_12h,
     is_due,
     next_run_after,
+    podcast_day_playlist_name,
 )
 from mtpmanager.infra.app_config import WEEKDAY_KEYS
 
@@ -79,6 +80,16 @@ class PodcastScheduleTests(unittest.TestCase):
         summary = format_schedule_summary(days=WEEKDAY_KEYS, time_hhmm="06:30")
         self.assertIn("weekdays", summary)
         self.assertIn("6:30 AM", summary)
+
+    def test_day_playlist_name(self) -> None:
+        self.assertEqual(
+            podcast_day_playlist_name(datetime(2026, 8, 5, 7, 30)),
+            "Podcasts Aug 5, 2026",
+        )
+        self.assertEqual(
+            podcast_day_playlist_name(date(2026, 12, 1)),
+            "Podcasts Dec 1, 2026",
+        )
 
 
 if __name__ == "__main__":

@@ -122,6 +122,21 @@ def is_due(
     return True
 
 
+def podcast_day_playlist_name(when: datetime | date | None = None) -> str:
+    """Host/device playlist title for one day's scheduled podcast capture.
+
+    Format: ``Podcasts {abbreviated-month} {day}, {year}``
+    e.g. ``Podcasts Aug 5, 2026``.
+    """
+    if when is None:
+        when = datetime.now().astimezone()
+    if isinstance(when, datetime):
+        d = when
+    else:
+        d = datetime(when.year, when.month, when.day)
+    return f"Podcasts {d.strftime('%b')} {d.day}, {d.year}"
+
+
 def next_run_after(
     *,
     now_local: datetime,
