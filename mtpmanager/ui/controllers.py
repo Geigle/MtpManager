@@ -1545,9 +1545,24 @@ class AppController:
             )
         except Exception:
             pass
+        # Day playlist accumulates as episodes become ready (streaming).
+        self._full_sync_day_playlist_when = None
+        try:
+            from datetime import datetime as _dt
+
+            self._full_sync_day_playlist_when = _dt.now().astimezone()
+        except Exception:
+            pass
 
         def work():
             from datetime import datetime
+
+            gen = self._bg.generation
+            report = self._bg.progress_callback(gen)
+
+            def on_episode_ready(ep, track) -> None:
+                # Marshal to main thread via progress poll (Tk-safe).
+                report("episode_ready", ep, track)
 
             return run_full_sync_host_pass(
                 podcast_ids=ids,
@@ -1556,7 +1571,14 @@ class AppController:
                 target_audio_format=fmt,
                 now_local=datetime.now().astimezone(),
                 since_last_full_sync=since,
+                on_episode_ready=on_episode_ready,
             )
+
+        def on_progress(*args) -> None:
+            if not args:
+                return
+            if args[0] == "episode_ready" and len(args) >= 3:
+                self._on_full_sync_episode_ready(args[1], args[2], label=label)
 
         def on_done(result) -> None:
             self._podcast_auto_host_inflight = False
@@ -1579,6 +1601,8 @@ class AppController:
             except Exception:
                 logger.debug("save last full podcast sync failed", exc_info=True)
 
+            # Belt-and-suspenders: ensure day playlist has full capture set
+            # (streaming already upserted per episode; this merges any misses).
             day_pl_note = ""
             if downloaded:
                 try:
@@ -1586,18 +1610,20 @@ class AppController:
                         downloaded, when=when_local
                     )
                     if day is not None:
+                        prev = self._pending_day_podcast_playlist or {}
+                        guids = list(day.guids)
+                        # Preserve order; union if streaming already set some.
+                        seen = set(guids)
+                        for g in prev.get("guids") or []:
+                            gs = str(g).strip().lower()
+                            if is_track_guid(gs) and gs not in seen:
+                                seen.add(gs)
+                                guids.append(gs)
                         self._pending_day_podcast_playlist = {
                             "name": day.name,
-                            "guids": list(day.guids),
+                            "guids": guids,
                         }
                         day_pl_note = f" · playlist “{day.name}”"
-                        logger.info(
-                            "Scheduled day podcast playlist name=%r "
-                            "guids=%s added=%s",
-                            day.name,
-                            len(day.guids),
-                            day.added,
-                        )
                         try:
                             self._refresh_playlist_tab()
                         except Exception:
@@ -1622,11 +1648,11 @@ class AppController:
             self._refresh_podcast_tab()
             if self._selected_podcast_id is not None:
                 self._load_podcast_episodes(self._selected_podcast_id)
+            # Drain any leftovers not streamed (device was busy / disconnected).
             self._maybe_auto_sync_pending_podcasts()
-            # If nothing left to transfer (already on device), still try
-            # publishing today's playlist membership.
             if (
                 not self._podcast_auto_device_inflight
+                and not self._transfer_busy
                 and self._pending_day_podcast_playlist is not None
             ):
                 self._try_publish_day_podcast_playlist()
@@ -1642,18 +1668,148 @@ class AppController:
                 pass
             logger.exception("Podcast full sync host pass failed: %s", exc)
             messagebox.showerror("Podcast", f"{label} failed:\n{exc}")
+            # Still try to sync whatever landed on disk.
+            self._maybe_auto_sync_pending_podcasts()
 
         self._bg.submit(
-            work, on_done=on_done, on_error=on_error, name="podcast-full-sync"
+            work,
+            on_done=on_done,
+            on_error=on_error,
+            on_progress=on_progress,
+            name="podcast-full-sync",
         )
 
+    def _on_full_sync_episode_ready(self, episode, track, *, label: str) -> None:
+        """Main-thread: day playlist + optional immediate device enqueue."""
+        ep_id = int(getattr(episode, "id", 0) or 0)
+        title = (getattr(episode, "title", None) or "").strip() or f"#{ep_id}"
+        try:
+            self.win.lbl_podcast_status.configure(
+                text=f"{label}: ready “{title}”"
+            )
+            self.win.set_progress_status(
+                f"{label}: downloaded — queueing for device…"
+            )
+        except Exception:
+            pass
+
+        when = self._full_sync_day_playlist_when
+        try:
+            day = upsert_scheduled_day_playlist(
+                [episode], when=when
+            )
+            if day is not None:
+                self._pending_day_podcast_playlist = {
+                    "name": day.name,
+                    "guids": list(day.guids),
+                }
+        except Exception:
+            logger.debug(
+                "streaming day playlist upsert failed ep=%s",
+                ep_id,
+                exc_info=True,
+            )
+
+        if not bool(self._config.podcast_auto_sync_to_device):
+            return
+        if not self.device.is_connected():
+            return
+        if track is None or not (getattr(track, "path", None) or ""):
+            return
+        self._stream_podcast_track_to_device(
+            track, episode_id=ep_id, label=label
+        )
+
+    def _stream_podcast_track_to_device(
+        self,
+        track: Track,
+        *,
+        episode_id: int = 0,
+        label: str = "Auto Podcast Sync",
+    ) -> None:
+        """Start or extend an auto podcast transfer with one ready track.
+
+        On failure, leave ``pending_device_sync`` set so the post-host drain
+        can pick the episode up. Uses quiet job begin so concurrent host
+        download never spams Busy dialogs.
+        """
+        if episode_id > 0:
+            pending = self._pending_auto_podcast
+            if pending is None:
+                pending = {"episode_ids": []}
+            ids = list(pending.get("episode_ids") or [])
+            if episode_id not in ids:
+                ids.append(episode_id)
+            pending["episode_ids"] = ids
+            self._pending_auto_podcast = pending
+
+        job = self._active_sync_job
+        if (
+            self._transfer_busy
+            and self._transfer_queue is not None
+            and job is not None
+            and getattr(job, "kind", "") == "podcast"
+        ):
+            self._podcast_auto_device_inflight = True
+            n = self._enqueue_tracks(
+                [track], kind="podcast", label=label or "Auto Podcast Sync"
+            )
+            if n:
+                logger.info(
+                    "Streamed podcast episode_id=%s onto live transfer queue",
+                    episode_id,
+                )
+            return
+
+        if self._transfer_busy:
+            # Another kind of transfer owns USB; leave DB pending for later.
+            logger.info(
+                "Podcast episode_id=%s ready; deferring (transfer busy kind=%s)",
+                episode_id,
+                getattr(job, "kind", None) if job else None,
+            )
+            return
+
+        self._podcast_auto_device_inflight = True
+        before_busy = bool(self._transfer_busy)
+        started = self._transfer_many(
+            [track],
+            kind="podcast",
+            label=label or "Auto Podcast Sync",
+            quiet=True,
+        )
+        if started:
+            logger.info(
+                "Starting podcast transfer with streamed episode_id=%s",
+                episode_id,
+            )
+        elif not before_busy and not self._transfer_busy:
+            # Could not start (library busy / USB holder); stay pending.
+            logger.info(
+                "Podcast episode_id=%s ready; transfer did not start "
+                "(will retry after host pass)",
+                episode_id,
+            )
+            if (
+                self._pending_auto_podcast is not None
+                and not self._podcast_auto_host_inflight
+            ):
+                self._finish_auto_podcast_device_batch(ok=False)
+            else:
+                self._podcast_auto_device_inflight = False
+
     def _maybe_auto_sync_pending_podcasts(self) -> None:
-        """Device phase: sync pending full-sync episodes if ready."""
+        """Device phase: sync pending full-sync episodes if ready.
+
+        Used for leftovers after a full-sync host pass (or when streaming
+        could not start because USB was busy). During an active host pass,
+        episodes are streamed via :meth:`_on_full_sync_episode_ready`.
+        """
         if not bool(self._config.podcast_auto_sync_to_device):
             return
         if self._podcast_auto_device_inflight or self._podcast_auto_host_inflight:
             return
-        if self._transfer_busy or self._bg.busy:
+        if self._transfer_busy:
             return
         if not self.device.is_connected():
             return
@@ -1699,6 +1855,16 @@ class AppController:
                 self._finish_auto_podcast_device_batch(ok=False)
                 return
             before_busy = bool(self._transfer_busy)
+            # Mid-job podcast queue: append without restarting.
+            if (
+                before_busy
+                and self._active_sync_job is not None
+                and getattr(self._active_sync_job, "kind", "") == "podcast"
+            ):
+                self._enqueue_tracks(
+                    audio, kind="podcast", label="Auto Podcast Sync"
+                )
+                return
             self._transfer_many(
                 audio, kind="podcast", label="Auto Podcast Sync"
             )
@@ -1723,11 +1889,32 @@ class AppController:
         self._pending_auto_podcast = None
         self._podcast_auto_device_inflight = False
         if not pending:
+            # Transfer ended without a tracked auto batch; still drain/publish.
+            if not self._podcast_auto_host_inflight:
+                self._maybe_auto_sync_pending_podcasts()
+                if (
+                    not self._podcast_auto_device_inflight
+                    and not self._transfer_busy
+                ):
+                    self._try_publish_day_podcast_playlist()
             return
         ids = list(pending.get("episode_ids") or [])
         if ok and ids:
+            # Only clear pending for episodes that actually landed (or vanished).
+            # Streaming may attach episode_ids that never made the queue.
             try:
-                mark_episodes_device_synced(ids)
+                stems = self._device_guid_stems_for_skip() or set()
+                done_ids: list[int] = []
+                for eid in ids:
+                    ep = get_episode(int(eid))
+                    if ep is None:
+                        done_ids.append(int(eid))
+                        continue
+                    g = (ep.guid or "").strip().lower()
+                    if g and g in stems:
+                        done_ids.append(int(eid))
+                if done_ids:
+                    mark_episodes_device_synced(done_ids)
             except Exception:
                 logger.debug("mark_episodes_device_synced failed", exc_info=True)
         try:
@@ -1740,7 +1927,17 @@ class AppController:
             )
         except Exception:
             pass
-        if ok:
+        # Host may still be downloading — wait to publish until host is done.
+        if self._podcast_auto_host_inflight:
+            return
+        # Race: queue drained while more episodes were about to stream, or
+        # leftovers never made it onto the live queue.
+        self._maybe_auto_sync_pending_podcasts()
+        if (
+            ok
+            and not self._podcast_auto_device_inflight
+            and not self._transfer_busy
+        ):
             self._try_publish_day_podcast_playlist()
 
     def _try_publish_day_podcast_playlist(self) -> None:
@@ -6651,30 +6848,52 @@ class AppController:
         )
 
 
-    def _begin_transfer_job(self) -> bool:
-        """Return False if another library/transfer job is already running."""
+    def _begin_transfer_job(self, *, quiet: bool = False) -> bool:
+        """Return False if a library scan or transfer already owns the pipeline.
+
+        Concurrent non-transfer background work is allowed (e.g. podcast full-
+        sync host download streaming tracks into a new transfer job). Only
+        ``_transfer_busy`` / ``_library_busy`` and exclusive USB gate matter —
+        do **not** treat ``_bg.busy`` as a hard block or every streamed episode
+        during full-sync spams Busy dialogs while the host pass is still
+        downloading.
+
+        *quiet*: log instead of messageboxes (auto/streamed podcast path).
+        """
         if self._library_busy:
-            messagebox.showinfo(
-                "Library",
-                "Library is still loading or scanning. Try again in a moment.",
-            )
+            if quiet:
+                logger.info("Transfer deferred: library busy")
+            else:
+                messagebox.showinfo(
+                    "Library",
+                    "Library is still loading or scanning. Try again in a moment.",
+                )
             return False
-        if self._transfer_busy or self._bg.busy:
-            messagebox.showinfo(
-                "Busy",
-                "A background job is already running.\n\n"
-                "Wait for it to finish, or click Cancel to stop after the "
-                "current item.",
-            )
+        if self._transfer_busy:
+            if quiet:
+                logger.info("Transfer deferred: transfer already running")
+            else:
+                messagebox.showinfo(
+                    "Busy",
+                    "A transfer is already running.\n\n"
+                    "Wait for it to finish, or click Cancel to stop after the "
+                    "current item.",
+                )
             return False
         # Exclusive USB for the whole job so auto-connect cannot probe mid-sync.
         if not self._device_io.try_acquire("transfer"):
-            messagebox.showinfo(
-                "Busy",
-                "The device is busy with another USB operation "
-                f"({self._device_io.holder or 'unknown'}).\n\n"
-                "Wait for it to finish, then try again.",
-            )
+            if quiet:
+                logger.info(
+                    "Transfer deferred: USB busy holder=%s",
+                    self._device_io.holder or "unknown",
+                )
+            else:
+                messagebox.showinfo(
+                    "Busy",
+                    "The device is busy with another USB operation "
+                    f"({self._device_io.holder or 'unknown'}).\n\n"
+                    "Wait for it to finish, then try again.",
+                )
             return False
         self._transfer_busy = True
         self._job_cancel.clear()
@@ -7018,17 +7237,22 @@ class AppController:
             self._schedule_device_music_tree_refresh(enrich_missing_tags=False)
         except Exception:
             logger.debug("device_index record_send failed", exc_info=True)
-        # Optional: drop host cache after successful podcast audio sync.
-        if is_podcast and not self._config.keep_downloaded_podcasts:
+        # Clear pending-device flag per send so streaming batches stay accurate.
+        if is_podcast:
             try:
-                from mtpmanager.infra.podcast_index import get_episode_by_guid
+                from mtpmanager.infra.podcast_index import (
+                    get_episode_by_guid,
+                    set_episode_pending_device_sync,
+                )
 
                 ep = get_episode_by_guid(guid)
                 if ep is not None:
-                    discard_episode_local_files(ep)
+                    set_episode_pending_device_sync(ep.id, False)
+                    if not self._config.keep_downloaded_podcasts:
+                        discard_episode_local_files(ep)
             except Exception:
                 logger.debug(
-                    "discard podcast download after audio send failed",
+                    "post-send podcast episode update failed",
                     exc_info=True,
                 )
 
@@ -7171,14 +7395,16 @@ class AppController:
         kind: str = "batch",
         label: str = "",
         resume_job: SyncJobState | None = None,
-    ) -> None:
+        quiet: bool = False,
+    ) -> bool:
+        """Start or extend a batch transfer. Returns True if work was accepted."""
         if resume_job is None:
             videos = [t for t in tracks if is_video_track(t)]
             audio = self._audio_tracks_only(list(tracks))
             # Pure video batch (folder sync, multi-select on Video tab, etc.).
             if videos and not audio:
                 self._start_send_video([t.path for t in videos])
-                return
+                return True
             if videos:
                 logger.info(
                     "Excluding %d video file(s) from audio transfer batch "
@@ -7187,11 +7413,12 @@ class AppController:
                 )
             tracks = audio
         if not tracks:
-            messagebox.showinfo(
-                "Transfer",
-                "No audio tracks to transfer.",
-            )
-            return
+            if not quiet:
+                messagebox.showinfo(
+                    "Transfer",
+                    "No audio tracks to transfer.",
+                )
+            return False
 
         # Mid-job: append to the live queue instead of refusing.
         if (
@@ -7201,15 +7428,15 @@ class AppController:
             and self._active_sync_job is not None
         ):
             n = self._enqueue_tracks(tracks, kind=kind, label=label or kind)
-            if n == 0:
+            if n == 0 and not quiet:
                 messagebox.showinfo(
                     "Transfer queue",
                     "Those tracks are already in the transfer queue.",
                 )
-            return
+            return n > 0
 
-        if not self._begin_transfer_job():
-            return
+        if not self._begin_transfer_job(quiet=quiet):
+            return False
 
         transport = self._transport()
         transcoder = self.transcoder
@@ -7310,6 +7537,7 @@ class AppController:
             on_progress=self._on_transfer_ui_event,
             name="transfer-batch",
         )
+        return True
 
 
     def action_sync_this_track(self) -> None:

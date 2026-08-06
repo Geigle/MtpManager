@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import os
 import urllib.request
-from collections.abc import Collection, Sequence
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -487,12 +487,18 @@ def run_full_sync_host_pass(
     target_audio_format: str = "mp3",
     now_local: datetime | None = None,
     since_last_full_sync: str = "",
+    on_episode_ready: Callable[[PodcastEpisode, Track], None] | None = None,
 ) -> HostPassResult:
     """Refresh feeds, download up to N newest new episodes, mark pending sync.
 
     Does not touch MTP. Marks each processed show's ``auto_last_run_local_date``.
     *since_last_full_sync* limits candidates to episodes at/after that stamp
     (empty = no lower bound — first full sync).
+
+    *on_episode_ready* (optional) is invoked on the caller/worker thread after
+    each episode is on disk and marked pending — so the UI can enqueue device
+    transfer while later shows are still downloading. Arguments are the ready
+    :class:`PodcastEpisode` and a :class:`Track` for the transfer pipeline.
     """
     result = HostPassResult()
     stems = {g for g in (device_guids or ()) if is_track_guid(g)}
@@ -509,6 +515,27 @@ def run_full_sync_host_pass(
             p = get_podcast(int(pid), path=path)
             if p is not None:
                 shows.append(p)
+
+    def _notify_ready(ready: PodcastEpisode, show: Podcast) -> None:
+        if on_episode_ready is None:
+            return
+        try:
+            if not ready.local_path or not os.path.isfile(ready.local_path):
+                return
+            track = episode_as_track(ready, show)
+        except Exception:
+            logger.debug(
+                "full sync on_episode_ready track build failed id=%s",
+                ready.id,
+                exc_info=True,
+            )
+            return
+        try:
+            on_episode_ready(ready, track)
+        except Exception:
+            logger.exception(
+                "full sync on_episode_ready callback failed id=%s", ready.id
+            )
 
     for show in shows:
         result.shows_processed += 1
@@ -551,14 +578,15 @@ def run_full_sync_host_pass(
                     )
                     ready = get_episode(ready.id, path=path) or ready
                     result.downloaded.append(ready)
+                    _notify_ready(ready, show)
                 else:
                     if ready.guid and ready.guid not in stems:
                         set_episode_pending_device_sync(
                             ready.id, True, path=path
                         )
-                        result.downloaded.append(
-                            get_episode(ready.id, path=path) or ready
-                        )
+                        ready = get_episode(ready.id, path=path) or ready
+                        result.downloaded.append(ready)
+                        _notify_ready(ready, show)
             except Exception as e:
                 logger.exception(
                     "full sync download failed episode_id=%s", ep.id
