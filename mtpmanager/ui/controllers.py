@@ -134,6 +134,8 @@ from mtpmanager.infra.podcast_index import (
     delete_podcast,
     get_episode,
     get_podcast,
+    get_tracks_by_podcast_guids,
+    known_podcast_guids,
     list_episodes,
     list_podcasts,
 )
@@ -4166,6 +4168,12 @@ class AppController:
     def _host_tracks_by_guid_for_refs(
         self, refs: list[DeviceTrackRef]
     ) -> dict[str, Track]:
+        """GUID → host Track for device trees: library music, then podcast index.
+
+        Music library rows live in ``tracks``. Podcast episode ObjectFileNames use
+        the same 32-hex GUID scheme but are stored in ``podcast_episodes``
+        (internet-sourced; not expected on a library drive).
+        """
         guids: list[str] = []
         for r in refs:
             g = guid_from_remote_name(getattr(r, "name", None))
@@ -4173,11 +4181,23 @@ class AppController:
                 guids.append(g)
         if not guids:
             return {}
+        by: dict[str, Track] = {}
         try:
-            return get_tracks_by_guids(guids)
+            by.update(get_tracks_by_guids(guids))
         except Exception:
-            logger.debug("get_tracks_by_guids for device tree failed", exc_info=True)
-            return {}
+            logger.debug(
+                "get_tracks_by_guids for device tree failed", exc_info=True
+            )
+        missing = [g for g in guids if g not in by]
+        if missing:
+            try:
+                by.update(get_tracks_by_podcast_guids(missing))
+            except Exception:
+                logger.debug(
+                    "get_tracks_by_podcast_guids for device tree failed",
+                    exc_info=True,
+                )
+        return by
 
     def _schedule_device_music_tree_refresh(
         self, *, enrich_missing_tags: bool = False, delay_ms: int = 250
@@ -4235,16 +4255,58 @@ class AppController:
 
         podcast_parents = self._podcast_parent_ids()
 
-        # --- Audio (Music + Audiobooks) ---
+        # --- Audio listing (Music folder + elsewhere) ---
         try:
             audio_refs = list_cached_music_refs(serial)
         except Exception:
             logger.warning("list_cached_music_refs failed", exc_info=True)
             audio_refs = []
-        audio_by_guid = self._host_tracks_by_guid_for_refs(audio_refs)
-        audio_refs = enrich_refs_from_host(audio_refs, audio_by_guid)
+
+        # --- Podcasts by ZENcast parent (video-as-podcast, show folders) ---
+        try:
+            zencast_podcast_refs = list_cached_podcast_refs(
+                serial, podcast_parents=podcast_parents
+            )
+        except Exception:
+            logger.warning("list_cached_podcast_refs failed", exc_info=True)
+            zencast_podcast_refs = []
+
+        # Audio podcasts often land under Music (parent 100) on ZEN Vision:M.
+        # Reclassify any Music-folder object whose ObjectFileName GUID is a known
+        # podcast episode so Device → Podcasts gets the tags from
+        # podcast_episodes (not the music library ``tracks`` table).
+        candidate_guids: list[str] = []
+        for r in list(audio_refs) + list(zencast_podcast_refs):
+            g = guid_from_remote_name(getattr(r, "name", None))
+            if g:
+                candidate_guids.append(g)
+        try:
+            pod_guid_set = known_podcast_guids(candidate_guids)
+        except Exception:
+            logger.debug("known_podcast_guids failed", exc_info=True)
+            pod_guid_set = set()
+
+        music_audio: list[DeviceTrackRef] = []
+        podcast_from_audio: list[DeviceTrackRef] = []
+        for ref in audio_refs:
+            g = guid_from_remote_name(ref.name)
+            if g and g in pod_guid_set:
+                podcast_from_audio.append(ref)
+            else:
+                music_audio.append(ref)
+
+        # Merge ZENcast + GUID-classified podcast objects (dedupe by item_id).
+        podcast_by_id: dict[int, DeviceTrackRef] = {}
+        for ref in list(zencast_podcast_refs) + list(podcast_from_audio):
+            oid = int(ref.item_id or 0)
+            if oid > 0:
+                podcast_by_id[oid] = ref
+        podcast_refs = list(podcast_by_id.values())
+
+        audio_by_guid = self._host_tracks_by_guid_for_refs(music_audio)
+        music_audio = enrich_refs_from_host(music_audio, audio_by_guid)
         music_refs, audiobook_refs = self._split_device_music_and_audiobook_refs(
-            audio_refs, audio_by_guid
+            music_audio, audio_by_guid
         )
         self._device_music_refs = list(music_refs)
         self._device_audiobook_refs = list(audiobook_refs)
@@ -4259,21 +4321,20 @@ class AppController:
         except Exception:
             logger.warning("list_cached_video_refs failed", exc_info=True)
             video_refs = []
-        # Videos use host basename ObjectFileNames (not library GUIDs); still
-        # try a GUID join in case a GUID-named object lands under Video/TV.
+        # Drop video objects that are known podcast episode GUIDs (still video
+        # under ZENcast already handled by list_cached_podcast_refs).
+        if pod_guid_set:
+            video_refs = [
+                r
+                for r in video_refs
+                if (guid_from_remote_name(r.name) or "") not in pod_guid_set
+            ]
         video_by_guid = self._host_tracks_by_guid_for_refs(video_refs)
         video_refs = enrich_refs_from_host(video_refs, video_by_guid)
         self._device_video_refs = list(video_refs)
         self._rebuild_device_video_tree(video_refs, video_by_guid)
 
-        # --- Podcasts (ZENcast + show folders; audio and video) ---
-        try:
-            podcast_refs = list_cached_podcast_refs(
-                serial, podcast_parents=podcast_parents
-            )
-        except Exception:
-            logger.warning("list_cached_podcast_refs failed", exc_info=True)
-            podcast_refs = []
+        # --- Podcasts: ZENcast + Music-folder episodes keyed by podcast GUID ---
         podcast_by_guid = self._host_tracks_by_guid_for_refs(podcast_refs)
         podcast_refs = enrich_refs_from_host(podcast_refs, podcast_by_guid)
         self._device_podcast_refs = list(podcast_refs)

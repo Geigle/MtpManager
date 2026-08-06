@@ -16,6 +16,9 @@ from pathlib import Path
 from typing import Iterable
 from urllib.parse import urlparse, urlunparse
 
+from collections.abc import Collection
+
+from mtpmanager.domain.models import Track, TrackMetadata
 from mtpmanager.domain.track_id import is_track_guid, new_track_guid
 from mtpmanager.infra.library_index import _connect, _init_schema, index_path
 
@@ -555,6 +558,136 @@ def get_episode_by_guid(
     except sqlite3.Error as e:
         logger.warning("get_episode_by_guid failed: %s", e)
         return None
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def episode_display_track(
+    episode: PodcastEpisode,
+    podcast: Podcast | None = None,
+) -> Track:
+    """Host-shaped ``Track`` for device-tree join / display (no file required).
+
+    Podcasts live on the network; ``path`` is the cached enclosure when present,
+    otherwise a stable ``podcast:<guid>`` placeholder so tree iids stay unique.
+    """
+    show_title = ""
+    show_author = ""
+    if podcast is not None:
+        show_title = (podcast.title or "").strip()
+        show_author = (podcast.author or "").strip()
+    album = show_title or "Podcast"
+    artist = show_author or show_title or "Podcast"
+    title = (episode.title or "").strip() or "Episode"
+    local = (episode.local_path or "").strip()
+    if local and os.path.isfile(local):
+        path = local
+    else:
+        path = f"podcast:{episode.guid}"
+    meta = TrackMetadata(
+        artist=artist,
+        albumartist=album,
+        album=album,
+        title=title,
+        genre="Podcast",
+        date=(episode.pub_date or "")[:10],
+        length_sec=float(episode.duration_sec or 0),
+        tracknumber=str(episode.episode_index or "") or "",
+    )
+    return Track(path=path, meta=meta, guid=episode.guid)
+
+
+def get_tracks_by_podcast_guids(
+    guids: Collection[str],
+    *,
+    path: Path | None = None,
+) -> dict[str, Track]:
+    """Return ``{guid: Track}`` for known podcast episode GUIDs (missing omitted).
+
+    Used by Device media trees so GUID ObjectFileNames resolve to show/episode
+    tags without a music-library ``tracks`` row (podcasts are internet-sourced).
+    """
+    if not guids:
+        return {}
+    clean = sorted({g.strip().lower() for g in guids if is_track_guid(g)})
+    if not clean:
+        return {}
+    conn: sqlite3.Connection | None = None
+    try:
+        conn, _ = _open(path)
+        placeholders = ",".join("?" * len(clean))
+        rows = conn.execute(
+            f"""
+            SELECT e.*,
+                   p.title AS show_title,
+                   p.author AS show_author,
+                   p.feed_url AS show_feed_url,
+                   p.description AS show_description,
+                   p.image_url AS show_image_url,
+                   p.site_url AS show_site_url
+            FROM podcast_episodes e
+            LEFT JOIN podcasts p ON p.id = e.podcast_id
+            WHERE e.guid IN ({placeholders})
+            """,
+            clean,
+        ).fetchall()
+        out: dict[str, Track] = {}
+        for row in rows:
+            ep = _episode_from_row(row)
+            keys = set(row.keys())
+            show = Podcast(
+                id=int(ep.podcast_id),
+                feed_url=str(row["show_feed_url"] or "")
+                if "show_feed_url" in keys
+                else "",
+                title=str(row["show_title"] or "") if "show_title" in keys else "",
+                author=str(row["show_author"] or "")
+                if "show_author" in keys
+                else "",
+                description=str(row["show_description"] or "")
+                if "show_description" in keys
+                else "",
+                image_url=str(row["show_image_url"] or "")
+                if "show_image_url" in keys
+                else "",
+                site_url=str(row["show_site_url"] or "")
+                if "show_site_url" in keys
+                else "",
+            )
+            out[ep.guid] = episode_display_track(ep, show)
+        return out
+    except sqlite3.Error as e:
+        logger.warning("get_tracks_by_podcast_guids failed: %s", e)
+        return {}
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def known_podcast_guids(
+    guids: Collection[str],
+    *,
+    path: Path | None = None,
+) -> set[str]:
+    """Subset of *guids* that exist in ``podcast_episodes``."""
+    if not guids:
+        return set()
+    clean = sorted({g.strip().lower() for g in guids if is_track_guid(g)})
+    if not clean:
+        return set()
+    conn: sqlite3.Connection | None = None
+    try:
+        conn, _ = _open(path)
+        placeholders = ",".join("?" * len(clean))
+        rows = conn.execute(
+            f"SELECT guid FROM podcast_episodes WHERE guid IN ({placeholders})",
+            clean,
+        ).fetchall()
+        return {str(r["guid"] or "").lower() for r in rows if r["guid"]}
+    except sqlite3.Error as e:
+        logger.warning("known_podcast_guids failed: %s", e)
+        return set()
     finally:
         if conn is not None:
             conn.close()

@@ -12,7 +12,9 @@ from mtpmanager.infra.podcast_index import (
     delete_podcast,
     get_episode,
     get_podcast,
+    get_tracks_by_podcast_guids,
     known_feed_guids,
+    known_podcast_guids,
     list_episodes,
     list_podcasts,
     normalize_feed_url,
@@ -180,6 +182,48 @@ class PodcastIndexTests(unittest.TestCase):
             )
             self.assertEqual(len(picks3), 1)
             self.assertEqual(picks3[0].feed_guid, "e2")
+
+    def test_get_tracks_by_podcast_guids(self) -> None:
+        """Device ObjectFileName GUID → podcast_episodes metadata (not tracks)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "library_index.db"
+            p = create_or_update_podcast(
+                feed_url="https://example.com/show",
+                title="Cool Show",
+                author="Host Name",
+                path=db,
+            )
+            upsert_episodes(
+                p.id,
+                [
+                    {
+                        "feed_guid": "ep-a",
+                        "title": "Episode Alpha",
+                        "pub_date": "2026-08-01T12:00:00Z",
+                        "enclosure_url": "https://x/a.mp3",
+                        "duration_sec": 120,
+                    }
+                ],
+                path=db,
+            )
+            eps = list_episodes(p.id, path=db)
+            self.assertEqual(len(eps), 1)
+            guid = eps[0].guid
+            self.assertTrue(guid)
+
+            by = get_tracks_by_podcast_guids([guid, "deadbeef" * 4], path=db)
+            self.assertIn(guid, by)
+            self.assertEqual(len(by), 1)
+            t = by[guid]
+            self.assertEqual(t.guid, guid)
+            self.assertEqual(t.meta.title, "Episode Alpha")
+            self.assertEqual(t.meta.album, "Cool Show")
+            self.assertEqual(t.meta.artist, "Host Name")
+            self.assertEqual(t.meta.genre, "Podcast")
+            self.assertTrue(t.path.startswith("podcast:"))
+
+            known = known_podcast_guids([guid, "0" * 32], path=db)
+            self.assertEqual(known, {guid})
 
 
 if __name__ == "__main__":
