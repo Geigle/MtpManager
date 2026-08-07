@@ -90,6 +90,19 @@ class PlaylistDeviceHelpersTests(unittest.TestCase):
         assert hit is not None
         self.assertEqual(hit.playlist_id, 1)
 
+    def test_find_by_name_strips_zpl(self) -> None:
+        pls = [
+            DevicePlaylist(
+                playlist_id=7,
+                name="Podcasts Aug 7, 2026.zpl",
+                track_ids=(1, 2),
+            ),
+        ]
+        hit = find_device_playlist_by_name(pls, "Podcasts Aug 7, 2026")
+        self.assertIsNotNone(hit)
+        assert hit is not None
+        self.assertEqual(hit.playlist_id, 7)
+
     def test_move_ids_by_indices(self) -> None:
         ids = [10, 20, 30, 40]
         self.assertEqual(move_ids_by_indices(ids, [1], delta=-1), [20, 10, 30, 40])
@@ -227,6 +240,52 @@ class PlaylistDeviceHelpersTests(unittest.TestCase):
             self.assertEqual(result.playlist_id, 9)
             device.update_playlist.assert_called_once()
             device.create_playlist.assert_not_called()
+            # Replace semantics (default): new membership is only the pushed ids.
+            args = device.update_playlist.call_args[0]
+            self.assertEqual(list(args[2]), [42])
+
+    def test_push_merge_existing_appends_and_matches_zpl(self) -> None:
+        """Day-podcast style: append into existing *.zpl of the same display name."""
+        g_new = "4" * 32
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "library_index.db"
+            serial = "S3"
+            record_send(
+                serial,
+                remote_name=f"{g_new}.mp3",
+                guid=g_new,
+                item_id=99,
+                path=db,
+            )
+            device = mock.Mock()
+            device.update_playlist.return_value = 1651867
+            existing = [
+                DevicePlaylist(
+                    playlist_id=1651867,
+                    name="Podcasts Aug 7, 2026.zpl",
+                    track_ids=(10, 20),
+                )
+            ]
+            with mock.patch(
+                "mtpmanager.app.playlist_device.item_ids_for_guids",
+                side_effect=lambda s, gs: item_ids_for_guids(s, gs, path=db),
+            ):
+                result = push_playlist_to_device(
+                    device=device,
+                    serial=serial,
+                    name="Podcasts Aug 7, 2026",
+                    guids_in_order=[g_new],
+                    list_playlists=lambda: existing,
+                    merge_existing=True,
+                )
+            self.assertFalse(result.created)
+            self.assertEqual(result.playlist_id, 1651867)
+            self.assertEqual(result.track_ids, (10, 20, 99))
+            device.create_playlist.assert_not_called()
+            device.update_playlist.assert_called_once()
+            args, kwargs = device.update_playlist.call_args
+            self.assertEqual(args[0], 1651867)
+            self.assertEqual(list(args[2]), [10, 20, 99])
 
     def test_push_raises_when_no_ids(self) -> None:
         device = mock.Mock()

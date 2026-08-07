@@ -2169,12 +2169,16 @@ class AppController:
                 if g not in set(missing)
             ]
             parent = playlists_parent_id(self._folder_layout)
+            # merge_existing: same-day re-sync must append into "Podcasts
+            # <date>" rather than creating a second playlist (ZEN list is
+            # incomplete; push discovers via device_index *.zpl + Get_Playlist).
             return push_playlist_to_device(
                 device=self.device,
                 serial=serial,
                 name=name,
                 guids_in_order=resolved_guids,
                 parent_id=parent,
+                merge_existing=True,
             )
 
         def on_done(result) -> None:

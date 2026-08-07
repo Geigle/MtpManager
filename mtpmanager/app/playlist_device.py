@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from mtpmanager.domain.device_folders import FolderRole
 from mtpmanager.domain.models import DevicePlaylist, FileEntry, Track
 from mtpmanager.domain.track_id import is_track_guid
-from mtpmanager.infra.device_index import item_ids_for_guids
+from mtpmanager.infra.device_index import item_ids_for_guids, list_cached_files
 from mtpmanager.infra.remote_naming import (
     DEFAULT_PLAYLIST_FOLDER_ID,
     DEFAULT_STORAGE_ID,
@@ -71,14 +71,83 @@ def find_device_playlist_by_name(
     playlists: Sequence[DevicePlaylist],
     name: str,
 ) -> DevicePlaylist | None:
-    """Case-insensitive name match; first hit wins."""
-    key = (name or "").strip().casefold()
-    if not key:
-        return None
+    """Case-insensitive name match; first hit wins.
+
+    Compares via :func:`playlist_display_name` so Creative ``Name.zpl`` matches
+    a host-side name of ``Name`` (day podcast playlists, host sync titles).
+    """
+    key = playlist_display_name(name or "", 0).casefold()
+    if not key or key == "playlist":
+        # Empty / placeholder — require an exact non-empty raw match fallback.
+        raw = (name or "").strip().casefold()
+        if not raw:
+            return None
+        key = raw
     for pl in playlists:
-        if (pl.name or "").strip().casefold() == key:
+        pl_key = playlist_display_name(
+            pl.name or "", int(pl.playlist_id or 0)
+        ).casefold()
+        if pl_key == key:
+            return pl
+        # Also accept raw wire name equality (ids in display name, etc.).
+        if (pl.name or "").strip().casefold() == (name or "").strip().casefold():
             return pl
     return None
+
+
+def load_device_playlists_for_lookup(
+    device,
+    *,
+    serial: str = "",
+    parent_id: int | None = None,
+) -> list[DevicePlaylist]:
+    """Best-effort full playlist list for name lookup (ZEN-safe via index).
+
+    Prefers ``list_playlists_complete`` with ``*.zpl`` candidates from the
+    device_index cache so Creative playlists are not missed by the thin
+    ``Get_Playlist_List`` result.
+    """
+    parent = int(parent_id) if parent_id and int(parent_id) > 0 else (
+        DEFAULT_PLAYLIST_FOLDER_ID
+    )
+    candidates: list[int] = []
+    names: dict[int, str] = {}
+    key = (serial or "").strip()
+    if key:
+        try:
+            files = list_cached_files(key)
+            for e in playlist_candidates_from_files(
+                files, playlist_parent_ids={parent}
+            ):
+                oid = int(e.item_id or 0)
+                if oid > 0:
+                    candidates.append(oid)
+                    names[oid] = str(e.name or "")
+        except Exception:
+            logger.debug(
+                "load_device_playlists_for_lookup: index candidates failed",
+                exc_info=True,
+            )
+
+    complete = getattr(device, "list_playlists_complete", None)
+    if callable(complete):
+        try:
+            return list(
+                complete(candidate_ids=candidates, candidate_names=names) or []
+            )
+        except Exception:
+            logger.warning(
+                "list_playlists_complete failed; falling back",
+                exc_info=True,
+            )
+
+    lister = getattr(device, "list_playlists", None)
+    if callable(lister):
+        try:
+            return list(lister() or [])
+        except Exception:
+            logger.warning("list_playlists failed", exc_info=True)
+    return []
 
 
 def push_playlist_to_device(
@@ -90,22 +159,35 @@ def push_playlist_to_device(
     parent_id: int | None = None,
     storage_id: int = DEFAULT_STORAGE_ID,
     list_playlists: Callable[[], list[DevicePlaylist]] | None = None,
+    merge_existing: bool = False,
 ) -> DevicePlaylistPushResult:
     """Create or update an on-device playlist for *name* with *guids_in_order*.
 
     *device* must expose ``create_playlist`` / ``update_playlist`` and
-    optionally ``list_playlists`` (used when *list_playlists* is None).
+    optionally ``list_playlists`` / ``list_playlists_complete``.
+
+    When *list_playlists* is None, playlists are discovered via
+    :func:`load_device_playlists_for_lookup` (device_index ``*.zpl`` + complete
+    list) so ZEN same-name updates are not missed.
+
+    *merge_existing*: if a playlist with *name* already exists, append newly
+    resolved object ids to its current membership (skip duplicates) instead of
+    replacing the whole track list. Used for day podcast playlists that
+    accumulate episodes across multiple syncs.
 
     Raises ``ValueError`` when no real object ids can be resolved (empty
-    membership). Transport failures propagate from the device adapter.
+    membership, or merge with nothing new and no prior tracks). Transport
+    failures propagate from the device adapter.
     """
-    clean_name = (name or "").strip()
+    clean_name = playlist_display_name((name or "").strip(), 0)
+    if not clean_name or clean_name == "Playlist":
+        clean_name = (name or "").strip()
     if not clean_name:
         raise ValueError("Playlist name is required")
 
     guids = [g for g in guids_in_order if is_track_guid(g)]
     track_ids, unresolved = resolve_track_object_ids(serial, guids)
-    if not track_ids:
+    if not track_ids and not merge_existing:
         raise ValueError(
             "No on-device object ids for playlist tracks "
             "(refresh Device Index after transfer, or re-sync tracks)."
@@ -116,43 +198,92 @@ def push_playlist_to_device(
     )
     storage = int(storage_id or DEFAULT_STORAGE_ID)
 
-    lister = list_playlists
-    if lister is None:
-        lister = getattr(device, "list_playlists", None)
     existing: DevicePlaylist | None = None
-    if callable(lister):
-        try:
-            existing = find_device_playlist_by_name(lister() or [], clean_name)
-        except Exception:
-            logger.warning(
-                "list_playlists failed; will try create for %r",
-                clean_name,
-                exc_info=True,
+    try:
+        if callable(list_playlists):
+            listed = list(list_playlists() or [])
+        else:
+            listed = load_device_playlists_for_lookup(
+                device, serial=serial, parent_id=parent
             )
-            existing = None
+        existing = find_device_playlist_by_name(listed, clean_name)
+    except Exception:
+        logger.warning(
+            "list_playlists for push failed; will try create for %r",
+            clean_name,
+            exc_info=True,
+        )
+        existing = None
 
-    if existing is not None and existing.playlist_id > 0:
-        new_id = device.update_playlist(
+    final_ids = list(track_ids)
+    if existing is not None and existing.playlist_id > 0 and merge_existing:
+        prior = [int(x) for x in (existing.track_ids or ()) if int(x) > 0]
+        final_ids, added, skipped = append_ids_to_order(
+            prior, track_ids, skip_existing=True
+        )
+        logger.info(
+            "Merge into device playlist id=%s name=%r prior=%d new=%d "
+            "added=%d skipped=%d → total=%d",
             existing.playlist_id,
             clean_name,
-            track_ids,
+            len(prior),
+            len(track_ids),
+            added,
+            skipped,
+            len(final_ids),
+        )
+        if not final_ids:
+            raise ValueError(
+                "No on-device object ids for playlist tracks "
+                "(existing membership empty and new GUIDs unresolved)."
+            )
+        if added == 0:
+            # Nothing to write — still a successful update outcome.
+            return DevicePlaylistPushResult(
+                playlist_id=int(existing.playlist_id),
+                name=clean_name,
+                created=False,
+                track_ids=tuple(final_ids),
+                resolved=len(track_ids),
+                missing_guid=len(unresolved),
+                unresolved_guids=tuple(unresolved),
+            )
+
+    if not final_ids:
+        raise ValueError(
+            "No on-device object ids for playlist tracks "
+            "(refresh Device Index after transfer, or re-sync tracks)."
+        )
+
+    if existing is not None and existing.playlist_id > 0:
+        # Keep wire name when present (may still carry .zpl from Creative).
+        wire_name = (existing.name or "").strip() or clean_name
+        # Prefer clean display name for new membership writes.
+        wire_name = playlist_display_name(wire_name, existing.playlist_id)
+        if wire_name == f"Playlist {existing.playlist_id}":
+            wire_name = clean_name
+        new_id = device.update_playlist(
+            existing.playlist_id,
+            wire_name,
+            final_ids,
             parent_id=parent,
             storage_id=storage,
         )
         created = False
         playlist_id = int(new_id or existing.playlist_id)
         logger.info(
-            "Updated device playlist id=%s name=%r tracks=%d (unresolved=%d)",
+            "Updated device playlist id=%s name=%r tracks=%d (unresolved=%d merge=%s)",
             playlist_id,
-            clean_name,
-            len(track_ids),
+            wire_name,
+            len(final_ids),
             len(unresolved),
+            merge_existing,
         )
     else:
         playlist_id = int(
             device.create_playlist(
                 clean_name,
-                track_ids,
+                final_ids,
                 parent_id=parent,
                 storage_id=storage,
             )
@@ -162,7 +293,7 @@ def push_playlist_to_device(
             "Created device playlist id=%s name=%r tracks=%d (unresolved=%d)",
             playlist_id,
             clean_name,
-            len(track_ids),
+            len(final_ids),
             len(unresolved),
         )
 
@@ -170,7 +301,7 @@ def push_playlist_to_device(
         playlist_id=playlist_id,
         name=clean_name,
         created=created,
-        track_ids=tuple(track_ids),
+        track_ids=tuple(final_ids),
         resolved=len(track_ids),
         missing_guid=len(unresolved),
         unresolved_guids=tuple(unresolved),
