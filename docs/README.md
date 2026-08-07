@@ -37,6 +37,7 @@ This folder is the **design and incident** map. For run instructions, logs, and 
 | Doc | Purpose |
 |-----|---------|
 | [architecture.md](./architecture.md) | System design: layers, package map, composition root, dual-mode wiring, logging, known gaps |
+| [agent-interface.md](./agent-interface.md) | Headless CLI + MCP for coding agents (JSON ops, device lock, dry-run sync) |
 | [decisions.md](./decisions.md) | ADR-lite: dual mode, no silent fallback, shared naming, fatal abort, pymtp patches, license, … |
 | [device-contract.md](./device-contract.md) | MTP/ZEN remote path, storage, basename, tags vs filename — **do not rebreak** |
 | [basename-limit-evidence.md](./basename-limit-evidence.md) | Why `MAX_REMOTE_BASENAME=56`: external vs empirical evidence; long on-device names |

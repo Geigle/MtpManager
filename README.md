@@ -27,6 +27,15 @@ It is **not** a multi-device auto-discovery suite, a general-purpose media organ
 
 Or: `.venv/bin/python -m mtpmanager` / `.venv/bin/python mm.py`
 
+**Agent / headless CLI** (JSON stdout, no Tk):
+
+```bash
+.venv/bin/python -m mtpmanager.cli agent doctor
+.venv/bin/python -m mtpmanager.cli library search 'artist:nightwish'
+```
+
+MCP stdio server: `.venv/bin/python -m mtpmanager.mcp_server`. Details: [docs/agent-interface.md](docs/agent-interface.md).
+
 Install deps into the venv once:
 
 ```bash
@@ -43,6 +52,8 @@ mtpmanager/
   ports/      # Transport / Device protocols
   app/        # scan, transfer, device/podcast/playlist ops
   infra/      # pymtp wrapper, mtp-sendtr, SQLite indexes, mutagen, ffmpeg, RSS
+  headless/   # agent facade (shared by CLI + MCP)
+  cli/        # argparse JSON CLI
   ui/         # Tk window + controllers only
 ```
 
@@ -54,6 +65,7 @@ Dependency direction: `ui → app → domain/ports ← infra`.
 |-----|----------|
 | **[docs/README.md](docs/README.md)** | Documentation map and reading order |
 | [docs/architecture.md](docs/architecture.md) | Layers, packages, dual-mode composition |
+| [docs/agent-interface.md](docs/agent-interface.md) | Headless CLI + MCP for coding agents |
 | [docs/device-contract.md](docs/device-contract.md) | MTP/ZEN remote path, storage, filename rules |
 | [docs/decisions.md](docs/decisions.md) | Why dual mode, no silent fallback, fatal batch abort, … |
 | [docs/transfer-and-modes.md](docs/transfer-and-modes.md) | Transfer pipeline; Stable vs Experimental |

@@ -49,6 +49,8 @@ MtpManager loads music onto picky MTP players (especially Creative ZEN Vision:M)
 | `./MtpManager.sh` | Ensures `.venv` (Homebrew Python 3.13 on macOS), runs `mm.py` |
 | `mm.py` | Thin launcher → `mtpmanager.__main__.main` |
 | `python -m mtpmanager` | Same: configure logging, build UI + device, mainloop |
+| `python -m mtpmanager.cli` | Headless JSON CLI for agents (no Tk); [agent-interface.md](./agent-interface.md) |
+| `python -m mtpmanager.mcp_server` | Minimal stdio MCP server over the same headless facade |
 
 `mtpmanager/__main__.py` wires:
 

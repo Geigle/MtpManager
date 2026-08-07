@@ -13,6 +13,7 @@ from mtpmanager.app import retail_ops
 from mtpmanager.app.artist_folders import ensure_album_folder, ensure_artist_folder
 from mtpmanager.app.cancellation import JobCancelled
 from mtpmanager.app.device_io_gate import DEFAULT_USB_QUIET_S, DeviceIoGate
+from mtpmanager.infra.device_session_lock import DeviceSessionLock
 from mtpmanager.app.playlist_device import (
     ordered_guids_from_tracks,
     playlists_parent_id,
@@ -283,6 +284,15 @@ class AppController:
         self._logged_no_device = False
         # Exclusive MTP/USB ownership (poll, transfer, seed, enrich, meta).
         self._device_io = DeviceIoGate(quiet_after_s=_DEVICE_USB_COOLDOWN_S)
+        # Cross-process lock so headless CLI/MCP agents see the GUI as owner.
+        self._device_session_lock = DeviceSessionLock()
+        self._device_session_lock_held = self._device_session_lock.try_acquire("gui")
+        if not self._device_session_lock_held:
+            logger.warning(
+                "Device session lock busy at GUI start (another process holds USB); "
+                "CLI agents may race until they exit. status=%s",
+                self._device_session_lock.status().as_dict(),
+            )
         self._device_probe_fails = 0
         # When False, experimental poll is stopped until Device → Connect.
         self._device_auto_reconnect = True
@@ -3185,6 +3195,12 @@ class AppController:
                     pass
         finally:
             self._device_io.release(reason="app-close")
+            try:
+                if getattr(self, "_device_session_lock_held", False):
+                    self._device_session_lock.release("gui")
+                    self._device_session_lock_held = False
+            except Exception:
+                logger.debug("device session lock release on close failed", exc_info=True)
         try:
             self._clear_device_session()
         except Exception:
