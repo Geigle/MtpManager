@@ -45,7 +45,13 @@ from mtpmanager.infra.library_index import (
     load_library_index,
 )
 from mtpmanager.infra.logging_setup import default_log_dir
-from mtpmanager.infra.playlists import get_playlist_by_name, list_playlists
+from mtpmanager.infra.playlists import (
+    append_tracks_to_playlist,
+    create_playlist,
+    get_playlist_by_name,
+    list_playlists,
+    replace_playlist_tracks,
+)
 from mtpmanager.infra.remote_naming import build_remote_path, split_remote_path
 from mtpmanager.ports.transport import TransportError
 
@@ -236,7 +242,8 @@ class HeadlessService:
         q = (query or "").strip()
         if not q:
             return fail("USAGE", "query is required", exit_code=ExitCode.USAGE)
-        lim = max(1, min(int(limit or 50), 500))
+        # Agents often need bulk results (e.g. whole-artist playlists).
+        lim = max(1, min(int(limit or 50), 5000))
         tracks = self._load_tracks()
         matched, scores = filter_library_tracks_scored(tracks, q)
         rows = []
@@ -320,6 +327,218 @@ class HeadlessService:
                 "track_count": len(entries),
                 "paths": [e.path for e in entries],
             }
+        )
+
+    def _playlist_summary(self, pl: Any) -> dict[str, Any]:
+        entries = parse_m3u(getattr(pl, "m3u_text", None) or "")
+        return {
+            "id": int(pl.id),
+            "name": str(pl.name or ""),
+            "updated_at": str(getattr(pl, "updated_at", "") or ""),
+            "track_count": len(entries),
+            "paths": [e.path for e in entries],
+        }
+
+    def _resolve_tracks_by_guid_path(
+        self,
+        *,
+        guids: Sequence[str] | None = None,
+        paths: Sequence[str] | None = None,
+    ) -> tuple[list[Track], AgentResult | None]:
+        """Resolve explicit GUID/path lists (hard-fail on unknown)."""
+        tracks = self._load_tracks()
+        by_guid = {t.guid: t for t in tracks if t.guid}
+        by_path = {os.path.normpath(t.path or ""): t for t in tracks}
+        selected: list[Track] = []
+        seen: set[str] = set()
+
+        def _add(t: Track) -> None:
+            key = t.guid or t.path
+            if key in seen:
+                return
+            seen.add(key)
+            selected.append(t)
+
+        for g in guids or []:
+            g = (g or "").strip()
+            if not g:
+                continue
+            t = by_guid.get(g)
+            if t is None and is_track_guid(g):
+                found = get_tracks_by_guids([g], path=self._index_path)
+                t = found.get(g)
+            if t is None:
+                # Case-insensitive GUID fallback (index keys are lowercase).
+                t = by_guid.get(g.lower())
+            if t is None:
+                return [], fail(
+                    "NOT_FOUND",
+                    f"Unknown GUID: {g}",
+                    exit_code=ExitCode.NOT_FOUND,
+                )
+            _add(t)
+
+        for p in paths or []:
+            p = os.path.normpath((p or "").strip())
+            if not p:
+                continue
+            t = by_path.get(p)
+            if t is None:
+                return [], fail(
+                    "NOT_FOUND",
+                    f"Unknown path: {p}",
+                    exit_code=ExitCode.NOT_FOUND,
+                )
+            _add(t)
+
+        return selected, None
+
+    def playlist_create(self, name: str) -> AgentResult:
+        """Create an empty host playlist (M3U in library index)."""
+        clean = (name or "").strip()
+        if not clean:
+            return fail(
+                "USAGE",
+                "playlist name is required",
+                exit_code=ExitCode.USAGE,
+            )
+        try:
+            pl = create_playlist(clean, path=self._index_path)
+        except ValueError as e:
+            msg = str(e)
+            if "already exists" in msg.lower():
+                return fail(
+                    "CONFLICT",
+                    msg,
+                    exit_code=ExitCode.ERROR,
+                    data={"name": clean},
+                )
+            return fail("USAGE", msg, exit_code=ExitCode.USAGE)
+        except Exception as e:
+            logger.exception("playlist_create failed")
+            return fail("ERROR", str(e), exit_code=ExitCode.ERROR)
+        return ok(self._playlist_summary(pl), message=f"Created playlist {pl.name!r}")
+
+    def playlist_add(
+        self,
+        name: str,
+        *,
+        guids: Sequence[str] | None = None,
+        paths: Sequence[str] | None = None,
+        skip_existing: bool = True,
+    ) -> AgentResult:
+        """Append library tracks to a host playlist by GUID and/or path."""
+        clean = (name or "").strip()
+        if not clean:
+            return fail(
+                "USAGE",
+                "playlist name is required",
+                exit_code=ExitCode.USAGE,
+            )
+        pl = get_playlist_by_name(clean, path=self._index_path)
+        if pl is None:
+            return fail(
+                "NOT_FOUND",
+                f"Playlist not found: {clean!r}",
+                exit_code=ExitCode.NOT_FOUND,
+            )
+        selected, err = self._resolve_tracks_by_guid_path(guids=guids, paths=paths)
+        if err is not None:
+            return err
+        if not selected:
+            return fail(
+                "USAGE",
+                "No tracks resolved; pass --guid and/or --path",
+                exit_code=ExitCode.USAGE,
+            )
+        before = {os.path.normpath(e.path) for e in parse_m3u(pl.m3u_text or "")}
+        try:
+            updated = append_tracks_to_playlist(
+                pl.id,
+                selected,
+                skip_existing=bool(skip_existing),
+                path=self._index_path,
+            )
+        except ValueError as e:
+            return fail("ERROR", str(e), exit_code=ExitCode.ERROR)
+        except Exception as e:
+            logger.exception("playlist_add failed")
+            return fail("ERROR", str(e), exit_code=ExitCode.ERROR)
+        after_entries = parse_m3u(updated.m3u_text or "")
+        after = {os.path.normpath(e.path) for e in after_entries}
+        added_n = max(0, len(after) - len(before)) if skip_existing else len(selected)
+        # Prefer path-set diff when skip_existing (true new membership).
+        if skip_existing:
+            new_paths = after - before
+            added_n = len(new_paths)
+            skipped_n = len(selected) - added_n
+        else:
+            added_n = len(selected)
+            skipped_n = 0
+        summary = self._playlist_summary(updated)
+        summary["added"] = added_n
+        summary["skipped_existing"] = max(0, skipped_n)
+        summary["requested"] = len(selected)
+        return ok(
+            summary,
+            message=(
+                f"Added {added_n} track(s) to {updated.name!r} "
+                f"({summary['track_count']} total)"
+            ),
+        )
+
+    def playlist_replace(
+        self,
+        name: str,
+        *,
+        guids: Sequence[str] | None = None,
+        paths: Sequence[str] | None = None,
+    ) -> AgentResult:
+        """Replace host playlist membership with the given tracks (order preserved).
+
+        Passing no guids/paths clears the playlist.
+        """
+        clean = (name or "").strip()
+        if not clean:
+            return fail(
+                "USAGE",
+                "playlist name is required",
+                exit_code=ExitCode.USAGE,
+            )
+        pl = get_playlist_by_name(clean, path=self._index_path)
+        if pl is None:
+            return fail(
+                "NOT_FOUND",
+                f"Playlist not found: {clean!r}",
+                exit_code=ExitCode.NOT_FOUND,
+            )
+        has_any = any((g or "").strip() for g in (guids or [])) or any(
+            (p or "").strip() for p in (paths or [])
+        )
+        if has_any:
+            selected, err = self._resolve_tracks_by_guid_path(
+                guids=guids, paths=paths
+            )
+            if err is not None:
+                return err
+        else:
+            selected = []
+        try:
+            updated = replace_playlist_tracks(
+                pl.id, selected, path=self._index_path
+            )
+        except ValueError as e:
+            return fail("ERROR", str(e), exit_code=ExitCode.ERROR)
+        except Exception as e:
+            logger.exception("playlist_replace failed")
+            return fail("ERROR", str(e), exit_code=ExitCode.ERROR)
+        summary = self._playlist_summary(updated)
+        summary["replaced_with"] = len(selected)
+        return ok(
+            summary,
+            message=(
+                f"Replaced {updated.name!r} with {len(selected)} track(s)"
+            ),
         )
 
     def config_get(self, key: str | None = None) -> AgentResult:

@@ -283,6 +283,139 @@ class HeadlessServiceTests(unittest.TestCase):
             holder._session_lock.release("gui")
 
 
+class PlaylistMutationTests(unittest.TestCase):
+    def test_create_add_replace_and_duplicate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp)
+            root = data / "Music"
+            root.mkdir()
+            f1 = root / "a.mp3"
+            f2 = root / "b.mp3"
+            f1.write_bytes(b"x")
+            f2.write_bytes(b"y")
+            g1 = new_track_guid()
+            g2 = new_track_guid()
+            t1 = _track(str(f1), guid=g1, title="A")
+            t2 = _track(str(f2), guid=g2, title="B")
+            save_library_index(
+                Library(tracks=[t1, t2], root_paths=[str(root)]),
+                path=data / "library_index.db",
+            )
+            svc = HeadlessService(data_dir=data)
+
+            created = svc.playlist_create("Hansi")
+            self.assertTrue(created.ok)
+            self.assertEqual(created.data["name"], "Hansi")
+            self.assertEqual(created.data["track_count"], 0)
+
+            conflict = svc.playlist_create("hansi")
+            self.assertFalse(conflict.ok)
+            self.assertEqual(conflict.code, "CONFLICT")
+
+            missing = svc.playlist_add("Hansi", guids=["deadbeefdeadbeefdeadbeefdeadbeef"])
+            self.assertFalse(missing.ok)
+            self.assertEqual(missing.exit_code, int(ExitCode.NOT_FOUND))
+
+            empty_add = svc.playlist_add("Hansi")
+            self.assertFalse(empty_add.ok)
+            self.assertEqual(empty_add.exit_code, int(ExitCode.USAGE))
+
+            add1 = svc.playlist_add("Hansi", guids=[g1])
+            self.assertTrue(add1.ok)
+            self.assertEqual(add1.data["added"], 1)
+            self.assertEqual(add1.data["track_count"], 1)
+            self.assertEqual(add1.data["paths"], [str(f1)])
+
+            add_again = svc.playlist_add("Hansi", guids=[g1, g2])
+            self.assertTrue(add_again.ok)
+            self.assertEqual(add_again.data["added"], 1)
+            self.assertEqual(add_again.data["skipped_existing"], 1)
+            self.assertEqual(add_again.data["track_count"], 2)
+
+            shown = svc.playlist_show("Hansi")
+            self.assertTrue(shown.ok)
+            self.assertEqual(shown.data["track_count"], 2)
+
+            replaced = svc.playlist_replace("Hansi", guids=[g2])
+            self.assertTrue(replaced.ok)
+            self.assertEqual(replaced.data["track_count"], 1)
+            self.assertEqual(replaced.data["paths"], [str(f2)])
+            self.assertEqual(replaced.data["replaced_with"], 1)
+
+            cleared = svc.playlist_replace("Hansi")
+            self.assertTrue(cleared.ok)
+            self.assertEqual(cleared.data["track_count"], 0)
+
+            not_found = svc.playlist_add("Nope", guids=[g1])
+            self.assertFalse(not_found.ok)
+            self.assertEqual(not_found.exit_code, int(ExitCode.NOT_FOUND))
+
+    def test_cli_playlist_create_and_add(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp)
+            root = data / "Music"
+            root.mkdir()
+            f = root / "x.flac"
+            f.write_bytes(b"x")
+            g = new_track_guid()
+            save_library_index(
+                Library(
+                    tracks=[_track(str(f), guid=g, title="Song")],
+                    root_paths=[str(root)],
+                ),
+                path=data / "library_index.db",
+            )
+            import io
+            from contextlib import redirect_stdout
+
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                code = main(
+                    ["--data-dir", str(data), "playlist", "create", "Road Mix"]
+                )
+            self.assertEqual(code, 0)
+            payload = json.loads(buf.getvalue())
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["data"]["name"], "Road Mix")
+
+            buf2 = io.StringIO()
+            with redirect_stdout(buf2):
+                code2 = main(
+                    [
+                        "--data-dir",
+                        str(data),
+                        "playlist",
+                        "add",
+                        "Road Mix",
+                        "--guid",
+                        g,
+                    ]
+                )
+            self.assertEqual(code2, 0)
+            payload2 = json.loads(buf2.getvalue())
+            self.assertTrue(payload2["ok"])
+            self.assertEqual(payload2["data"]["added"], 1)
+            self.assertEqual(payload2["data"]["track_count"], 1)
+
+            buf3 = io.StringIO()
+            with redirect_stdout(buf3):
+                code3 = main(
+                    [
+                        "--data-dir",
+                        str(data),
+                        "playlist",
+                        "replace",
+                        "Road Mix",
+                        "--guids",
+                        g,
+                    ]
+                )
+            self.assertEqual(code3, 0)
+            payload3 = json.loads(buf3.getvalue())
+            self.assertTrue(payload3["ok"])
+            self.assertEqual(payload3["data"]["track_count"], 1)
+
+
 class CliMainTests(unittest.TestCase):
     def test_cli_doctor_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -65,6 +65,23 @@ def _call_tool(svc: HeadlessService, name: str, arguments: dict[str, Any]) -> di
         result = svc.playlist_list()
     elif name == "playlist_show":
         result = svc.playlist_show(str(args.get("name") or ""))
+    elif name == "playlist_create":
+        result = svc.playlist_create(str(args.get("name") or ""))
+    elif name == "playlist_add":
+        skip_raw = args.get("skip_existing")
+        skip_existing = True if skip_raw is None else bool(skip_raw)
+        result = svc.playlist_add(
+            str(args.get("name") or ""),
+            guids=list(args.get("guids") or []),
+            paths=list(args.get("paths") or []),
+            skip_existing=skip_existing,
+        )
+    elif name == "playlist_replace":
+        result = svc.playlist_replace(
+            str(args.get("name") or ""),
+            guids=list(args.get("guids") or []),
+            paths=list(args.get("paths") or []),
+        )
     elif name == "config_get":
         result = svc.config_get(args.get("key"))
     elif name == "device_status":

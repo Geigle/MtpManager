@@ -86,6 +86,75 @@ def build_parser() -> argparse.ArgumentParser:
     pl_sub.add_parser("list", help="List host playlists")
     pl_show = pl_sub.add_parser("show", help="Show playlist paths")
     pl_show.add_argument("name")
+    pl_create = pl_sub.add_parser("create", help="Create empty host playlist")
+    pl_create.add_argument("name", help="Playlist name (unique, case-insensitive)")
+    pl_add = pl_sub.add_parser(
+        "add",
+        help="Append tracks to a host playlist by GUID and/or path",
+    )
+    pl_add.add_argument("name", help="Existing playlist name")
+    pl_add.add_argument(
+        "--guid",
+        action="append",
+        default=[],
+        dest="guids",
+        help="Track GUID (repeatable)",
+    )
+    pl_add.add_argument(
+        "--guids",
+        dest="guids_csv",
+        default=None,
+        help="Comma-separated GUIDs",
+    )
+    pl_add.add_argument(
+        "--path",
+        action="append",
+        default=[],
+        dest="paths",
+        help="Host file path (repeatable)",
+    )
+    pl_add.add_argument(
+        "--paths",
+        dest="paths_csv",
+        default=None,
+        help="Comma-separated host paths",
+    )
+    pl_add.add_argument(
+        "--allow-duplicates",
+        action="store_true",
+        help="Append even if the path is already in the playlist",
+    )
+    pl_replace = pl_sub.add_parser(
+        "replace",
+        help="Replace host playlist membership (order = arg order); no tracks clears",
+    )
+    pl_replace.add_argument("name", help="Existing playlist name")
+    pl_replace.add_argument(
+        "--guid",
+        action="append",
+        default=[],
+        dest="guids",
+        help="Track GUID (repeatable)",
+    )
+    pl_replace.add_argument(
+        "--guids",
+        dest="guids_csv",
+        default=None,
+        help="Comma-separated GUIDs",
+    )
+    pl_replace.add_argument(
+        "--path",
+        action="append",
+        default=[],
+        dest="paths",
+        help="Host file path (repeatable)",
+    )
+    pl_replace.add_argument(
+        "--paths",
+        dest="paths_csv",
+        default=None,
+        help="Comma-separated host paths",
+    )
     pl_push = pl_sub.add_parser("push", help="Push playlist to device")
     pl_push.add_argument("name")
     pl_push.add_argument(
@@ -211,6 +280,29 @@ def dispatch(svc: HeadlessService, args: argparse.Namespace) -> AgentResult:
             return svc.playlist_list()
         if action == "show":
             return svc.playlist_show(args.name)
+        if action == "create":
+            return svc.playlist_create(args.name)
+        if action == "add":
+            guids = list(args.guids or [])
+            guids.extend(_csv_list(getattr(args, "guids_csv", None)))
+            paths = list(args.paths or [])
+            paths.extend(_csv_list(getattr(args, "paths_csv", None)))
+            return svc.playlist_add(
+                args.name,
+                guids=guids,
+                paths=paths,
+                skip_existing=not bool(getattr(args, "allow_duplicates", False)),
+            )
+        if action == "replace":
+            guids = list(args.guids or [])
+            guids.extend(_csv_list(getattr(args, "guids_csv", None)))
+            paths = list(args.paths or [])
+            paths.extend(_csv_list(getattr(args, "paths_csv", None)))
+            return svc.playlist_replace(
+                args.name,
+                guids=guids,
+                paths=paths,
+            )
         if action == "push":
             return svc.playlist_push(args.name, confirm=bool(args.confirm))
 

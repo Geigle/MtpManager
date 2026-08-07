@@ -418,8 +418,34 @@ class PymtpDevice:
             ) from exc
         logger.info("delete_object ok id=%s", oid)
 
+    def _playlist_from_snapshot(self, node) -> DevicePlaylist | None:
+        """Map a wrapper playlist snapshot to :class:`DevicePlaylist`."""
+        try:
+            pid = int(getattr(node, "playlist_id", 0) or 0)
+            if pid <= 0:
+                return None
+            tracks = tuple(
+                int(x)
+                for x in (getattr(node, "tracks", ()) or ())
+                if int(x) > 0
+            )
+            return DevicePlaylist(
+                playlist_id=pid,
+                name=_decode(getattr(node, "name", "")),
+                parent_id=int(getattr(node, "parent_id", 0) or 0),
+                storage_id=int(getattr(node, "storage_id", 0) or 0),
+                track_ids=tracks,
+            )
+        except Exception:
+            logger.debug("skip bad playlist node", exc_info=True)
+            return None
+
     def list_playlists(self) -> list[DevicePlaylist]:
-        """Experimental: list on-device playlists (patched get_playlists)."""
+        """Experimental: list on-device playlists (patched get_playlists).
+
+        Note: on Creative ZEN this is often incomplete — prefer
+        :meth:`list_playlists_complete` with device_index candidates.
+        """
         logger.info("list_playlists")
         try:
             raw = self._mtp.get_playlists()
@@ -440,25 +466,109 @@ class PymtpDevice:
             ) from exc
         out: list[DevicePlaylist] = []
         for node in raw or []:
+            pl = self._playlist_from_snapshot(node)
+            if pl is not None:
+                out.append(pl)
+        logger.info("list_playlists count=%d", len(out))
+        return out
+
+    def get_playlist(self, playlist_id: int) -> DevicePlaylist:
+        """Experimental: one playlist by object id (patched get_playlist)."""
+        oid = int(playlist_id)
+        if oid <= 0:
+            raise ValueError(f"Invalid playlist id: {playlist_id}")
+        logger.info("get_playlist id=%s", oid)
+        try:
+            raw = self._mtp.get_playlist(oid)
+        except pymtp.NotConnected as exc:
+            raise TransportError(
+                "PyMTP get playlist failed: device not connected.",
+                fatal=True,
+            ) from exc
+        except pymtp.ObjectNotFound as exc:
+            raise TransportError(
+                f"PyMTP get playlist: object {oid} not found.",
+                fatal=False,
+            ) from exc
+        except Exception as exc:
             try:
-                tracks = tuple(
-                    int(x)
-                    for x in (getattr(node, "tracks", ()) or ())
-                    if int(x) > 0
+                self._mtp.debug_stack()
+            except Exception:
+                pass
+            raise TransportError(
+                f"PyMTP get playlist failed id={oid}: {exc}",
+                fatal=True,
+            ) from exc
+        pl = self._playlist_from_snapshot(raw)
+        if pl is None:
+            raise TransportError(
+                f"PyMTP get playlist returned empty snapshot for id={oid}",
+                fatal=False,
+            )
+        return pl
+
+    def list_playlists_complete(
+        self,
+        *,
+        candidate_ids: list[int] | tuple[int, ...] | None = None,
+        candidate_names: dict[int, str] | None = None,
+    ) -> list[DevicePlaylist]:
+        """List playlists, hydrating *candidate_ids* via Get_Playlist.
+
+        Use this for ZEN: pass object ids discovered from the device file
+        index (``*.zpl`` under My Playlists). ``Get_Playlist_List`` alone
+        frequently returns only a subset.
+        """
+        by_id: dict[int, DevicePlaylist] = {}
+        try:
+            for pl in self.list_playlists():
+                by_id[int(pl.playlist_id)] = pl
+        except TransportError:
+            raise
+        except Exception as exc:
+            logger.warning("list_playlists base failed: %s", exc, exc_info=True)
+
+        names = candidate_names or {}
+        for raw_id in candidate_ids or ():
+            oid = int(raw_id or 0)
+            if oid <= 0 or oid in by_id:
+                continue
+            try:
+                pl = self.get_playlist(oid)
+                by_id[oid] = pl
+            except TransportError as exc:
+                # Still surface the playlist shell so the UI lists it.
+                logger.info(
+                    "get_playlist id=%s failed (%s); using filename shell",
+                    oid,
+                    exc,
                 )
-                out.append(
-                    DevicePlaylist(
-                        playlist_id=int(getattr(node, "playlist_id", 0) or 0),
-                        name=_decode(getattr(node, "name", "")),
-                        parent_id=int(getattr(node, "parent_id", 0) or 0),
-                        storage_id=int(getattr(node, "storage_id", 0) or 0),
-                        track_ids=tracks,
-                    )
+                shell_name = (names.get(oid) or "").strip() or f"Playlist {oid}"
+                by_id[oid] = DevicePlaylist(
+                    playlist_id=oid,
+                    name=shell_name,
+                    track_ids=(),
                 )
             except Exception:
-                logger.debug("skip bad playlist node", exc_info=True)
-        out = [p for p in out if p.playlist_id > 0]
-        logger.info("list_playlists count=%d", len(out))
+                logger.warning(
+                    "get_playlist id=%s unexpected failure", oid, exc_info=True
+                )
+                shell_name = (names.get(oid) or "").strip() or f"Playlist {oid}"
+                by_id[oid] = DevicePlaylist(
+                    playlist_id=oid,
+                    name=shell_name,
+                    track_ids=(),
+                )
+
+        out = sorted(
+            by_id.values(),
+            key=lambda p: ((p.name or "").casefold(), int(p.playlist_id)),
+        )
+        logger.info(
+            "list_playlists_complete count=%d (candidates=%d)",
+            len(out),
+            len(list(candidate_ids or ())),
+        )
         return out
 
     def create_playlist(
