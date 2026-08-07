@@ -181,6 +181,53 @@ def build_parser() -> argparse.ArgumentParser:
     delete = dev_sub.add_parser("delete", help="Delete one object by id")
     delete.add_argument("object_id", type=int)
     delete.add_argument("--confirm", action="store_true")
+    dev_sub.add_parser(
+        "art-probe",
+        help=(
+            "Probe RepresentativeSample (album art) support for MP3/ALBUM/etc. "
+            "(Experimental; requires device connect)"
+        ),
+    )
+    art_exp = dev_sub.add_parser(
+        "art-experiment",
+        help=(
+            "Minimum album-art experiment: prepare JPEG, optional track send, "
+            "Send_Representative_Sample on track and/or new album object"
+        ),
+    )
+    art_exp.add_argument(
+        "--path",
+        required=True,
+        help="Host audio path (cover from tags/sidecar; sent if --object-id omitted)",
+    )
+    art_exp.add_argument(
+        "--object-id",
+        type=int,
+        default=None,
+        help="Existing device object id to attach art to (skip track send)",
+    )
+    art_exp.add_argument(
+        "--no-album",
+        action="store_true",
+        help="Do not create an album object / send album sample",
+    )
+    art_exp.add_argument(
+        "--max-edge",
+        type=int,
+        default=320,
+        help="Max JPEG edge pixels (default 320)",
+    )
+    art_exp.add_argument(
+        "--max-bytes",
+        type=int,
+        default=20 * 1024,
+        help="Max JPEG size in bytes (default 20480; Creative often ~20KB)",
+    )
+    art_exp.add_argument(
+        "--confirm",
+        action="store_true",
+        help="Required — writes track/album/sample to the device",
+    )
 
     # sync
     sync = sub.add_parser("sync", help="Transfer tracks to device")
@@ -323,6 +370,17 @@ def dispatch(svc: HeadlessService, args: argparse.Namespace) -> AgentResult:
             return svc.device_inventory(limit=args.limit)
         if action == "delete":
             return svc.device_delete(args.object_id, confirm=bool(args.confirm))
+        if action == "art-probe":
+            return svc.device_art_probe()
+        if action == "art-experiment":
+            return svc.device_art_experiment(
+                args.path,
+                object_id=getattr(args, "object_id", None),
+                confirm=bool(args.confirm),
+                try_album=not bool(getattr(args, "no_album", False)),
+                max_edge=int(getattr(args, "max_edge", 320) or 320),
+                max_bytes=int(getattr(args, "max_bytes", 20 * 1024) or 20 * 1024),
+            )
 
     if group == "sync":
         guids = list(args.guids or [])

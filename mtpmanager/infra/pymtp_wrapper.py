@@ -18,6 +18,8 @@ libmtp (1.1.x) and Apple Silicon / Python 3:
   * delete_object argtypes + device-pointer path (LIBMTP_Delete_Object)
   * get_file_metadata argtypes + device-pointer path (LIBMTP_Get_Filemetadata)
   * get_track_metadata argtypes + snapshot + destroy_track_t (LIBMTP_Get_Trackmetadata)
+  * Representative samples (album art): Get/Send sample + format probe (not in stock pymtp)
+  * Device albums: Create_New_Album (experimental art path; hang-prone list APIs still avoided)
 
 Living catalog of failure classes and *predicted* next breaks:
   docs/pymtp-binding-hazards.md
@@ -52,7 +54,12 @@ if sys.platform == "darwin" and ctypes.util.find_library("mtp") is None:
 from pymtp import *  # noqa: E402, F403
 from pymtp import LIBMTP_Filetype  # noqa: E402
 from pymtp import MTP as _MTP  # noqa: E402
-from pymtp import CommandFailed, NotConnected, ObjectNotFound  # noqa: E402
+from pymtp import (  # noqa: E402
+    CommandFailed,
+    NotConnected,
+    ObjectNotFound,
+    UnsupportedCommand,
+)
 import pymtp as _pymtp  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -112,6 +119,45 @@ _LIBMTP_FILETYPE_1_1_23: dict[str, int] = {
 
 LIBMTP_Filetype.clear()
 LIBMTP_Filetype.update(_LIBMTP_FILETYPE_1_1_23)
+
+
+# ---------------------------------------------------------------------------
+# Structures missing from stock pymtp (libmtp 1.1.x)
+# ---------------------------------------------------------------------------
+
+
+class LIBMTP_FileSampleData(ctypes.Structure):
+    """LIBMTP_filesampledata_t — representative sample / album art payload.
+
+    ``data`` is a raw byte buffer (may contain NUL); do not use c_char_p.
+    """
+
+    _fields_ = [
+        ("width", ctypes.c_uint32),
+        ("height", ctypes.c_uint32),
+        ("duration", ctypes.c_uint32),
+        ("filetype", ctypes.c_int),  # LIBMTP_filetype_t
+        ("size", ctypes.c_uint64),
+        ("data", ctypes.POINTER(ctypes.c_char)),
+    ]
+
+
+class LIBMTP_Album(ctypes.Structure):
+    """LIBMTP_album_t — device-side abstract album (not a folder path)."""
+
+
+LIBMTP_Album._fields_ = [
+    ("album_id", ctypes.c_uint32),
+    ("parent_id", ctypes.c_uint32),
+    ("storage_id", ctypes.c_uint32),
+    ("name", ctypes.c_char_p),
+    ("artist", ctypes.c_char_p),
+    ("composer", ctypes.c_char_p),
+    ("genre", ctypes.c_char_p),
+    ("tracks", ctypes.POINTER(ctypes.c_uint32)),
+    ("no_tracks", ctypes.c_uint32),
+    ("next", ctypes.POINTER(LIBMTP_Album)),
+]
 
 
 def _configure_libmtp_ctypes() -> None:
@@ -265,6 +311,60 @@ def _configure_libmtp_ctypes() -> None:
     if hasattr(lib, "LIBMTP_new_playlist_t"):
         lib.LIBMTP_new_playlist_t.argtypes = []
         lib.LIBMTP_new_playlist_t.restype = playlist_p
+
+    # Representative samples (album art) — not bound by stock pymtp.
+    sample_p = ctypes.POINTER(LIBMTP_FileSampleData)
+    if hasattr(lib, "LIBMTP_new_filesampledata_t"):
+        lib.LIBMTP_new_filesampledata_t.argtypes = []
+        lib.LIBMTP_new_filesampledata_t.restype = sample_p
+    if hasattr(lib, "LIBMTP_destroy_filesampledata_t"):
+        lib.LIBMTP_destroy_filesampledata_t.argtypes = [sample_p]
+        lib.LIBMTP_destroy_filesampledata_t.restype = None
+    # int Get_Representative_Sample_Format(dev, filetype, LIBMTP_filesampledata_t **)
+    if hasattr(lib, "LIBMTP_Get_Representative_Sample_Format"):
+        lib.LIBMTP_Get_Representative_Sample_Format.argtypes = [
+            dev_p,
+            ctypes.c_int,  # LIBMTP_filetype_t
+            ctypes.POINTER(sample_p),
+        ]
+        lib.LIBMTP_Get_Representative_Sample_Format.restype = ctypes.c_int
+    if hasattr(lib, "LIBMTP_Send_Representative_Sample"):
+        lib.LIBMTP_Send_Representative_Sample.argtypes = [
+            dev_p,
+            ctypes.c_uint32,
+            sample_p,
+        ]
+        lib.LIBMTP_Send_Representative_Sample.restype = ctypes.c_int
+    if hasattr(lib, "LIBMTP_Get_Representative_Sample"):
+        lib.LIBMTP_Get_Representative_Sample.argtypes = [
+            dev_p,
+            ctypes.c_uint32,
+            sample_p,
+        ]
+        lib.LIBMTP_Get_Representative_Sample.restype = ctypes.c_int
+    if hasattr(lib, "LIBMTP_Get_Thumbnail"):
+        lib.LIBMTP_Get_Thumbnail.argtypes = [
+            dev_p,
+            ctypes.c_uint32,
+            ctypes.POINTER(ctypes.POINTER(ctypes.c_ubyte)),
+            ctypes.POINTER(ctypes.c_uint),
+        ]
+        lib.LIBMTP_Get_Thumbnail.restype = ctypes.c_int
+
+    # Device albums (abstract objects) — Create only for experimental art path.
+    album_p = ctypes.POINTER(LIBMTP_Album)
+    if hasattr(lib, "LIBMTP_Create_New_Album"):
+        lib.LIBMTP_Create_New_Album.argtypes = [dev_p, album_p]
+        lib.LIBMTP_Create_New_Album.restype = ctypes.c_int
+    if hasattr(lib, "LIBMTP_Update_Album"):
+        lib.LIBMTP_Update_Album.argtypes = [dev_p, album_p]
+        lib.LIBMTP_Update_Album.restype = ctypes.c_int
+    if hasattr(lib, "LIBMTP_destroy_album_t"):
+        lib.LIBMTP_destroy_album_t.argtypes = [album_p]
+        lib.LIBMTP_destroy_album_t.restype = None
+    if hasattr(lib, "LIBMTP_new_album_t"):
+        lib.LIBMTP_new_album_t.argtypes = []
+        lib.LIBMTP_new_album_t.restype = album_p
 
 
 _configure_libmtp_ctypes()
@@ -1047,6 +1147,346 @@ def _update_playlist(
     return oid
 
 
+def _filetype_name(filetype: int) -> str:
+    for name, val in LIBMTP_Filetype.items():
+        if int(val) == int(filetype):
+            return str(name)
+    return f"UNKNOWN({filetype})"
+
+
+def _get_representative_sample_format(self, filetype: int) -> dict | None:
+    """Probe device support for representative samples on a file type.
+
+    Returns a dict with width/height/size/duration/filetype when the device
+    advertises sample support for *filetype*, else ``None``. Raises
+    :class:`CommandFailed` on libmtp error (distinct from "not supported").
+    """
+    if self.device is None:
+        raise NotConnected
+
+    dev = _device_ptr(self.device)
+    if not dev:
+        raise NotConnected
+
+    lib = self.mtp
+    if not hasattr(lib, "LIBMTP_Get_Representative_Sample_Format"):
+        raise UnsupportedCommand("LIBMTP_Get_Representative_Sample_Format")
+
+    sample_p = ctypes.POINTER(LIBMTP_FileSampleData)()
+    ret = int(
+        lib.LIBMTP_Get_Representative_Sample_Format(
+            dev,
+            int(filetype),
+            ctypes.byref(sample_p),
+        )
+    )
+    if ret != 0:
+        _debug_stack(self)
+        raise CommandFailed
+
+    if not _ptr_truthy(sample_p):
+        return None
+
+    try:
+        node = sample_p.contents
+        return {
+            "width": int(getattr(node, "width", 0) or 0),
+            "height": int(getattr(node, "height", 0) or 0),
+            "duration": int(getattr(node, "duration", 0) or 0),
+            "size": int(getattr(node, "size", 0) or 0),
+            "filetype": int(getattr(node, "filetype", 0) or 0),
+            "filetype_name": _filetype_name(int(getattr(node, "filetype", 0) or 0)),
+        }
+    finally:
+        try:
+            if hasattr(lib, "LIBMTP_destroy_filesampledata_t"):
+                lib.LIBMTP_destroy_filesampledata_t(sample_p)
+        except Exception:
+            logging.getLogger(__name__).debug(
+                "destroy_filesampledata_t failed", exc_info=True
+            )
+
+
+def _send_representative_sample(
+    self,
+    object_id: int,
+    data: bytes,
+    *,
+    width: int,
+    height: int,
+    filetype: int | None = None,
+    duration: int = 0,
+) -> None:
+    """Attach representative sample bytes (typically JPEG) to *object_id*.
+
+    Uses ``POINTER(c_char)`` so JPEG NULs are not truncated (c_char_p hazard).
+    """
+    if self.device is None:
+        raise NotConnected
+
+    oid = int(object_id)
+    if oid <= 0:
+        raise ValueError(f"Invalid object id for sample: {object_id}")
+
+    raw = bytes(data or b"")
+    if not raw:
+        raise ValueError("Sample data is empty")
+
+    dev = _device_ptr(self.device)
+    if not dev:
+        raise NotConnected
+
+    lib = self.mtp
+    if not hasattr(lib, "LIBMTP_Send_Representative_Sample"):
+        raise UnsupportedCommand("LIBMTP_Send_Representative_Sample")
+
+    ft = (
+        int(filetype)
+        if filetype is not None
+        else int(LIBMTP_Filetype.get("JPEG", 14))
+    )
+    # Keep buffer alive for the C call; POINTER(c_char) not c_char_p.
+    buf = (ctypes.c_char * len(raw)).from_buffer_copy(raw)
+    sample = LIBMTP_FileSampleData()
+    sample.width = int(max(0, width))
+    sample.height = int(max(0, height))
+    sample.duration = int(max(0, duration))
+    sample.filetype = ft
+    sample.size = ctypes.c_uint64(len(raw))
+    sample.data = ctypes.cast(buf, ctypes.POINTER(ctypes.c_char))
+
+    ret = int(
+        lib.LIBMTP_Send_Representative_Sample(
+            dev,
+            ctypes.c_uint32(oid),
+            ctypes.byref(sample),
+        )
+    )
+    _ = buf  # lifetime
+    if ret != 0:
+        _debug_stack(self)
+        raise CommandFailed
+    logging.getLogger(__name__).info(
+        "send_representative_sample object_id=%s bytes=%s %sx%s filetype=%s",
+        oid,
+        len(raw),
+        sample.width,
+        sample.height,
+        _filetype_name(ft),
+    )
+
+
+def _get_representative_sample(self, object_id: int) -> dict | None:
+    """Read back representative sample metadata + bytes for *object_id*."""
+    if self.device is None:
+        raise NotConnected
+
+    oid = int(object_id)
+    if oid <= 0:
+        raise ValueError(f"Invalid object id for sample: {object_id}")
+
+    dev = _device_ptr(self.device)
+    if not dev:
+        raise NotConnected
+
+    lib = self.mtp
+    if not hasattr(lib, "LIBMTP_Get_Representative_Sample"):
+        raise UnsupportedCommand("LIBMTP_Get_Representative_Sample")
+    if not hasattr(lib, "LIBMTP_new_filesampledata_t"):
+        raise UnsupportedCommand("LIBMTP_new_filesampledata_t")
+
+    sample_p = lib.LIBMTP_new_filesampledata_t()
+    if not _ptr_truthy(sample_p):
+        return None
+    try:
+        ret = int(
+            lib.LIBMTP_Get_Representative_Sample(
+                dev,
+                ctypes.c_uint32(oid),
+                sample_p,
+            )
+        )
+        if ret != 0:
+            _debug_stack(self)
+            return None
+        node = sample_p.contents
+        size = int(getattr(node, "size", 0) or 0)
+        data_ptr = getattr(node, "data", None)
+        payload = b""
+        if data_ptr and size > 0:
+            try:
+                payload = ctypes.string_at(data_ptr, size)
+            except Exception:
+                logging.getLogger(__name__).debug(
+                    "sample data copy failed", exc_info=True
+                )
+        return {
+            "width": int(getattr(node, "width", 0) or 0),
+            "height": int(getattr(node, "height", 0) or 0),
+            "duration": int(getattr(node, "duration", 0) or 0),
+            "size": size,
+            "filetype": int(getattr(node, "filetype", 0) or 0),
+            "filetype_name": _filetype_name(
+                int(getattr(node, "filetype", 0) or 0)
+            ),
+            "bytes_read": len(payload),
+            "has_data": bool(payload),
+        }
+    finally:
+        try:
+            if hasattr(lib, "LIBMTP_destroy_filesampledata_t"):
+                lib.LIBMTP_destroy_filesampledata_t(sample_p)
+        except Exception:
+            logging.getLogger(__name__).debug(
+                "destroy_filesampledata_t failed", exc_info=True
+            )
+
+
+def _create_new_album(
+    self,
+    name,
+    track_ids=None,
+    *,
+    artist: str = "",
+    genre: str = "",
+    composer: str = "",
+    parent_id: int = 0,
+    storage_id: int = 0,
+):
+    """Create a device album abstract object; return new album_id.
+
+    Experimental path for attaching album art (Creative often wants art on
+    the album object, not the track). Avoids Get_Album_List (hang class).
+    """
+    if self.device is None:
+        raise NotConnected
+
+    dev = _device_ptr(self.device)
+    if not dev:
+        raise NotConnected
+
+    lib = self.mtp
+    if not hasattr(lib, "LIBMTP_Create_New_Album"):
+        raise UnsupportedCommand("LIBMTP_Create_New_Album")
+
+    ids = [int(x) for x in (track_ids or []) if int(x) > 0]
+    keep: list[object] = []
+
+    def _cstr(value: str) -> ctypes.c_char_p | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        buf = ctypes.create_string_buffer(_as_c_char_p(text))
+        keep.append(buf)
+        return ctypes.cast(buf, ctypes.c_char_p)
+
+    album = LIBMTP_Album()
+    album.album_id = 0
+    album.parent_id = ctypes.c_uint32(int(parent_id))
+    album.storage_id = ctypes.c_uint32(int(storage_id))
+    album.name = _cstr(str(name or "Album"))
+    album.artist = _cstr(artist)
+    album.composer = _cstr(composer)
+    album.genre = _cstr(genre)
+    album.next = None
+    if ids:
+        arr = (ctypes.c_uint32 * len(ids))(*ids)
+        keep.append(arr)
+        album.tracks = ctypes.cast(arr, ctypes.POINTER(ctypes.c_uint32))
+        album.no_tracks = ctypes.c_uint32(len(ids))
+    else:
+        album.tracks = None
+        album.no_tracks = 0
+
+    ret = int(lib.LIBMTP_Create_New_Album(dev, ctypes.byref(album)))
+    _ = keep
+    if ret != 0:
+        _debug_stack(self)
+        raise CommandFailed
+    new_id = int(getattr(album, "album_id", 0) or 0)
+    if new_id <= 0:
+        _debug_stack(self)
+        raise CommandFailed
+    logging.getLogger(__name__).info(
+        "create_new_album id=%s name=%r tracks=%d",
+        new_id,
+        name,
+        len(ids),
+    )
+    return new_id
+
+
+def _update_album(
+    self,
+    album_id,
+    name,
+    track_ids=None,
+    *,
+    artist: str = "",
+    genre: str = "",
+    composer: str = "",
+    parent_id: int = 0,
+    storage_id: int = 0,
+):
+    """Replace an existing album's name/artist and track id list."""
+    if self.device is None:
+        raise NotConnected
+
+    oid = int(album_id)
+    if oid <= 0:
+        raise ValueError(f"Invalid album id: {album_id}")
+
+    dev = _device_ptr(self.device)
+    if not dev:
+        raise NotConnected
+
+    lib = self.mtp
+    if not hasattr(lib, "LIBMTP_Update_Album"):
+        raise UnsupportedCommand("LIBMTP_Update_Album")
+
+    ids = [int(x) for x in (track_ids or []) if int(x) > 0]
+    keep: list[object] = []
+
+    def _cstr(value: str) -> ctypes.c_char_p | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        buf = ctypes.create_string_buffer(_as_c_char_p(text))
+        keep.append(buf)
+        return ctypes.cast(buf, ctypes.c_char_p)
+
+    album = LIBMTP_Album()
+    album.album_id = ctypes.c_uint32(oid)
+    album.parent_id = ctypes.c_uint32(int(parent_id))
+    album.storage_id = ctypes.c_uint32(int(storage_id))
+    album.name = _cstr(str(name or "Album"))
+    album.artist = _cstr(artist)
+    album.composer = _cstr(composer)
+    album.genre = _cstr(genre)
+    album.next = None
+    if ids:
+        arr = (ctypes.c_uint32 * len(ids))(*ids)
+        keep.append(arr)
+        album.tracks = ctypes.cast(arr, ctypes.POINTER(ctypes.c_uint32))
+        album.no_tracks = ctypes.c_uint32(len(ids))
+    else:
+        album.tracks = None
+        album.no_tracks = 0
+
+    ret = int(lib.LIBMTP_Update_Album(dev, ctypes.byref(album)))
+    _ = keep
+    if ret != 0:
+        _debug_stack(self)
+        raise CommandFailed
+    logging.getLogger(__name__).info(
+        "update_album id=%s name=%r tracks=%d",
+        oid,
+        name,
+        len(ids),
+    )
+    return oid
+
+
 # Monkey-patch stock methods so all callers get the fixed behavior.
 _MTP.debug_stack = _debug_stack
 _MTP.send_track_from_file = _send_track_from_file
@@ -1065,3 +1505,8 @@ _MTP.get_playlists = _get_playlists
 _MTP.get_playlist = _get_playlist
 _MTP.create_new_playlist = _create_new_playlist
 _MTP.update_playlist = _update_playlist
+_MTP.get_representative_sample_format = _get_representative_sample_format
+_MTP.send_representative_sample = _send_representative_sample
+_MTP.get_representative_sample = _get_representative_sample
+_MTP.create_new_album = _create_new_album
+_MTP.update_album = _update_album

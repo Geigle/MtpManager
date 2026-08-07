@@ -220,6 +220,67 @@ def ensure_cached_thumb(
         return None
 
 
+# Creative ZEN / libmtp docs: JPEG samples, often ~20KB max.
+DEFAULT_DEVICE_ART_MAX_EDGE = 320
+DEFAULT_DEVICE_ART_MAX_BYTES = 20 * 1024
+
+
+def prepare_device_cover_jpeg(
+    track_path: str,
+    *,
+    max_edge: int = DEFAULT_DEVICE_ART_MAX_EDGE,
+    max_bytes: int = DEFAULT_DEVICE_ART_MAX_BYTES,
+    quality_start: int = 85,
+) -> tuple[bytes, int, int] | None:
+    """Resize/encode host cover art as a device-friendly JPEG sample.
+
+    Returns ``(jpeg_bytes, width, height)`` or ``None`` if no art / Pillow
+    missing / encode failed. Shrinks edge and quality until under *max_bytes*
+    when possible (Creative samples are often capped near 20KB).
+    """
+    data = load_cover_bytes(track_path)
+    if not data:
+        return None
+    try:
+        from PIL import Image
+    except ImportError:
+        logger.warning("Pillow not installed; device album art disabled")
+        return None
+
+    edge = max(16, int(max_edge or DEFAULT_DEVICE_ART_MAX_EDGE))
+    limit = max(1024, int(max_bytes or DEFAULT_DEVICE_ART_MAX_BYTES))
+    try:
+        im = Image.open(io.BytesIO(data))
+        im = im.convert("RGB")
+    except Exception as e:
+        logger.debug("prepare_device_cover_jpeg open failed %s: %s", track_path, e)
+        return None
+
+    quality = max(30, min(95, int(quality_start)))
+    for _ in range(12):
+        work = im.copy()
+        work.thumbnail((edge, edge), Image.Resampling.LANCZOS)
+        buf = io.BytesIO()
+        try:
+            work.save(buf, format="JPEG", quality=quality, optimize=True)
+        except Exception as e:
+            logger.debug("JPEG encode failed: %s", e)
+            return None
+        out = buf.getvalue()
+        w, h = work.size
+        if len(out) <= limit:
+            return out, int(w), int(h)
+        if quality > 40:
+            quality -= 10
+        elif edge > 64:
+            edge = max(64, int(edge * 0.75))
+            quality = max(40, quality)
+        else:
+            # Last resort: return smallest attempt even if slightly over budget.
+            return out, int(w), int(h)
+    return None
+
+
 def warm_album_thumbs(
     track_paths: list[str],
     *,

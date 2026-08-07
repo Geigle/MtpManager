@@ -124,11 +124,12 @@ Not bound by pymtp → not available in MtpManager without new ctypes (or a diff
 
 ### Device-side albums (not host tags)
 
-- `LIBMTP_Get_Album`, `LIBMTP_Get_Album_List`, `LIBMTP_Get_Album_List_For_Storage`
-- `LIBMTP_Create_New_Album`, `LIBMTP_Update_Album`, `LIBMTP_Set_Album_Name`
+- `LIBMTP_Get_Album`, `LIBMTP_Get_Album_List`, `LIBMTP_Get_Album_List_For_Storage` — **unused** (list is hang-class after bad finalize)
+- ~~`LIBMTP_Create_New_Album` / `LIBMTP_Update_Album`~~ — **used + patched** for album art sync (`app/album_art_device.py`, host `device_albums` cache)
+- `LIBMTP_Set_Album_Name`
 - Album new/destroy helpers  
 
-CMD path historically **hangs** on album association after send; pure album APIs remain unused.
+CMD path historically **hangs** on album association after send (`Get_Album_List`). Product path never lists albums; host SQLite maps album keys → object ids.
 
 ### Playlists (libmtp beyond thin pymtp wrappers)
 
@@ -137,9 +138,8 @@ CMD path historically **hangs** on album association after send; pure album APIs
 
 ### Thumbnails / samples / art
 
-- `LIBMTP_Get_Thumbnail`
-- `LIBMTP_Get_Representative_Sample`, `LIBMTP_Get_Representative_Sample_Format`
-- `LIBMTP_Send_Representative_Sample`
+- `LIBMTP_Get_Thumbnail` (argtypes only; no product path yet)
+- ~~`LIBMTP_Get_Representative_Sample` / `Get_Representative_Sample_Format` / `Send_Representative_Sample`~~ — **used + patched**; Sync album art (PyMTP) attaches JPEG to **album** objects (ZEN: tracks reject samples)
 
 ### Properties / custom PTP
 
@@ -169,10 +169,10 @@ Not every libmtp symbol matters. For this app’s goals, the meaningful “not d
 2. **Download** track/file to host — `Get_*_To_File`  
 3. ~~**Full file listing**~~ — **partial:** Device → List Files (experimental) uses patched `get_filelisting`; hierarchical browser / `Get_Files_And_Folders` still open  
 4. ~~**Playlists** — list / create / update~~ — **done:** patched bindings + Sync playlist → device publishes MTP playlist after track transfer (Experimental)
-5. **Device albums** — create / update / list (libmtp only; watch CMD album hang class)  
+5. ~~**Device albums**~~ — **done for art:** create/update + host `device_albums` cache; list still hang-class / unused  
 6. **Rename** folder / file / track — `Set_*_Name` / `Set_Object_Filename`  
 7. **Move / copy** objects  
-8. **Cover art / thumbnail to device** — representative sample / thumbnail  
+8. ~~**Cover art / thumbnail to device**~~ — **done (PyMTP):** post-sync album JPEG samples; Config → Sync album art; ZEN = ALBUM 80×80 only  
 9. **Multi-device selection** — detect / open by serial  
 10. **Update on-device metadata** without re-send — `Update_Track_Metadata`  
 11. **Harden remaining used stock paths** — especially `send_file_from_file`, capacity getters  

@@ -78,6 +78,23 @@ CREATE INDEX IF NOT EXISTS idx_device_files_guid
   ON device_files(serial, guid);
 CREATE INDEX IF NOT EXISTS idx_device_files_name
   ON device_files(serial, name);
+
+-- Abstract MTP album objects + art fingerprint (no Get_Album_List).
+CREATE TABLE IF NOT EXISTS device_albums (
+  serial TEXT NOT NULL,
+  album_key TEXT NOT NULL,
+  album_id INTEGER NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  artist TEXT NOT NULL DEFAULT '',
+  art_sha256 TEXT NOT NULL DEFAULT '',
+  track_ids_json TEXT NOT NULL DEFAULT '[]',
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (serial, album_key),
+  FOREIGN KEY (serial) REFERENCES devices(serial) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_device_albums_id
+  ON device_albums(serial, album_id);
 """
 
 
@@ -906,6 +923,108 @@ def file_count(
             (key,),
         ).fetchone()
         return int(row["n"] if row else 0)
+    finally:
+        conn.close()
+
+
+def get_device_album(
+    serial: str,
+    album_key: str,
+    *,
+    path: Path | None = None,
+) -> dict | None:
+    """Return cached device album row for *album_key*, or None."""
+    key = device_serial_key(serial=serial)
+    ak = str(album_key or "").strip()
+    if not ak:
+        return None
+    conn, _ = _open(path)
+    try:
+        row = conn.execute(
+            "SELECT serial, album_key, album_id, name, artist, art_sha256, "
+            "track_ids_json, updated_at FROM device_albums "
+            "WHERE serial = ? AND album_key = ?",
+            (key, ak),
+        ).fetchone()
+        if row is None:
+            return None
+        import json
+
+        track_ids: list[int] = []
+        try:
+            raw = json.loads(str(row["track_ids_json"] or "[]"))
+            if isinstance(raw, list):
+                track_ids = [int(x) for x in raw if int(x) > 0]
+        except (TypeError, ValueError, json.JSONDecodeError):
+            track_ids = []
+        return {
+            "serial": str(row["serial"]),
+            "album_key": str(row["album_key"]),
+            "album_id": int(row["album_id"] or 0),
+            "name": str(row["name"] or ""),
+            "artist": str(row["artist"] or ""),
+            "art_sha256": str(row["art_sha256"] or ""),
+            "track_ids": track_ids,
+            "updated_at": str(row["updated_at"] or ""),
+        }
+    finally:
+        conn.close()
+
+
+def record_device_album(
+    serial: str,
+    *,
+    album_key: str,
+    album_id: int,
+    name: str = "",
+    artist: str = "",
+    art_sha256: str = "",
+    track_ids: list[int] | None = None,
+    path: Path | None = None,
+) -> None:
+    """Upsert host-side map of abstract album object + art fingerprint."""
+    key = device_serial_key(serial=serial)
+    ak = str(album_key or "").strip()
+    oid = int(album_id)
+    if not ak or oid <= 0:
+        return
+    import json
+
+    ids = [int(x) for x in (track_ids or []) if int(x) > 0]
+    now = _utc_now()
+    conn, _ = _open(path)
+    try:
+        # Ensure parent devices row exists (FK).
+        conn.execute(
+            "INSERT OR IGNORE INTO devices (serial, name) VALUES (?, '')",
+            (key,),
+        )
+        conn.execute(
+            """
+            INSERT INTO device_albums (
+              serial, album_key, album_id, name, artist, art_sha256,
+              track_ids_json, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(serial, album_key) DO UPDATE SET
+              album_id = excluded.album_id,
+              name = excluded.name,
+              artist = excluded.artist,
+              art_sha256 = excluded.art_sha256,
+              track_ids_json = excluded.track_ids_json,
+              updated_at = excluded.updated_at
+            """,
+            (
+                key,
+                ak,
+                oid,
+                str(name or ""),
+                str(artist or ""),
+                str(art_sha256 or ""),
+                json.dumps(ids),
+                now,
+            ),
+        )
+        conn.commit()
     finally:
         conn.close()
 

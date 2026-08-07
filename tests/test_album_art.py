@@ -13,6 +13,7 @@ from mtpmanager.infra.album_art import (
     ensure_cached_thumb,
     load_cover_bytes,
     photoimage_from_cache_file,
+    prepare_device_cover_jpeg,
     warm_album_thumbs,
 )
 
@@ -92,6 +93,33 @@ class AlbumArtTests(unittest.TestCase):
             self.assertIsNotNone(path)
             assert path is not None
             self.assertEqual(path.suffix, ".png")
+
+    def test_prepare_device_cover_jpeg(self) -> None:
+        try:
+            from PIL import Image
+        except ImportError:
+            self.skipTest("Pillow not installed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            music = Path(tmp) / "music"
+            music.mkdir()
+            track = music / "song.mp3"
+            track.write_bytes(b"x")
+            cover = music / "cover.png"
+            Image.new("RGB", (800, 600), color=(10, 120, 200)).save(
+                cover, format="PNG"
+            )
+
+            out = prepare_device_cover_jpeg(
+                str(track), max_edge=200, max_bytes=15 * 1024
+            )
+            self.assertIsNotNone(out)
+            assert out is not None
+            data, w, h = out
+            self.assertTrue(data[:2] == b"\xff\xd8")  # JPEG SOI
+            self.assertLessEqual(max(w, h), 200)
+            self.assertLessEqual(len(data), 15 * 1024)
+            self.assertGreater(len(data), 100)
 
 
 if __name__ == "__main__":
