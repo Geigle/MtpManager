@@ -25,6 +25,7 @@ from mtpmanager.infra.album_art import (
     DEFAULT_DEVICE_ART_MAX_BYTES,
     DEFAULT_DEVICE_ART_MAX_EDGE,
     prepare_device_cover_jpeg,
+    prepare_device_cover_jpeg_from_image_file,
 )
 from mtpmanager.infra.device_index import (
     get_device_album,
@@ -153,16 +154,37 @@ def _probe_album_sample_caps(device) -> tuple[int, int, int]:
     return max_edge, max_bytes, sample_ft
 
 
+def _podcast_show_for_track(track: Track, *, index_path: Path | None = None):
+    """Return Podcast row when *track* is a podcast episode (by GUID), else None."""
+    g = str(getattr(track, "guid", "") or "").strip().lower()
+    if not is_track_guid(g):
+        return None
+    try:
+        from mtpmanager.infra.podcast_index import get_episode_by_guid, get_podcast
+    except Exception:
+        return None
+    try:
+        ep = get_episode_by_guid(g, path=index_path)
+        if ep is None:
+            return None
+        return get_podcast(int(ep.podcast_id), path=index_path)
+    except Exception:
+        logger.debug("podcast show lookup failed for %s", g, exc_info=True)
+        return None
+
+
 def _prepare_jpeg_for_group(
     tracks: Sequence[Track],
     *,
     max_edge: int,
     max_bytes: int,
+    index_path: Path | None = None,
 ) -> tuple[bytes, int, int, str] | None:
-    """First track with cover art → JPEG sample; return None if none."""
+    """First usable cover → JPEG sample (embedded, sidecar, or podcast show art)."""
+    # 1) Embedded / sidecar on episode or music file.
     for t in tracks:
         path = str(getattr(t, "path", "") or "")
-        if not path:
+        if not path or path.startswith("podcast:"):
             continue
         out = prepare_device_cover_jpeg(
             path, max_edge=max_edge, max_bytes=max_bytes
@@ -170,6 +192,34 @@ def _prepare_jpeg_for_group(
         if out:
             data, w, h = out
             return data, w, h, path
+
+    # 2) Podcast show artwork (RSS image_url, cached under data/podcasts/).
+    seen_show: set[int] = set()
+    for t in tracks:
+        show = _podcast_show_for_track(t, index_path=index_path)
+        if show is None:
+            continue
+        sid = int(getattr(show, "id", 0) or 0)
+        if sid <= 0 or sid in seen_show:
+            continue
+        seen_show.add(sid)
+        try:
+            from mtpmanager.app.podcast_ops import ensure_podcast_artwork
+
+            art_path = ensure_podcast_artwork(show)
+        except Exception:
+            logger.debug(
+                "ensure_podcast_artwork failed show_id=%s", sid, exc_info=True
+            )
+            continue
+        if not art_path:
+            continue
+        out = prepare_device_cover_jpeg_from_image_file(
+            art_path, max_edge=max_edge, max_bytes=max_bytes
+        )
+        if out:
+            data, w, h = out
+            return data, w, h, art_path
     return None
 
 
@@ -180,7 +230,7 @@ def _expand_group_with_on_device_siblings(
     *,
     index_path: Path | None,
 ) -> list[Track]:
-    """Add library tracks of the same album already present on the device.
+    """Add library/podcast tracks of the same album already present on device.
 
     Single-track syncs still produce album objects that include sibling tracks
     already sent (object ids from ``device_files``).
@@ -198,7 +248,7 @@ def _expand_group_with_on_device_siblings(
     if not stems:
         return list(group)
 
-    # Library index is the same DB path as device_index by default.
+    # Library music siblings (same album key).
     try:
         on_dev = get_tracks_by_guids(list(stems), path=index_path)
     except Exception:
@@ -217,6 +267,50 @@ def _expand_group_with_on_device_siblings(
             continue
         if album_grouping_key(t) == key:
             by_guid[gg] = t
+
+    # Podcast siblings: episodes of the same show already on the device.
+    try:
+        from mtpmanager.domain.models import TrackMetadata
+        from mtpmanager.infra.podcast_index import (
+            get_episode_by_guid,
+            get_podcast,
+            list_episodes,
+        )
+
+        seed_guid = next(iter(by_guid), None)
+        if seed_guid:
+            seed_ep = get_episode_by_guid(seed_guid, path=index_path)
+            if seed_ep is not None:
+                show = get_podcast(int(seed_ep.podcast_id), path=index_path)
+                show_title = (
+                    (show.title if show else "") or "Podcast"
+                ).strip() or "Podcast"
+                show_author = (
+                    (show.author if show else "") or show_title
+                ).strip() or show_title
+                for other in list_episodes(
+                    int(seed_ep.podcast_id), path=index_path
+                ):
+                    og = str(other.guid or "").strip().lower()
+                    if not is_track_guid(og) or og not in stems or og in by_guid:
+                        continue
+                    by_guid[og] = Track(
+                        path=str(other.local_path or ""),
+                        meta=TrackMetadata(
+                            artist=show_author,
+                            albumartist=show_title,
+                            album=show_title,
+                            title=(other.title or "Episode").strip()
+                            or "Episode",
+                            genre="Podcast",
+                            date=(other.pub_date or "")[:10],
+                            tracknumber=str(other.episode_index or ""),
+                        ),
+                        guid=og,
+                    )
+    except Exception:
+        logger.debug("podcast sibling expand failed", exc_info=True)
+
     # Preserve original group order first, then extras sorted by track number.
     ordered = list(group)
     seen = {
@@ -224,11 +318,7 @@ def _expand_group_with_on_device_siblings(
         for t in ordered
         if t and is_track_guid(getattr(t, "guid", None))
     }
-    extras = [
-        t
-        for g, t in by_guid.items()
-        if g not in seen
-    ]
+    extras = [t for g, t in by_guid.items() if g not in seen]
     extras.sort(key=lambda t: (t.meta.tracknumber or "", t.path or ""))
     ordered.extend(extras)
     return ordered
@@ -317,7 +407,10 @@ def push_album_art_for_tracks(
             continue
 
         jpeg = _prepare_jpeg_for_group(
-            group, max_edge=max_edge, max_bytes=max_bytes
+            group,
+            max_edge=max_edge,
+            max_bytes=max_bytes,
+            index_path=index_path,
         )
         if not jpeg:
             result.albums.append(

@@ -768,7 +768,8 @@ class AppController:
                 "Album art",
                 "Sync album art needs PyMTP (uncheck Config → Stable Mode).\n\n"
                 "On Creative ZEN, cover art is attached to device album objects "
-                "after track transfer — not available via mtp-sendtr.",
+                "after music or podcast transfer — not available via mtp-sendtr.\n"
+                "Podcasts use the show’s RSS artwork as the album sample.",
             )
             self.win.var_sync_album_art.set(False)
             return
@@ -9589,7 +9590,9 @@ class AppController:
             ):
                 self._publish_pending_device_playlist()
             # Phase 2b: abstract album + cover art (ZEN: not on track objects).
-            if kind != "podcast" and self._should_push_album_art():
+            # Music and podcasts: podcast show RSS art is used when episode
+            # files lack embedded covers.
+            if self._should_push_album_art():
                 paths = list(job.paths) if job is not None else []
                 self._publish_album_art_after_sync(paths)
             if self._pending_auto_podcast is not None:

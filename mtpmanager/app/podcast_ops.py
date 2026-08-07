@@ -802,6 +802,19 @@ def prepare_episodes_for_sync(
                 )
                 continue
             podcast_cache[ep.podcast_id] = show
+        # Prefetch show art once per show (still-video frames + device album art).
+        if show.id not in artwork_cache:
+            try:
+                artwork_cache[show.id] = ensure_podcast_artwork(
+                    show, data_dir=data_dir
+                )
+            except Exception:
+                logger.debug(
+                    "Podcast artwork prefetch failed id=%s",
+                    show.id,
+                    exc_info=True,
+                )
+                artwork_cache[show.id] = None
         try:
             use_video = bool(allow_video) and bool(
                 ep.is_video
@@ -828,10 +841,6 @@ def prepare_episodes_for_sync(
                 )
                 if not ready.local_path or not os.path.isfile(ready.local_path):
                     raise FileNotFoundError("audio download missing")
-                if show.id not in artwork_cache:
-                    artwork_cache[show.id] = ensure_podcast_artwork(
-                        show, data_dir=data_dir
-                    )
                 art = artwork_cache.get(show.id) or ""
                 prep.video_jobs.append(
                     PodcastVideoJob(

@@ -192,11 +192,11 @@ Debriefs remain the forensic narrative; this file is what we keep doing.
 
 **Context:** Host UI already showed album thumbs. Device cover art was missing. Live probe on Creative ZEN Vision:M showed `RepresentativeSampleData` on **ALBUM** objects only (JPEG ≤80×80, ≤24KB), not on MP3/WMA tracks. CMD `mtp-sendtr` album association via `Get_Album_List` is hang-class after bad finalize.
 
-**Decision:** After successful Experimental (PyMTP) music Sync, group transferred tracks by albumartist+album, resolve object ids from `device_files`, **create or update** abstract albums (`Create_New_Album` / `Update_Album`), and `Send_Representative_Sample` JPEG from host cover extract. Cache album id + art SHA-256 in `device_albums` (never `Get_Album_List`). Config → **Sync album art (PyMTP)** (default on). No-op in Stable Mode / podcasts. Art failures are non-fatal to the track transfer.
+**Decision:** After successful Experimental (PyMTP) music **or podcast** Sync, group transferred items by albumartist+album (podcasts: show title), resolve object ids from `device_files`, **create or update** abstract albums (`Create_New_Album` / `Update_Album`), and `Send_Representative_Sample` JPEG. Music uses embedded/sidecar art; podcasts use show RSS artwork via `ensure_podcast_artwork` when episode files have no cover. Cache album id + art SHA-256 in `device_albums` (never `Get_Album_List`). Config → **Sync album art (PyMTP)** (default on). No-op in Stable Mode. Art failures are non-fatal to the transfer.
 
-**Rationale:** Matches ZEN firmware; reuses host cover pipeline; avoids hang-prone album list; skip re-send when art hash unchanged.
+**Rationale:** Matches ZEN firmware; reuses host cover pipeline + existing podcast artwork cache; avoids hang-prone album list; skip re-send when art hash unchanged.
 
-**Consequences:** Partial album syncs may create albums with incomplete membership until later tracks update the object. Without list, orphaned on-device albums from other tools are not merged. Stable Mode users get no art.
+**Consequences:** Partial album/show syncs may create albums with incomplete membership until later items update the object. Without list, orphaned on-device albums from other tools are not merged. Stable Mode users get no art.
 
 **Source:** `app/album_art_device.py`; `infra/album_art.prepare_device_cover_jpeg`; `pymtp_wrapper` sample/album bindings; live ZEN probe 2026-08.
 

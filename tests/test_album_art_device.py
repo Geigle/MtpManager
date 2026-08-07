@@ -71,6 +71,47 @@ class AlbumGroupingTests(unittest.TestCase):
         self.assertEqual(len(groups[keys[0]]), 2)
 
 
+class PodcastCoverResolutionTests(unittest.TestCase):
+    def test_prepare_jpeg_uses_podcast_artwork_file(self) -> None:
+        try:
+            from PIL import Image
+        except ImportError:
+            self.skipTest("Pillow not installed")
+
+        from mtpmanager.app.album_art_device import _prepare_jpeg_for_group
+        from mtpmanager.infra.album_art import prepare_device_cover_jpeg_from_image_file
+
+        with tempfile.TemporaryDirectory() as tmp:
+            art = Path(tmp) / "artwork.png"
+            Image.new("RGB", (120, 120), color=(200, 40, 40)).save(
+                art, format="PNG"
+            )
+            out = prepare_device_cover_jpeg_from_image_file(
+                str(art), max_edge=80, max_bytes=24 * 1024
+            )
+            self.assertIsNotNone(out)
+            assert out is not None
+            self.assertTrue(out[0][:2] == b"\xff\xd8")
+            self.assertLessEqual(max(out[1], out[2]), 80)
+
+            # Group with no embedded art still finds show art via mock path.
+            track = Track(
+                path=str(Path(tmp) / "missing.mp3"),
+                meta=TrackMetadata(
+                    artist="Host",
+                    albumartist="Show Name",
+                    album="Show Name",
+                    title="Ep 1",
+                    genre="Podcast",
+                ),
+                guid=new_track_guid(),
+            )
+            # No file → embedded fails; without DB show lookup returns None.
+            self.assertIsNone(
+                _prepare_jpeg_for_group([track], max_edge=80, max_bytes=20480)
+            )
+
+
 class AlbumArtPushTests(unittest.TestCase):
     def test_push_creates_album_and_sends_sample(self) -> None:
         try:

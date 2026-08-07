@@ -225,20 +225,20 @@ DEFAULT_DEVICE_ART_MAX_EDGE = 320
 DEFAULT_DEVICE_ART_MAX_BYTES = 20 * 1024
 
 
-def prepare_device_cover_jpeg(
-    track_path: str,
+def prepare_device_cover_jpeg_from_bytes(
+    data: bytes,
     *,
     max_edge: int = DEFAULT_DEVICE_ART_MAX_EDGE,
     max_bytes: int = DEFAULT_DEVICE_ART_MAX_BYTES,
     quality_start: int = 85,
+    source_label: str = "bytes",
 ) -> tuple[bytes, int, int] | None:
-    """Resize/encode host cover art as a device-friendly JPEG sample.
+    """Resize/encode raw image bytes as a device-friendly JPEG sample.
 
-    Returns ``(jpeg_bytes, width, height)`` or ``None`` if no art / Pillow
-    missing / encode failed. Shrinks edge and quality until under *max_bytes*
-    when possible (Creative samples are often capped near 20KB).
+    Returns ``(jpeg_bytes, width, height)`` or ``None`` if Pillow is missing
+    or encode fails. Shrinks edge and quality until under *max_bytes* when
+    possible (Creative samples are often capped near 20KB).
     """
-    data = load_cover_bytes(track_path)
     if not data:
         return None
     try:
@@ -253,7 +253,9 @@ def prepare_device_cover_jpeg(
         im = Image.open(io.BytesIO(data))
         im = im.convert("RGB")
     except Exception as e:
-        logger.debug("prepare_device_cover_jpeg open failed %s: %s", track_path, e)
+        logger.debug(
+            "prepare_device_cover_jpeg open failed %s: %s", source_label, e
+        )
         return None
 
     quality = max(30, min(95, int(quality_start)))
@@ -279,6 +281,54 @@ def prepare_device_cover_jpeg(
             # Last resort: return smallest attempt even if slightly over budget.
             return out, int(w), int(h)
     return None
+
+
+def prepare_device_cover_jpeg_from_image_file(
+    image_path: str,
+    *,
+    max_edge: int = DEFAULT_DEVICE_ART_MAX_EDGE,
+    max_bytes: int = DEFAULT_DEVICE_ART_MAX_BYTES,
+    quality_start: int = 85,
+) -> tuple[bytes, int, int] | None:
+    """Encode a host image file (podcast artwork, sidecar, …) for device send."""
+    if not image_path or not os.path.isfile(image_path):
+        return None
+    try:
+        data = Path(image_path).read_bytes()
+    except OSError as e:
+        logger.debug("Cannot read image for device art %s: %s", image_path, e)
+        return None
+    return prepare_device_cover_jpeg_from_bytes(
+        data,
+        max_edge=max_edge,
+        max_bytes=max_bytes,
+        quality_start=quality_start,
+        source_label=image_path,
+    )
+
+
+def prepare_device_cover_jpeg(
+    track_path: str,
+    *,
+    max_edge: int = DEFAULT_DEVICE_ART_MAX_EDGE,
+    max_bytes: int = DEFAULT_DEVICE_ART_MAX_BYTES,
+    quality_start: int = 85,
+) -> tuple[bytes, int, int] | None:
+    """Resize/encode host cover art as a device-friendly JPEG sample.
+
+    Uses embedded tags or folder sidecars on *track_path*. For podcast show
+    art (remote URL cache), use :func:`prepare_device_cover_jpeg_from_image_file`.
+    """
+    data = load_cover_bytes(track_path)
+    if not data:
+        return None
+    return prepare_device_cover_jpeg_from_bytes(
+        data,
+        max_edge=max_edge,
+        max_bytes=max_bytes,
+        quality_start=quality_start,
+        source_label=track_path,
+    )
 
 
 def warm_album_thumbs(
