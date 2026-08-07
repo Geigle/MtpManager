@@ -830,6 +830,10 @@ def _get_playlists(self):
 
     Stock walks the list without freeing nodes and leaves ``tracks`` as a
     live C pointer that is unsafe after destroy. We snapshot name + track ids.
+
+    Walk strategy: capture ``next`` as a raw address *before* destroy, and only
+    free nodes after the full walk. Mid-walk destroy + ctypes POINTER reuse has
+    been observed to stop after the first node on some arm64 builds.
     """
     if self.device is None:
         raise NotConnected
@@ -844,7 +848,9 @@ def _get_playlists(self):
 
     out: list[types.SimpleNamespace] = []
     destroy = getattr(self.mtp, "LIBMTP_destroy_playlist_t", None)
+    playlist_p = type(head)
     cur = head
+    to_free: list = []
     walked = 0
     while _ptr_truthy(cur) and walked < 100_000:
         walked += 1
@@ -852,26 +858,37 @@ def _get_playlists(self):
             node = cur.contents
         except (ValueError, TypeError):
             break
+        # Capture next as an integer address before any free of *cur*.
+        nxt_addr = None
         try:
-            nxt = getattr(node, "next", None)
+            nxt_field = getattr(node, "next", None)
+            if nxt_field is not None:
+                nxt_addr = ctypes.cast(nxt_field, ctypes.c_void_p).value
         except Exception:
-            nxt = None
+            nxt_addr = None
         try:
             out.append(_snapshot_playlist(node))
         except Exception:
             logging.getLogger(__name__).debug(
                 "playlist snapshot failed", exc_info=True
             )
-        if destroy is not None:
+        to_free.append(cur)
+        if not nxt_addr:
+            break
+        try:
+            cur = ctypes.cast(nxt_addr, playlist_p)
+        except (TypeError, ValueError, ctypes.ArgumentError):
+            break
+    if destroy is not None:
+        for ptr in to_free:
             try:
-                destroy(cur)
+                destroy(ptr)
             except Exception:
                 pass
-        if not _ptr_truthy(nxt):
-            break
-        cur = nxt
     logging.getLogger(__name__).info(
-        "get_playlists walk complete count=%s", len(out)
+        "get_playlists walk complete count=%s ids=%s",
+        len(out),
+        [int(getattr(p, "playlist_id", 0) or 0) for p in out[:20]],
     )
     return out
 

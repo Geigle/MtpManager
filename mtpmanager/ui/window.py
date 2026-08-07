@@ -182,6 +182,15 @@ CTX_PLAYLIST_SHUFFLE_ARTIST = "Shuffle by Artist (Merge)…"
 CTX_PLAYLIST_SHUFFLE_SPOTIFY = "Shuffle (Spotify-style)…"
 CTX_PLAYLIST_SYNC = "Sync playlist to device"
 
+# Device → Playlists tab (on-device MTP playlists; same chrome as host Playlists)
+CTX_DEVICE_PLAYLIST_PLAY_TRACK = "Play This Track"
+CTX_DEVICE_PLAYLIST_REMOVE = "Remove from Playlist"
+CTX_DEVICE_PLAYLIST_MOVE_UP = CTX_PLAYLIST_MOVE_UP
+CTX_DEVICE_PLAYLIST_MOVE_DOWN = CTX_PLAYLIST_MOVE_DOWN
+CTX_DEVICE_PLAYLIST_SHUFFLE_ARTIST = CTX_PLAYLIST_SHUFFLE_ARTIST
+CTX_DEVICE_PLAYLIST_SHUFFLE_SPOTIFY = CTX_PLAYLIST_SHUFFLE_SPOTIFY
+CTX_DEVICE_PLAYLIST_REFRESH = "Refresh from device"
+
 
 def _bind_playlist_reorder_keys(
     widget,
@@ -529,6 +538,36 @@ class MainWindow:
         )
         self.menu_playlist_ctx.add_separator()
         self.menu_playlist_ctx.add_command(label=CTX_PLAYLIST_SYNC)
+
+        self.menu_device_playlist_ctx = Menu(self.root, tearoff=0)
+        self.menu_device_playlist_ctx.add_command(
+            label=CTX_DEVICE_PLAYLIST_PLAY_TRACK
+        )
+        self.menu_device_playlist_ctx.add_command(
+            label=CTX_DEVICE_PLAYLIST_REMOVE
+        )
+        self.menu_device_playlist_ctx.add_command(
+            label=CTX_DEVICE_PLAYLIST_MOVE_UP
+        )
+        self.menu_device_playlist_ctx.add_command(
+            label=CTX_DEVICE_PLAYLIST_MOVE_DOWN
+        )
+        self.menu_device_playlist_shuffle = Menu(
+            self.menu_device_playlist_ctx, tearoff=0
+        )
+        self.menu_device_playlist_shuffle.add_command(
+            label=CTX_DEVICE_PLAYLIST_SHUFFLE_ARTIST
+        )
+        self.menu_device_playlist_shuffle.add_command(
+            label=CTX_DEVICE_PLAYLIST_SHUFFLE_SPOTIFY
+        )
+        self.menu_device_playlist_ctx.add_cascade(
+            label="Shuffle playlist…", menu=self.menu_device_playlist_shuffle
+        )
+        self.menu_device_playlist_ctx.add_separator()
+        self.menu_device_playlist_ctx.add_command(
+            label=CTX_DEVICE_PLAYLIST_REFRESH
+        )
 
         self.menu_podcast_show_ctx = Menu(self.root, tearoff=0)
         self.menu_podcast_show_ctx.add_command(label=CTX_PODCAST_SYNC_LATEST)
@@ -982,10 +1021,12 @@ class MainWindow:
         self.device_video_tab = Frame(self.device_notebook)
         self.device_audiobooks_tab = Frame(self.device_notebook)
         self.device_podcasts_tab = Frame(self.device_notebook)
+        self.device_playlists_tab = Frame(self.device_notebook)
         self.device_notebook.add(self.device_music_tab, text="Music")
         self.device_notebook.add(self.device_video_tab, text="Video")
         self.device_notebook.add(self.device_audiobooks_tab, text="Audiobooks")
         self.device_notebook.add(self.device_podcasts_tab, text="Podcasts")
+        self.device_notebook.add(self.device_playlists_tab, text="Playlists")
 
         d_tree_frame = Frame(self.device_music_tab)
         d_tree_frame.pack(fill=BOTH, expand=True)
@@ -998,6 +1039,52 @@ class MainWindow:
 
         dp_tree_frame = Frame(self.device_podcasts_tab)
         dp_tree_frame.pack(fill=BOTH, expand=True)
+
+        # Device → Playlists: same chrome as host Playlists (combo + toolbar + flat list).
+        dpl_toolbar = Frame(self.device_playlists_tab)
+        dpl_toolbar.pack(side=TOP, fill=X, padx=4, pady=(4, 2))
+        Label(dpl_toolbar, text="Playlist:").pack(side=LEFT, padx=(2, 4))
+        self.var_device_playlist_choice = StringVar(value="")
+        self.device_playlist_combo = ttk.Combobox(
+            dpl_toolbar,
+            textvariable=self.var_device_playlist_choice,
+            state="disabled",
+            width=36,
+        )
+        self.device_playlist_combo.pack(side=LEFT, padx=2)
+        self.btn_device_playlist_rename = Button(
+            dpl_toolbar, text="Rename…", width=9, state=DISABLED
+        )
+        self.btn_device_playlist_rename.pack(side=LEFT, padx=2)
+        self.btn_device_playlist_new = Button(
+            dpl_toolbar, text="+", width=3, state=DISABLED
+        )
+        self.btn_device_playlist_new.pack(side=LEFT, padx=2)
+        self.btn_device_playlist_delete = Button(
+            dpl_toolbar, text="−", width=3, state=DISABLED
+        )
+        self.btn_device_playlist_delete.pack(side=LEFT, padx=2)
+        self.btn_device_playlist_refresh = Button(
+            dpl_toolbar, text="Refresh from device", state=DISABLED
+        )
+        self.btn_device_playlist_refresh.pack(side=LEFT, padx=(8, 2))
+        self.btn_device_playlist_move_up = Button(
+            dpl_toolbar, text="↑", width=3, state=DISABLED
+        )
+        self.btn_device_playlist_move_up.pack(side=LEFT, padx=(8, 1))
+        self.btn_device_playlist_move_down = Button(
+            dpl_toolbar, text="↓", width=3, state=DISABLED
+        )
+        self.btn_device_playlist_move_down.pack(side=LEFT, padx=1)
+        self.lbl_device_playlist_status = Label(
+            dpl_toolbar, text="", anchor="w"
+        )
+        self.lbl_device_playlist_status.pack(
+            side=LEFT, fill=X, expand=True, padx=6
+        )
+
+        dpl_tree_frame = Frame(self.device_playlists_tab)
+        dpl_tree_frame.pack(side=TOP, fill=BOTH, expand=True)
 
         yscroll = Scrollbar(tree_frame)
         yscroll.pack(side=RIGHT, fill=Y)
@@ -1295,6 +1382,45 @@ class MainWindow:
         self.device_podcasts_tree.column("album", width=140, minwidth=60)
         self.device_podcasts_tree.column(
             "year", width=56, minwidth=40, stretch=False
+        )
+
+        # Device → Playlists tree (flat ordered list; same columns as host Playlists).
+        dpl_yscroll = Scrollbar(dpl_tree_frame)
+        dpl_yscroll.pack(side=RIGHT, fill=Y)
+        dpl_xscroll = Scrollbar(dpl_tree_frame, orient="horizontal")
+        dpl_xscroll.pack(side=BOTTOM, fill=X)
+
+        self.device_playlist_tree = ttk.Treeview(
+            dpl_tree_frame,
+            columns=TREE_COLS,
+            show="tree headings",
+            selectmode="extended",
+            yscrollcommand=dpl_yscroll.set,
+            xscrollcommand=dpl_xscroll.set,
+        )
+        self.device_playlist_tree.pack(side=LEFT, fill=BOTH, expand=True)
+        dpl_yscroll.config(command=self.device_playlist_tree.yview)
+        dpl_xscroll.config(command=self.device_playlist_tree.xview)
+
+        self.device_playlist_tree.heading("#0", text="#", anchor="w")
+        self.device_playlist_tree.heading("title", text="Title", anchor="w")
+        self.device_playlist_tree.heading("artist", text="Artist", anchor="w")
+        self.device_playlist_tree.heading("album", text="Album", anchor="w")
+        self.device_playlist_tree.heading("year", text="Year", anchor="w")
+        self.device_playlist_tree.column(
+            "#0", width=48, minwidth=40, stretch=False
+        )
+        self.device_playlist_tree.column(
+            "title", width=280, minwidth=120, stretch=True
+        )
+        self.device_playlist_tree.column("artist", width=140, minwidth=60)
+        self.device_playlist_tree.column("album", width=140, minwidth=60)
+        self.device_playlist_tree.column(
+            "year", width=56, minwidth=40, stretch=False
+        )
+        self.device_playlist_tree.tag_configure("dead", foreground=_DEAD_TRACK_FG)
+        self.device_playlist_tree.tag_configure(
+            "playing", background=BG_PLAYING, foreground=FG_PLAYING
         )
 
         # Group headers bold (label lives in Title values[0]); transfer tags tint rows.
@@ -2102,6 +2228,144 @@ class MainWindow:
         menu = self.menu_playlist_ctx
         try:
             tree = self.playlist_tree
+            row = tree.identify_row(event.y)
+            if row:
+                current = tree.selection()
+                if row not in current:
+                    tree.selection_set(row)
+                tree.focus(row)
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            try:
+                menu.grab_release()
+            except Exception:
+                pass
+        return "break"
+
+    def set_device_playlist_tab_commands(
+        self,
+        *,
+        on_combo_selected=None,
+        on_new=None,
+        on_delete=None,
+        on_rename=None,
+        on_refresh=None,
+        on_remove_tracks=None,
+        on_move_up=None,
+        on_move_down=None,
+        on_shuffle_artist=None,
+        on_shuffle_spotify=None,
+        on_play_track=None,
+    ) -> None:
+        """Wire Device → Playlists toolbar + context menu."""
+        if on_combo_selected is not None:
+            self.device_playlist_combo.bind(
+                "<<ComboboxSelected>>", lambda _e: on_combo_selected()
+            )
+        if on_new is not None:
+            self.btn_device_playlist_new.configure(command=on_new)
+        if on_delete is not None:
+            self.btn_device_playlist_delete.configure(command=on_delete)
+        if on_rename is not None:
+            self.btn_device_playlist_rename.configure(command=on_rename)
+        if on_refresh is not None:
+            self.btn_device_playlist_refresh.configure(command=on_refresh)
+            self.menu_device_playlist_ctx.entryconfig(
+                CTX_DEVICE_PLAYLIST_REFRESH, command=on_refresh
+            )
+        if on_remove_tracks is not None:
+            self.menu_device_playlist_ctx.entryconfig(
+                CTX_DEVICE_PLAYLIST_REMOVE, command=on_remove_tracks
+            )
+        if on_move_up is not None:
+            self.btn_device_playlist_move_up.configure(command=on_move_up)
+            self.menu_device_playlist_ctx.entryconfig(
+                CTX_DEVICE_PLAYLIST_MOVE_UP, command=on_move_up
+            )
+        if on_move_down is not None:
+            self.btn_device_playlist_move_down.configure(command=on_move_down)
+            self.menu_device_playlist_ctx.entryconfig(
+                CTX_DEVICE_PLAYLIST_MOVE_DOWN, command=on_move_down
+            )
+        if on_move_up is not None or on_move_down is not None:
+            _bind_playlist_reorder_keys(
+                self.device_playlist_tree,
+                on_up=on_move_up,
+                on_down=on_move_down,
+            )
+            try:
+                _bind_playlist_reorder_keys(
+                    self.device_playlists_tab,
+                    on_up=on_move_up,
+                    on_down=on_move_down,
+                )
+            except Exception:
+                pass
+        if on_shuffle_artist is not None:
+            self.menu_device_playlist_shuffle.entryconfig(
+                CTX_DEVICE_PLAYLIST_SHUFFLE_ARTIST, command=on_shuffle_artist
+            )
+        if on_shuffle_spotify is not None:
+            self.menu_device_playlist_shuffle.entryconfig(
+                CTX_DEVICE_PLAYLIST_SHUFFLE_SPOTIFY, command=on_shuffle_spotify
+            )
+        if on_play_track is not None:
+            self.menu_device_playlist_ctx.entryconfig(
+                CTX_DEVICE_PLAYLIST_PLAY_TRACK, command=on_play_track
+            )
+
+    def show_device_playlists_tab(self) -> None:
+        """Select Device → Playlists nested notebook tab."""
+        try:
+            self.media_notebook.select(self.device_tab)
+            self.device_notebook.select(self.device_playlists_tab)
+        except Exception:
+            pass
+
+    def set_device_playlist_combo_values(
+        self,
+        names: list[str],
+        *,
+        selected: str = "",
+        interactive: bool = True,
+    ) -> None:
+        """Refresh Device → Playlists dropdown options and selection."""
+        values = list(names or [])
+        # Always allow Refresh when a session can list playlists.
+        refresh_state = NORMAL if interactive else DISABLED
+        self.btn_device_playlist_refresh.configure(state=refresh_state)
+        self.btn_device_playlist_new.configure(
+            state=NORMAL if interactive else DISABLED
+        )
+        if not values:
+            self.device_playlist_combo.configure(values=[], state="disabled")
+            self.var_device_playlist_choice.set("")
+            self.btn_device_playlist_rename.configure(state=DISABLED)
+            self.btn_device_playlist_delete.configure(state=DISABLED)
+            self.btn_device_playlist_move_up.configure(state=DISABLED)
+            self.btn_device_playlist_move_down.configure(state=DISABLED)
+            return
+        self.device_playlist_combo.configure(
+            values=values, state="readonly" if interactive else "disabled"
+        )
+        pick = selected if selected in values else values[0]
+        self.var_device_playlist_choice.set(pick)
+        btn_state = NORMAL if interactive else DISABLED
+        self.btn_device_playlist_rename.configure(state=btn_state)
+        self.btn_device_playlist_delete.configure(state=btn_state)
+        self.btn_device_playlist_move_up.configure(state=btn_state)
+        self.btn_device_playlist_move_down.configure(state=btn_state)
+
+    def clear_device_playlist_tree(self) -> None:
+        tree = self.device_playlist_tree
+        for iid in tree.get_children(""):
+            tree.delete(iid)
+
+    def popup_device_playlist_context(self, event) -> str | None:
+        """Context menu for Device → Playlists tree."""
+        menu = self.menu_device_playlist_ctx
+        try:
+            tree = self.device_playlist_tree
             row = tree.identify_row(event.y)
             if row:
                 current = tree.selection()

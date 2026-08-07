@@ -15,9 +15,14 @@ from mtpmanager.app.cancellation import JobCancelled
 from mtpmanager.app.device_io_gate import DEFAULT_USB_QUIET_S, DeviceIoGate
 from mtpmanager.infra.device_session_lock import DeviceSessionLock
 from mtpmanager.app.playlist_device import (
+    merge_device_playlists,
+    move_ids_by_indices,
     ordered_guids_from_tracks,
+    playlist_candidates_from_files,
+    playlist_display_name,
     playlists_parent_id,
     push_playlist_to_device,
+    remove_ids_at_indices,
     resolve_track_object_ids,
 )
 from mtpmanager.app.podcast_ops import (
@@ -87,9 +92,16 @@ from mtpmanager.domain.device_media import (
     refs_needing_device_tags,
     resolve_device_tracks_for_display,
     track_meta_is_usable,
+    track_refs_from_files,
     video_folder_label,
 )
-from mtpmanager.domain.models import DeviceInfo, DeviceTrackRef, Track, TrackMetadata
+from mtpmanager.domain.models import (
+    DeviceInfo,
+    DevicePlaylist,
+    DeviceTrackRef,
+    Track,
+    TrackMetadata,
+)
 from mtpmanager.domain.track_id import (
     guid_from_remote_name,
     is_track_guid,
@@ -107,6 +119,7 @@ from mtpmanager.infra.device_index import (
     device_list_is_complete,
     device_serial_key,
     guid_stems_on_device,
+    list_cached_files,
     list_cached_music_refs,
     list_cached_podcast_refs,
     list_cached_video_refs,
@@ -346,6 +359,16 @@ class AppController:
         self._playlist_ids_by_name: dict[str, int] = {}
         self._playlist_track_by_iid: dict[str, Track] = {}
         self._current_playlist_id: int | None = None
+        # Device → Playlists (MTP playlist objects via PyMTP).
+        self._device_playlists: list[DevicePlaylist] = []
+        # Combobox label → playlist (labels unique; may include id disambiguator).
+        self._device_playlist_by_name: dict[str, DevicePlaylist] = {}
+        self._device_playlist_label_by_id: dict[int, str] = {}
+        self._current_device_playlist: DevicePlaylist | None = None
+        self._device_playlist_track_by_iid: dict[str, Track] = {}
+        self._device_playlist_item_ids: list[int] = []
+        self._device_playlist_load_inflight = False
+        self._device_playlist_mutate_inflight = False
         # After track sync of kind=playlist: publish MTP playlist object.
         # {name, guids, host_id} or None.
         self._pending_device_playlist: dict | None = None
@@ -524,6 +547,32 @@ class AppController:
         try:
             w.playlist_tree.bind("<Button-3>", w.popup_playlist_context)
             w.playlist_tree.bind("<Button-2>", w.popup_playlist_context)
+        except Exception:
+            pass
+        w.set_device_playlist_tab_commands(
+            on_combo_selected=self.on_device_playlist_combo_selected,
+            on_new=self.on_device_playlist_new,
+            on_delete=self.on_device_playlist_delete,
+            on_rename=self.on_device_playlist_rename,
+            on_refresh=self.action_refresh_device_playlists,
+            on_remove_tracks=self.action_device_playlist_remove_selected,
+            on_move_up=lambda: self.action_device_playlist_move_selected(-1),
+            on_move_down=lambda: self.action_device_playlist_move_selected(1),
+            on_shuffle_artist=lambda: self.action_device_playlist_shuffle(
+                "artist"
+            ),
+            on_shuffle_spotify=lambda: self.action_device_playlist_shuffle(
+                "spotify"
+            ),
+            on_play_track=self.action_device_playlist_play_selected,
+        )
+        try:
+            w.device_playlist_tree.bind(
+                "<Button-3>", w.popup_device_playlist_context
+            )
+            w.device_playlist_tree.bind(
+                "<Button-2>", w.popup_device_playlist_context
+            )
         except Exception:
             pass
         # Load playlist dropdown after index is available (also on restore).
@@ -2151,6 +2200,14 @@ class AppController:
                 )
             except Exception:
                 pass
+            try:
+                self.win.var_device_playlist_choice.set(result.name or "")
+            except Exception:
+                pass
+            self.win.root.after(
+                100,
+                lambda: self._refresh_device_playlists_tab(keep_selection=True),
+            )
 
         def on_error(exc: BaseException) -> None:
             try:
@@ -3907,6 +3964,785 @@ class AppController:
     def _clear_pending_device_playlist(self) -> None:
         self._pending_device_playlist = None
 
+    # ------------------------------------------------------------------
+    # Device → Playlists (on-device MTP playlist objects)
+    # ------------------------------------------------------------------
+
+    def _device_playlists_ready(self) -> tuple[bool, str]:
+        """Return (ok, user_message) for Device → Playlists operations."""
+        if self.win.active_mode() != "experimental":
+            return (
+                False,
+                "On-device playlists require Experimental mode (PyMTP).\n\n"
+                "Uncheck Config → Stable Mode, Connect, then try again.",
+            )
+        if not self.device.is_connected():
+            return (
+                False,
+                "Connect the device first (Device → Connect).",
+            )
+        if not callable(getattr(self.device, "list_playlists", None)):
+            return (
+                False,
+                "This transport cannot list on-device playlists.",
+            )
+        return True, ""
+
+    def _clear_device_playlists_ui(self, *, status: str = "") -> None:
+        self._device_playlists = []
+        self._device_playlist_by_name = {}
+        self._device_playlist_label_by_id = {}
+        self._current_device_playlist = None
+        self._device_playlist_track_by_iid.clear()
+        self._device_playlist_item_ids = []
+        try:
+            self.win.clear_device_playlist_tree()
+            self.win.set_device_playlist_combo_values(
+                [], selected="", interactive=False
+            )
+            self.win.lbl_device_playlist_status.configure(text=status or "")
+        except Exception:
+            pass
+
+    def action_refresh_device_playlists(self) -> None:
+        """Reload on-device playlists from the player (PyMTP get_playlists)."""
+        ok, msg = self._device_playlists_ready()
+        if not ok:
+            messagebox.showinfo("Device Playlists", msg)
+            self._clear_device_playlists_ui(status="Not available")
+            return
+        self._refresh_device_playlists_tab(keep_selection=True)
+
+    def _refresh_device_playlists_tab(self, *, keep_selection: bool = True) -> None:
+        """Background list_playlists → combo + current tree."""
+        ok, msg = self._device_playlists_ready()
+        if not ok:
+            self._clear_device_playlists_ui(
+                status=msg.split("\n", 1)[0] if msg else "Not available"
+            )
+            return
+        if self._device_playlist_load_inflight or self._device_playlist_mutate_inflight:
+            return
+        if self._transfer_busy:
+            try:
+                self.win.lbl_device_playlist_status.configure(
+                    text="Wait for transfer to finish…"
+                )
+            except Exception:
+                pass
+            return
+
+        prev_name = ""
+        if keep_selection:
+            prev_name = (
+                self.win.var_device_playlist_choice.get() or ""
+            ).strip()
+
+        if not self._device_io.try_acquire("device-playlists-list"):
+            try:
+                self.win.lbl_device_playlist_status.configure(
+                    text="Device busy — try Refresh shortly"
+                )
+            except Exception:
+                pass
+            return
+
+        self._device_playlist_load_inflight = True
+        try:
+            self.win.lbl_device_playlist_status.configure(
+                text="Loading playlists…"
+            )
+            self.win.set_progress_status("Listing on-device playlists…")
+        except Exception:
+            pass
+
+        serial = self._device_serial or ""
+        parent = playlists_parent_id(self._folder_layout)
+
+        def work():
+            # ZEN stores playlists as *.zpl under My Playlists. Discover those
+            # from the device_index (filled by list_files seed) and hydrate via
+            # Get_Playlist — Get_Playlist_List alone often returns only one.
+            candidates = []
+            names: dict[int, str] = {}
+            if serial:
+                try:
+                    files = list_cached_files(serial)
+                    cands = playlist_candidates_from_files(
+                        files,
+                        playlist_parent_ids={int(parent)} if parent else None,
+                    )
+                    for e in cands:
+                        oid = int(e.item_id or 0)
+                        if oid > 0:
+                            candidates.append(oid)
+                            names[oid] = str(e.name or "")
+                except Exception:
+                    logger.debug(
+                        "playlist candidates from device_index failed",
+                        exc_info=True,
+                    )
+            lister = getattr(self.device, "list_playlists_complete", None)
+            if callable(lister):
+                return list(
+                    lister(
+                        candidate_ids=candidates,
+                        candidate_names=names,
+                    )
+                    or []
+                )
+            base = list(self.device.list_playlists() or [])
+            extras: list[DevicePlaylist] = []
+            known = {int(p.playlist_id) for p in base}
+            getter = getattr(self.device, "get_playlist", None)
+            if callable(getter):
+                for oid in candidates:
+                    if oid in known:
+                        continue
+                    try:
+                        extras.append(getter(oid))
+                    except Exception:
+                        extras.append(
+                            DevicePlaylist(
+                                playlist_id=oid,
+                                name=names.get(oid) or f"Playlist {oid}",
+                                track_ids=(),
+                            )
+                        )
+            return merge_device_playlists(base, extras)
+
+        def on_done(result) -> None:
+            self._device_playlist_load_inflight = False
+            self._device_io.release(
+                reason="device-playlists-list", quiet_s=_DEVICE_USB_COOLDOWN_S
+            )
+            try:
+                self.win.set_progress_status("")
+            except Exception:
+                pass
+            playlists: list[DevicePlaylist] = []
+            if isinstance(result, list):
+                playlists = [p for p in result if isinstance(p, DevicePlaylist)]
+            self._apply_device_playlist_list(
+                playlists, prefer_name=prev_name
+            )
+
+        def on_error(exc: BaseException) -> None:
+            self._device_playlist_load_inflight = False
+            self._device_io.release(
+                reason="device-playlists-list", quiet_s=_DEVICE_USB_COOLDOWN_S
+            )
+            try:
+                self.win.set_progress_status("")
+            except Exception:
+                pass
+            logger.warning("list_playlists failed: %s", exc, exc_info=True)
+            self._clear_device_playlists_ui(status="List failed")
+            messagebox.showerror(
+                "Device Playlists",
+                f"Could not list on-device playlists:\n\n{exc}",
+            )
+
+        self._bg.submit(
+            work, on_done=on_done, on_error=on_error, name="device-playlists-list"
+        )
+
+    def _device_playlist_labels(
+        self, playlists: list[DevicePlaylist]
+    ) -> tuple[list[str], dict[str, DevicePlaylist], dict[int, str]]:
+        """Build unique combobox labels (disambiguate duplicate names by id)."""
+        base_counts: dict[str, int] = {}
+        bases: list[tuple[DevicePlaylist, str]] = []
+        for pl in playlists:
+            base = playlist_display_name(pl.name or "", int(pl.playlist_id or 0))
+            bases.append((pl, base))
+            base_counts[base.casefold()] = base_counts.get(base.casefold(), 0) + 1
+        by_name: dict[str, DevicePlaylist] = {}
+        by_id: dict[int, str] = {}
+        names: list[str] = []
+        for pl, base in bases:
+            if base_counts.get(base.casefold(), 0) > 1:
+                label = f"{base} [{pl.playlist_id}]"
+            else:
+                label = base
+            # Ensure absolute uniqueness even if ids collide in display.
+            if label in by_name:
+                label = f"{base} [{pl.playlist_id}]"
+            by_name[label] = pl
+            by_id[int(pl.playlist_id)] = label
+            names.append(label)
+        return names, by_name, by_id
+
+    def _apply_device_playlist_list(
+        self,
+        playlists: list[DevicePlaylist],
+        *,
+        prefer_name: str = "",
+    ) -> None:
+        ordered = sorted(
+            playlists,
+            key=lambda p: (
+                playlist_display_name(p.name or "", int(p.playlist_id or 0)).casefold(),
+                int(p.playlist_id or 0),
+            ),
+        )
+        self._device_playlists = ordered
+        names, by_name, by_id = self._device_playlist_labels(ordered)
+        self._device_playlist_by_name = by_name
+        self._device_playlist_label_by_id = by_id
+        selected = prefer_name if prefer_name in by_name else ""
+        if not selected and prefer_name:
+            # Prefer by display name match (before disambiguator) or raw name.
+            want = prefer_name.casefold()
+            for label, pl in by_name.items():
+                if label.casefold() == want:
+                    selected = label
+                    break
+                if playlist_display_name(pl.name or "", pl.playlist_id).casefold() == want:
+                    selected = label
+                    break
+        if not selected:
+            selected = names[0] if names else ""
+        interactive = self.device.is_connected() and (
+            self.win.active_mode() == "experimental"
+        )
+        self.win.set_device_playlist_combo_values(
+            names, selected=selected, interactive=interactive
+        )
+        if selected:
+            self._load_device_playlist_by_name(selected)
+        else:
+            self._current_device_playlist = None
+            self._device_playlist_item_ids = []
+            self._device_playlist_track_by_iid.clear()
+            self.win.clear_device_playlist_tree()
+            try:
+                self.win.lbl_device_playlist_status.configure(
+                    text="No playlists on device"
+                )
+            except Exception:
+                pass
+
+    def on_device_playlist_combo_selected(self) -> None:
+        name = (self.win.var_device_playlist_choice.get() or "").strip()
+        if name:
+            self._load_device_playlist_by_name(name)
+
+    def _load_device_playlist_by_name(self, name: str) -> None:
+        pl = self._device_playlist_by_name.get(name)
+        if pl is None:
+            return
+        self._current_device_playlist = pl
+        self._device_playlist_item_ids = [
+            int(x) for x in (pl.track_ids or ()) if int(x) > 0
+        ]
+        tracks = self._tracks_for_device_playlist_ids(
+            self._device_playlist_item_ids
+        )
+        self._populate_device_playlist_tree(tracks)
+        n = len(self._device_playlist_item_ids)
+        dead = sum(
+            1
+            for t in tracks
+            if t.meta and (t.meta.title or "").startswith("Missing object ")
+        )
+        try:
+            extra = f" · {dead} missing" if dead else ""
+            self.win.lbl_device_playlist_status.configure(
+                text=f"{n} track{'s' if n != 1 else ''}{extra}"
+            )
+        except Exception:
+            pass
+
+    def _refs_by_item_id_for_playlists(self) -> dict[int, DeviceTrackRef]:
+        """item_id → ref from live device trees + full device_index cache."""
+        by_id = self._device_refs_by_item_id()
+        serial = self._device_serial
+        if not serial:
+            return by_id
+        try:
+            files = list_cached_files(serial)
+            for ref in track_refs_from_files(files):
+                oid = int(ref.item_id or 0)
+                if oid > 0 and oid not in by_id:
+                    by_id[oid] = ref
+        except Exception:
+            logger.debug(
+                "device playlist: list_cached_files failed", exc_info=True
+            )
+        return by_id
+
+    def _tracks_for_device_playlist_ids(
+        self, item_ids: list[int]
+    ) -> list[Track]:
+        """Ordered Tracks for playlist membership (host tags when possible)."""
+        by_id = self._refs_by_item_id_for_playlists()
+        refs: list[DeviceTrackRef] = []
+        for oid in item_ids:
+            ref = by_id.get(int(oid))
+            if ref is None:
+                refs.append(
+                    DeviceTrackRef(
+                        item_id=int(oid),
+                        name=f"id={oid}",
+                        title=f"Missing object {oid}",
+                        artist="Unknown Artist",
+                        album="Unknown Album",
+                    )
+                )
+            else:
+                refs.append(ref)
+        by_guid = self._host_tracks_by_guid_for_refs(refs)
+        refs = enrich_refs_from_host(refs, by_guid)
+        # Preserve playlist order (resolve_device_tracks_for_display keeps input order).
+        return resolve_device_tracks_for_display(refs, by_guid)
+
+    def _populate_device_playlist_tree(
+        self,
+        tracks: list[Track],
+        *,
+        select_item_ids: list[int] | None = None,
+    ) -> None:
+        self.win.clear_device_playlist_tree()
+        self._device_playlist_track_by_iid.clear()
+        tree = self.win.device_playlist_tree
+        want = {int(x) for x in (select_item_ids or []) if int(x) > 0}
+        select_iids: list[str] = []
+        for i, track in enumerate(tracks, start=1):
+            num, title, artist, album, year = iter_track_cells(track)
+            oid = self._item_id_from_device_track(track) or 0
+            iid = f"dpl:{i}:{oid}"
+            tags = ["track"]
+            host = self._host_path_for_device_track(track)
+            if not host and (
+                (title or "").startswith("Missing object ")
+                or not oid
+            ):
+                tags.append("dead")
+            tree.insert(
+                "",
+                "end",
+                iid=iid,
+                text=str(i),
+                values=(title, artist, album, year),
+                tags=tuple(tags),
+            )
+            self._device_playlist_track_by_iid[iid] = track
+            if oid and oid in want:
+                select_iids.append(iid)
+        if select_iids:
+            try:
+                tree.selection_set(select_iids)
+                tree.focus(select_iids[0])
+                tree.see(select_iids[0])
+            except Exception:
+                pass
+
+    def _selected_device_playlist_indices(self) -> list[int]:
+        """0-based indices of selected rows in the current device playlist."""
+        try:
+            sel = list(self.win.device_playlist_tree.selection())
+        except Exception:
+            sel = []
+        indices: list[int] = []
+        for iid in sel:
+            # iid = dpl:<1-based index>:<item_id>
+            try:
+                parts = str(iid).split(":")
+                if len(parts) >= 2:
+                    indices.append(int(parts[1]) - 1)
+            except (TypeError, ValueError):
+                continue
+        return indices
+
+    def _run_device_playlist_mutation(
+        self,
+        *,
+        name: str,
+        work: Callable[[], object],
+        on_success: Callable[[object], None] | None = None,
+        status: str = "Updating playlist…",
+        error_title: str = "Device Playlists",
+    ) -> None:
+        ok, msg = self._device_playlists_ready()
+        if not ok:
+            messagebox.showinfo(error_title, msg)
+            return
+        if self._device_playlist_mutate_inflight or self._device_playlist_load_inflight:
+            messagebox.showinfo(
+                error_title, "Another playlist operation is already running."
+            )
+            return
+        if self._transfer_busy:
+            messagebox.showinfo(
+                error_title, "Wait for the current transfer to finish."
+            )
+            return
+        if not self._device_io.try_acquire(name):
+            messagebox.showinfo(
+                error_title,
+                f"Device is busy ({self._device_io.holder or 'unknown'}).",
+            )
+            return
+
+        self._device_playlist_mutate_inflight = True
+        try:
+            self.win.lbl_device_playlist_status.configure(text=status)
+            self.win.set_progress_status(status)
+        except Exception:
+            pass
+
+        def on_done(result) -> None:
+            self._device_playlist_mutate_inflight = False
+            self._device_io.release(reason=name, quiet_s=_DEVICE_USB_COOLDOWN_S)
+            try:
+                self.win.set_progress_status("")
+            except Exception:
+                pass
+            if on_success is not None:
+                try:
+                    on_success(result)
+                except Exception:
+                    logger.exception("device playlist mutation success handler")
+
+        def on_error(exc: BaseException) -> None:
+            self._device_playlist_mutate_inflight = False
+            self._device_io.release(reason=name, quiet_s=_DEVICE_USB_COOLDOWN_S)
+            try:
+                self.win.set_progress_status("")
+            except Exception:
+                pass
+            logger.warning("device playlist %s failed: %s", name, exc, exc_info=True)
+            messagebox.showerror(error_title, f"Playlist operation failed:\n\n{exc}")
+            # Reload from device to resync UI.
+            self._refresh_device_playlists_tab(keep_selection=True)
+
+        self._bg.submit(work, on_done=on_done, on_error=on_error, name=name)
+
+    def _write_current_device_playlist_tracks(
+        self,
+        new_ids: list[int],
+        *,
+        new_name: str | None = None,
+        select_item_ids: list[int] | None = None,
+        status_suffix: str = "",
+    ) -> None:
+        """Push updated track list (and optional rename) for the current playlist."""
+        pl = self._current_device_playlist
+        if pl is None or int(pl.playlist_id or 0) <= 0:
+            messagebox.showinfo("Device Playlists", "Select a playlist first.")
+            return
+        clean_name = (new_name if new_name is not None else pl.name or "").strip()
+        if not clean_name:
+            messagebox.showinfo("Device Playlists", "Playlist name is required.")
+            return
+        parent = int(pl.parent_id or 0) or playlists_parent_id(self._folder_layout)
+        storage = int(pl.storage_id or 0) or DEFAULT_STORAGE_ID
+        pid = int(pl.playlist_id)
+        ids = [int(x) for x in new_ids if int(x) > 0]
+
+        def work():
+            return self.device.update_playlist(
+                pid,
+                clean_name,
+                ids,
+                parent_id=parent,
+                storage_id=storage,
+            )
+
+        def on_success(_result) -> None:
+            updated = DevicePlaylist(
+                playlist_id=pid,
+                name=clean_name,
+                parent_id=parent,
+                storage_id=storage,
+                track_ids=tuple(ids),
+            )
+            for i, p in enumerate(self._device_playlists):
+                if int(p.playlist_id) == pid:
+                    self._device_playlists[i] = updated
+                    break
+            else:
+                self._device_playlists.append(updated)
+            label = playlist_display_name(clean_name, pid)
+            self._apply_device_playlist_list(
+                self._device_playlists, prefer_name=label
+            )
+            # Re-select tracks after tree rebuild from _apply.
+            if select_item_ids:
+                tracks = self._tracks_for_device_playlist_ids(ids)
+                self._populate_device_playlist_tree(
+                    tracks, select_item_ids=select_item_ids
+                )
+            n = len(ids)
+            suffix = f" · {status_suffix}" if status_suffix else ""
+            try:
+                self.win.lbl_device_playlist_status.configure(
+                    text=f"{n} track{'s' if n != 1 else ''}{suffix}"
+                )
+            except Exception:
+                pass
+
+        self._run_device_playlist_mutation(
+            name="device-playlist-update",
+            work=work,
+            on_success=on_success,
+            status=f"Updating “{clean_name}”…",
+        )
+
+    def on_device_playlist_new(self) -> None:
+        ok, msg = self._device_playlists_ready()
+        if not ok:
+            messagebox.showinfo("Device Playlists", msg)
+            return
+        name = ask_text(
+            self.win.root,
+            title="New Device Playlist",
+            prompt="Playlist name:",
+        )
+        if not name:
+            return
+        clean = name.strip()
+        if not clean:
+            return
+        if clean.casefold() in {
+            n.casefold() for n in self._device_playlist_by_name
+        }:
+            messagebox.showerror(
+                "Device Playlists",
+                f"A playlist named “{clean}” already exists on the device.",
+            )
+            return
+        parent = playlists_parent_id(self._folder_layout)
+        storage = DEFAULT_STORAGE_ID
+
+        def work():
+            return int(
+                self.device.create_playlist(
+                    clean,
+                    [],
+                    parent_id=parent,
+                    storage_id=storage,
+                )
+            )
+
+        def on_success(result) -> None:
+            new_id = int(result or 0)
+            pl = DevicePlaylist(
+                playlist_id=new_id,
+                name=clean,
+                parent_id=parent,
+                storage_id=storage,
+                track_ids=(),
+            )
+            self._device_playlists.append(pl)
+            self._apply_device_playlist_list(
+                self._device_playlists, prefer_name=clean
+            )
+
+        self._run_device_playlist_mutation(
+            name="device-playlist-create",
+            work=work,
+            on_success=on_success,
+            status=f"Creating “{clean}”…",
+        )
+
+    def on_device_playlist_delete(self) -> None:
+        pl = self._current_device_playlist
+        if pl is None:
+            messagebox.showinfo("Device Playlists", "Select a playlist first.")
+            return
+        name = (pl.name or "").strip() or f"id={pl.playlist_id}"
+        if not messagebox.askyesno(
+            "Delete Device Playlist",
+            f"Delete on-device playlist “{name}”?\n\n"
+            "This removes the playlist object only — tracks stay on the player.",
+        ):
+            return
+        pid = int(pl.playlist_id)
+
+        def work():
+            self.device.delete_object(pid)
+            return pid
+
+        def on_success(_result) -> None:
+            self._device_playlists = [
+                p
+                for p in self._device_playlists
+                if int(p.playlist_id) != pid
+            ]
+            self._apply_device_playlist_list(
+                self._device_playlists, prefer_name=""
+            )
+
+        self._run_device_playlist_mutation(
+            name="device-playlist-delete",
+            work=work,
+            on_success=on_success,
+            status=f"Deleting “{name}”…",
+        )
+
+    def on_device_playlist_rename(self) -> None:
+        pl = self._current_device_playlist
+        if pl is None:
+            return
+        name = (pl.name or "").strip()
+        new_name = ask_text(
+            self.win.root,
+            title="Rename Device Playlist",
+            prompt="New name:",
+            initialvalue=name,
+        )
+        if not new_name or new_name.strip() == name:
+            return
+        clean = new_name.strip()
+        if clean.casefold() in {
+            n.casefold()
+            for n in self._device_playlist_by_name
+            if n.casefold() != name.casefold()
+        }:
+            messagebox.showerror(
+                "Device Playlists",
+                f"A playlist named “{clean}” already exists on the device.",
+            )
+            return
+        self._write_current_device_playlist_tracks(
+            list(self._device_playlist_item_ids),
+            new_name=clean,
+            status_suffix="renamed",
+        )
+
+    def action_device_playlist_remove_selected(self) -> None:
+        pl = self._current_device_playlist
+        if pl is None:
+            return
+        indices = self._selected_device_playlist_indices()
+        if not indices:
+            messagebox.showinfo(
+                "Device Playlists", "Select track(s) to remove."
+            )
+            return
+        new_ids = remove_ids_at_indices(self._device_playlist_item_ids, indices)
+        self._write_current_device_playlist_tracks(
+            new_ids, status_suffix="tracks removed"
+        )
+
+    def action_device_playlist_move_selected(self, delta: int) -> None:
+        pl = self._current_device_playlist
+        if pl is None:
+            return
+        indices = self._selected_device_playlist_indices()
+        if not indices:
+            messagebox.showinfo(
+                "Device Playlists",
+                "Select track(s) to reorder.",
+            )
+            return
+        old_ids = list(self._device_playlist_item_ids)
+        new_ids = move_ids_by_indices(old_ids, indices, delta=int(delta))
+        if new_ids == old_ids:
+            return
+        # Keep selection on the moved item ids (by value at former indices).
+        moved = [old_ids[i] for i in indices if 0 <= i < len(old_ids)]
+        self._write_current_device_playlist_tracks(
+            new_ids,
+            select_item_ids=moved,
+            status_suffix="order saved on device",
+        )
+
+    def action_device_playlist_shuffle(self, algorithm: str) -> None:
+        pl = self._current_device_playlist
+        if pl is None:
+            messagebox.showinfo("Device Playlists", "Select a playlist first.")
+            return
+        ids = list(self._device_playlist_item_ids)
+        if len(ids) < 2:
+            messagebox.showinfo(
+                "Device Playlists", "Need at least two tracks to shuffle."
+            )
+            return
+        tracks = self._tracks_for_device_playlist_ids(ids)
+        if len(tracks) < 2:
+            return
+        # Seed from focused/selected row when possible.
+        seed: Track | None = None
+        tree = self.win.device_playlist_tree
+        try:
+            focus = tree.focus()
+        except Exception:
+            focus = ""
+        if focus:
+            seed = self._device_playlist_track_by_iid.get(focus)
+        if seed is None:
+            try:
+                sel = list(tree.selection())
+            except Exception:
+                sel = []
+            for iid in sel:
+                seed = self._device_playlist_track_by_iid.get(iid)
+                if seed is not None:
+                    break
+        if seed is None:
+            seed = tracks[0]
+        algo = (algorithm or "").strip().lower()
+        rng = rng_from_seed_track(seed, extra=algo)
+        if algo in ("artist", "merge", "merge_shuffle", "merge_artist"):
+            shuffled = merge_shuffle(tracks, rng=rng)
+            label = "artist"
+        elif algo in ("spotify", "spotify_shuffle", "dither"):
+            shuffled = spotify_shuffle(tracks, rng=rng)
+            label = "spotify"
+        else:
+            messagebox.showerror(
+                "Device Playlists", f"Unknown shuffle algorithm: {algorithm!r}"
+            )
+            return
+        new_ids: list[int] = []
+        for t in shuffled:
+            oid = self._item_id_from_device_track(t)
+            if oid:
+                new_ids.append(oid)
+        if not new_ids:
+            return
+        seed_oid = self._item_id_from_device_track(seed)
+        self._write_current_device_playlist_tracks(
+            new_ids,
+            select_item_ids=[seed_oid] if seed_oid else None,
+            status_suffix=f"{label} shuffle saved on device",
+        )
+
+    def action_device_playlist_play_selected(self) -> None:
+        """Play host copies of selected device-playlist rows when available."""
+        try:
+            sel = list(self.win.device_playlist_tree.selection())
+        except Exception:
+            sel = []
+        tracks: list[Track] = []
+        for iid in sel:
+            t = self._device_playlist_track_by_iid.get(iid)
+            if t is not None:
+                tracks.append(t)
+        if not tracks and self._current_device_playlist is not None:
+            tracks = self._tracks_for_device_playlist_ids(
+                list(self._device_playlist_item_ids)
+            )
+        playable: list[Track] = []
+        for t in tracks:
+            host = self._host_path_for_device_track(t)
+            if host and os.path.isfile(host):
+                playable.append(
+                    Track(path=host, meta=t.meta, guid=t.guid or "")
+                )
+        if not playable:
+            messagebox.showinfo(
+                "Playback",
+                "No host library copies found for the selected tracks.\n\n"
+                "Playback uses files on this computer (matched by GUID). "
+                "Pull tracks from the device or keep the library path scanned.",
+            )
+            return
+        self._start_playback_queue(self._audio_tracks_only(playable))
+
     def _publish_pending_device_playlist(self) -> None:
         """After a successful playlist track sync, create/update MTP playlist."""
         pending = self._pending_device_playlist
@@ -3986,6 +4822,17 @@ class AppController:
                 result.playlist_id,
                 result.created,
                 result.resolved,
+            )
+            # Refresh Device → Playlists so the new/updated object appears.
+            prefer = str(getattr(result, "name", "") or "")
+            if prefer:
+                try:
+                    self.win.var_device_playlist_choice.set(prefer)
+                except Exception:
+                    pass
+            self.win.root.after(
+                100,
+                lambda: self._refresh_device_playlists_tab(keep_selection=True),
             )
 
         def on_error(exc: BaseException) -> None:
@@ -4966,6 +5813,7 @@ class AppController:
         self._device_audiobook_refs = []
         self._device_podcast_refs = []
         self._device_pending_album_art = []
+        self._clear_device_playlists_ui()
 
     # Back-compat alias used by older call sites / mental model.
     def _clear_device_music_tree(self) -> None:
@@ -6395,6 +7243,8 @@ class AppController:
             )
             # Populate Device media trees (GUID join only; tags on demand).
             self._refresh_device_music_tree(enrich_missing_tags=False)
+            # On-device playlist objects (PyMTP list) after index is warm.
+            self.win.root.after(200, self._refresh_device_playlists_tab)
 
         def on_error(exc: BaseException) -> None:
             self._device_index_seed_inflight = False

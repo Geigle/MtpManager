@@ -10,9 +10,14 @@ from unittest import mock
 from mtpmanager.app.playlist_device import (
     DevicePlaylistPushResult,
     find_device_playlist_by_name,
+    merge_device_playlists,
+    move_ids_by_indices,
     ordered_guids_from_tracks,
+    playlist_candidates_from_files,
+    playlist_display_name,
     playlists_parent_id,
     push_playlist_to_device,
+    remove_ids_at_indices,
     resolve_track_object_ids,
 )
 from mtpmanager.domain.device_folders import (
@@ -20,7 +25,7 @@ from mtpmanager.domain.device_folders import (
     FolderRole,
     legacy_zen_vision_m_layout,
 )
-from mtpmanager.domain.models import DevicePlaylist, Track, TrackMetadata
+from mtpmanager.domain.models import DevicePlaylist, FileEntry, Track, TrackMetadata
 from mtpmanager.infra.device_index import item_ids_for_guids, record_send
 from mtpmanager.infra.remote_naming import DEFAULT_PLAYLIST_FOLDER_ID
 
@@ -83,6 +88,56 @@ class PlaylistDeviceHelpersTests(unittest.TestCase):
         self.assertIsNotNone(hit)
         assert hit is not None
         self.assertEqual(hit.playlist_id, 1)
+
+    def test_move_ids_by_indices(self) -> None:
+        ids = [10, 20, 30, 40]
+        self.assertEqual(move_ids_by_indices(ids, [1], delta=-1), [20, 10, 30, 40])
+        self.assertEqual(move_ids_by_indices(ids, [1], delta=1), [10, 30, 20, 40])
+        # Boundary: cannot move first row up.
+        self.assertEqual(move_ids_by_indices(ids, [0], delta=-1), ids)
+        # Multi-select move down.
+        self.assertEqual(
+            move_ids_by_indices(ids, [1, 2], delta=1), [10, 40, 20, 30]
+        )
+
+    def test_remove_ids_at_indices(self) -> None:
+        ids = [10, 20, 30, 40]
+        self.assertEqual(remove_ids_at_indices(ids, [1, 3]), [10, 30])
+        self.assertEqual(remove_ids_at_indices(ids, []), ids)
+
+    def test_playlist_display_name_strips_zpl(self) -> None:
+        self.assertEqual(playlist_display_name("Rock.zpl", 1), "Rock")
+        self.assertEqual(playlist_display_name("Lullabies", 2), "Lullabies")
+        self.assertEqual(playlist_display_name("", 99), "Playlist 99")
+
+    def test_playlist_candidates_from_files(self) -> None:
+        files = [
+            FileEntry(item_id=1, name="Rock.zpl", parent_id=104, filetype=43),
+            FileEntry(item_id=2, name="a.mp3", parent_id=100, filetype=2),
+            FileEntry(item_id=3, name="Emo.zpl", parent_id=104, filetype=43),
+            FileEntry(item_id=4, name="not-a-pl.txt", parent_id=104, filetype=44),
+            FileEntry(item_id=5, name="abstract.pla", parent_id=0, filetype=0),
+        ]
+        cands = playlist_candidates_from_files(
+            files, playlist_parent_ids={104}
+        )
+        ids = [int(e.item_id) for e in cands]
+        # .zpl under My Playlists + filetype playlist + .pla extension.
+        # not-a-pl.txt is under 104 so also included (folder contents heuristic).
+        self.assertIn(1, ids)
+        self.assertIn(3, ids)
+        self.assertIn(5, ids)
+        self.assertNotIn(2, ids)
+
+    def test_merge_device_playlists(self) -> None:
+        a = DevicePlaylist(playlist_id=1, name="A", track_ids=(1,))
+        b = DevicePlaylist(playlist_id=2, name="B", track_ids=(2,))
+        a2 = DevicePlaylist(playlist_id=1, name="A-dup", track_ids=(9,))
+        merged = merge_device_playlists([a], [a2, b])
+        self.assertEqual(len(merged), 2)
+        by = {p.playlist_id: p for p in merged}
+        self.assertEqual(by[1].name, "A")  # primary wins
+        self.assertEqual(by[2].name, "B")
 
     def test_playlists_parent_from_layout(self) -> None:
         layout = DeviceFolderLayout(

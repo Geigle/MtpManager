@@ -11,13 +11,17 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from mtpmanager.domain.device_folders import FolderRole
-from mtpmanager.domain.models import DevicePlaylist, Track
+from mtpmanager.domain.models import DevicePlaylist, FileEntry, Track
 from mtpmanager.domain.track_id import is_track_guid
 from mtpmanager.infra.device_index import item_ids_for_guids
 from mtpmanager.infra.remote_naming import (
     DEFAULT_PLAYLIST_FOLDER_ID,
     DEFAULT_STORAGE_ID,
 )
+
+# libmtp 1.1.23 / pymtp_wrapper FILETYPE map (not stock pymtp's older numbers).
+_LIBMTP_FILETYPE_PLAYLIST = 43
+_PLAYLIST_NAME_SUFFIXES = (".zpl", ".pla", ".m3u", ".m3u8")
 
 logger = logging.getLogger(__name__)
 
@@ -183,3 +187,133 @@ def playlists_parent_id(folder_layout) -> int:
         except Exception:
             pass
     return DEFAULT_PLAYLIST_FOLDER_ID
+
+
+def move_ids_by_indices(
+    track_ids: Sequence[int],
+    indices: Sequence[int],
+    *,
+    delta: int,
+) -> list[int]:
+    """Reorder *track_ids* by moving positions in *indices* up/down by one step.
+
+    *indices* are 0-based positions in the current list (duplicates ignored).
+    *delta* < 0 moves earlier; *delta* > 0 moves later. Boundary moves are no-ops
+    for the whole selection (same as host M3U reorder).
+    """
+    items = [int(x) for x in track_ids]
+    if not items or not indices or not delta:
+        return items
+    selected = sorted({int(i) for i in indices if 0 <= int(i) < len(items)})
+    if not selected:
+        return items
+    step = -1 if delta < 0 else 1
+    if step < 0:
+        if min(selected) == 0:
+            return items
+        for i in selected:
+            j = i - 1
+            items[i], items[j] = items[j], items[i]
+    else:
+        if max(selected) >= len(items) - 1:
+            return items
+        for i in sorted(selected, reverse=True):
+            j = i + 1
+            items[i], items[j] = items[j], items[i]
+    return items
+
+
+def remove_ids_at_indices(
+    track_ids: Sequence[int],
+    indices: Sequence[int],
+) -> list[int]:
+    """Drop *track_ids* entries at the given 0-based positions."""
+    drop = {int(i) for i in indices if int(i) >= 0}
+    if not drop:
+        return [int(x) for x in track_ids]
+    return [int(x) for i, x in enumerate(track_ids) if i not in drop]
+
+
+def playlist_display_name(name: str, playlist_id: int = 0) -> str:
+    """Human label for a device playlist (strip Creative ``.zpl`` suffix)."""
+    raw = (name or "").strip()
+    if not raw:
+        return f"Playlist {playlist_id}" if playlist_id else "Playlist"
+    lower = raw.casefold()
+    for suf in _PLAYLIST_NAME_SUFFIXES:
+        if lower.endswith(suf):
+            raw = raw[: -len(suf)].strip()
+            break
+    return raw or (f"Playlist {playlist_id}" if playlist_id else "Playlist")
+
+
+def playlist_candidates_from_files(
+    files: Sequence[FileEntry],
+    *,
+    playlist_parent_ids: set[int] | frozenset[int] | None = None,
+    playlist_filetype: int = _LIBMTP_FILETYPE_PLAYLIST,
+) -> list[FileEntry]:
+    """Find on-device playlist objects from a file listing / device_index cache.
+
+    Creative ZEN Vision:M stores playlists as ``*.zpl`` under My Playlists
+    (parent 104). ``LIBMTP_Get_Playlist_List`` only returns objects whose PTP
+    ObjectFormat is AbstractAudioVideoPlaylist *and* that still live in the
+    session object cache — on this device that often yields a single hit even
+    when many ``.zpl`` files are present. File listing + per-id
+    ``Get_Playlist`` recovers the rest.
+    """
+    parents = {
+        int(x)
+        for x in (playlist_parent_ids or {DEFAULT_PLAYLIST_FOLDER_ID})
+        if int(x) > 0
+    }
+    out: list[FileEntry] = []
+    seen: set[int] = set()
+    for entry in files or ():
+        oid = int(getattr(entry, "item_id", 0) or 0)
+        if oid <= 0 or oid in seen:
+            continue
+        name = str(getattr(entry, "name", "") or "").strip()
+        ft = int(getattr(entry, "filetype", 0) or 0)
+        parent = int(getattr(entry, "parent_id", 0) or 0)
+        lower = name.casefold()
+        is_playlist = False
+        if ft == int(playlist_filetype):
+            is_playlist = True
+        elif any(lower.endswith(suf) for suf in _PLAYLIST_NAME_SUFFIXES):
+            is_playlist = True
+        elif parents and parent in parents and name:
+            # Non-folder objects living in My Playlists.
+            is_playlist = True
+        if not is_playlist:
+            continue
+        seen.add(oid)
+        out.append(entry)
+    out.sort(
+        key=lambda e: (
+            playlist_display_name(str(e.name or ""), int(e.item_id or 0)).casefold(),
+            int(e.item_id or 0),
+        )
+    )
+    return out
+
+
+def merge_device_playlists(
+    primary: Sequence[DevicePlaylist],
+    extras: Sequence[DevicePlaylist],
+) -> list[DevicePlaylist]:
+    """Union by playlist_id; *primary* wins on conflict."""
+    by_id: dict[int, DevicePlaylist] = {}
+    for pl in list(primary or ()) + list(extras or ()):
+        pid = int(getattr(pl, "playlist_id", 0) or 0)
+        if pid <= 0:
+            continue
+        if pid not in by_id:
+            by_id[pid] = pl
+    return sorted(
+        by_id.values(),
+        key=lambda p: (
+            playlist_display_name(p.name or "", p.playlist_id).casefold(),
+            int(p.playlist_id),
+        ),
+    )
