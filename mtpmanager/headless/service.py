@@ -51,11 +51,36 @@ from mtpmanager.ports.transport import TransportError
 
 logger = logging.getLogger(__name__)
 
-# ZEN Experimental bulk: small batches + quiet reconnect after PTP poison.
+# ZEN PyMTP bulk: small batches + quiet reconnect after PTP poison.
 # See docs/debrief-zen-experimental-bulk-session-poison.md
 DEFAULT_PLAYLIST_BATCH_SIZE = 15
 DEFAULT_RECONNECT_QUIET_S = 15.0
 MAX_BATCH_RETRIES = 4
+
+# Wire values match AppConfig.active_mode() / GUI: "experimental" | "stable".
+# CLI/MCP also accept friendly aliases for the default PyMTP path.
+_MODE_ALIASES: dict[str, str] = {
+    "experimental": "experimental",
+    "default": "experimental",
+    "pymtp": "experimental",
+    "stable": "stable",
+    "cmd": "stable",
+    "mtp-sendtr": "stable",
+}
+
+
+def normalize_transfer_mode(mode: str | None) -> str | None:
+    """Map user/CLI mode tokens to ``experimental`` or ``stable``.
+
+    Returns None if *mode* is empty/None (caller should use config default).
+    Returns ``\"\"`` if the token is non-empty but unknown.
+    """
+    if mode is None:
+        return None
+    raw = str(mode).strip().lower()
+    if not raw:
+        return None
+    return _MODE_ALIASES.get(raw, "")
 
 
 def _track_dict(track: Track, *, score: float | None = None) -> dict[str, Any]:
@@ -635,7 +660,7 @@ class HeadlessService:
         return on_after_send
 
     def _reconnect_device(self, *, quiet_s: float) -> AgentResult | None:
-        """Quiet disconnect + reconnect for Experimental session recovery.
+        """Quiet disconnect + reconnect for PyMTP session recovery.
 
         Returns None on success, or a fail AgentResult.
         """
@@ -671,7 +696,7 @@ class HeadlessService:
         quiet_s: float,
         statuses: list[dict[str, str]],
     ) -> tuple[int, int, AgentResult | None]:
-        """Send tracks, optionally batched with Experimental reconnect.
+        """Send tracks, optionally batched with PyMTP reconnect-on-fatal.
 
         Returns ``(succeeded_count, fatal_events, early_fail_or_None)``.
         """
@@ -794,7 +819,7 @@ class HeadlessService:
                     i,
                 )
                 i += 1
-                if mode_s == "experimental":
+                if mode_s == "experimental":  # default PyMTP wire value
                     rec = self._reconnect_device(quiet_s=quiet_s)
                     if rec is not None:
                         return succeeded, fatal_events, rec
@@ -827,13 +852,20 @@ class HeadlessService:
             return err
 
         cfg = self._config()
-        mode_s = (mode or cfg.active_mode()).strip().lower()
-        if mode_s not in ("stable", "experimental"):
+        # Same default as the GUI: PyMTP unless config Stable Mode is on.
+        # Use --mode stable only when deliberately recovering via mtp-sendtr.
+        mode_norm = normalize_transfer_mode(mode)
+        if mode_norm is None:
+            mode_s = cfg.active_mode()
+        elif not mode_norm:
             return fail(
                 "USAGE",
-                "mode must be 'stable' or 'experimental'",
+                "mode must be default|pymtp|experimental (PyMTP) or "
+                "stable|cmd (mtp-sendtr); omit to use config (GUI default is PyMTP)",
                 exit_code=ExitCode.USAGE,
             )
+        else:
+            mode_s = mode_norm
 
         if push_playlist and not playlist_name:
             return fail(
@@ -986,7 +1018,7 @@ class HeadlessService:
 
             push_result: dict[str, Any] | None = None
             if push_playlist and playlist_name:
-                # Push needs a live PyMTP session (Experimental-only path today).
+                # Push needs a live PyMTP session (default transport).
                 if not self._connected or self._device is None:
                     conn = self.device_connect()
                     if not conn.ok:

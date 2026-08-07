@@ -18,7 +18,11 @@ from mtpmanager.domain.playlist_m3u import (
 )
 from mtpmanager.domain.track_id import new_track_guid
 from mtpmanager.headless.dto import ExitCode
-from mtpmanager.headless.service import DEFAULT_PLAYLIST_BATCH_SIZE, HeadlessService
+from mtpmanager.headless.service import (
+    DEFAULT_PLAYLIST_BATCH_SIZE,
+    HeadlessService,
+    normalize_transfer_mode,
+)
 from mtpmanager.infra.device_index import record_send
 from mtpmanager.infra.library_index import save_library_index
 from mtpmanager.infra.playlists import create_playlist, set_playlist_m3u
@@ -38,6 +42,42 @@ def _track(path: str, **meta_kw) -> Track:
 
 
 class HeadlessServiceTests(unittest.TestCase):
+    def test_normalize_transfer_mode_aliases(self) -> None:
+        self.assertIsNone(normalize_transfer_mode(None))
+        self.assertIsNone(normalize_transfer_mode(""))
+        self.assertEqual(normalize_transfer_mode("default"), "experimental")
+        self.assertEqual(normalize_transfer_mode("pymtp"), "experimental")
+        self.assertEqual(normalize_transfer_mode("experimental"), "experimental")
+        self.assertEqual(normalize_transfer_mode("stable"), "stable")
+        self.assertEqual(normalize_transfer_mode("cmd"), "stable")
+        self.assertEqual(normalize_transfer_mode("mtp-sendtr"), "stable")
+        self.assertEqual(normalize_transfer_mode("nope"), "")
+
+    def test_sync_defaults_to_pymtp_like_gui(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp)
+            root = data / "Music"
+            root.mkdir()
+            f = root / "a.mp3"
+            f.write_bytes(b"x")
+            g = new_track_guid()
+            lib = Library(
+                tracks=[_track(str(f), guid=g)],
+                root_paths=[str(root)],
+            )
+            save_library_index(lib, path=data / "library_index.db")
+            svc = HeadlessService(data_dir=data)
+            plan = svc.sync_tracks(guids=[g], dry_run=True)
+            self.assertTrue(plan.ok)
+            # Wire value stays "experimental" (GUI active_mode) when Stable is off.
+            self.assertEqual(plan.data["mode"], "experimental")
+            plan_alias = svc.sync_tracks(guids=[g], dry_run=True, mode="default")
+            self.assertTrue(plan_alias.ok)
+            self.assertEqual(plan_alias.data["mode"], "experimental")
+            plan_stable = svc.sync_tracks(guids=[g], dry_run=True, mode="cmd")
+            self.assertTrue(plan_stable.ok)
+            self.assertEqual(plan_stable.data["mode"], "stable")
+
     def test_doctor_and_search(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             data = Path(tmp)

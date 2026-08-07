@@ -74,12 +74,12 @@ File: `device_session.lock` under the data dir.
 
 | Command | Purpose |
 |---------|---------|
-| `device connect` / `disconnect` | Experimental PyMTP session |
+| `device connect` / `disconnect` | Default PyMTP session (same transport as GUI) |
 | `device info` | Diagnostics |
 | `device inventory [--limit N]` | **Cached** inventory only (no full USB walk) |
 | `device delete OBJECT_ID --confirm` | Single object delete |
 | `sync --guid … --dry-run` | Plan send/skip |
-| `sync --guid … --confirm [--mode stable\|experimental]` | Transfer |
+| `sync --guid … --confirm [--mode …]` | Transfer (default transport = PyMTP) |
 | `sync --playlist NAME --dry-run` | Plan entire host M3U (would-send / would-skip / unresolved) |
 | `sync --playlist NAME --confirm [--push-playlist] [--batch-size N]` | Transfer missing tracks; optional on-device playlist push |
 | `playlist push NAME --confirm` | On-device playlist from host M3U (no track send) |
@@ -88,24 +88,27 @@ File: `device_session.lock` under the data dir.
 
 - **`--dry-run`**: resolve tracks, report would-send / would-skip (GUID already on device index). No USB write.
 - **`--confirm`**: required to send. Without it, exit 6.
-- **Mode**: defaults to `config.json` (`stable_mode`). Override with `--mode stable|experimental`.
+- **Transport (mode):** same default as the GUI — **PyMTP** unless `config.json` has `stable_mode: true` (Config → Stable Mode). Omit `--mode` in normal use. Aliases: `default` / `pymtp` / `experimental` → PyMTP; `stable` / `cmd` / `mtp-sendtr` → subprocess `mtp-sendtr`. **Use Stable only when the default PyMTP path is failing** (deliberate recovery). JSON still reports wire values `experimental` | `stable` (matches `AppConfig.active_mode()`).
+- **No silent fallback:** PyMTP send failures never auto-switch to Stable/`mtp-sendtr`. Agents must re-invoke with `--mode stable` after the user chooses recovery.
 - **`--playlist NAME`**: resolve host M3U paths via library index. Paths missing from the index are soft-skipped and listed as `unresolved_paths` (not a hard fail if some tracks resolve).
 - **`--push-playlist`**: after sends (or when everything was already on device), create/update the on-device playlist from the host M3U. Requires `--playlist`.
-- **`--batch-size N`**: USB-friendly batches with quiet reconnect on Experimental fatal (ZEN PTP session poison). Default **15** when `--playlist` is set; **0** (all at once) otherwise. Successful sends call `record_send` so skip-if-present stays accurate across batches/restarts.
+- **`--batch-size N`**: USB-friendly batches with quiet reconnect on PyMTP fatal (ZEN PTP session poison). Default **15** when `--playlist` is set; **0** (all at once) otherwise. Successful sends call `record_send` so skip-if-present stays accurate across batches/restarts.
 - **Never** pass nested remote paths; the app always uses track GUID ObjectFileNames.
-- Experimental failures **do not** fall back to Stable/`mtp-sendtr`.
 
 Example agent flow:
 
 ```bash
 .venv/bin/python -m mtpmanager.cli library search 'album:once'
 .venv/bin/python -m mtpmanager.cli sync --guid <32hex> --dry-run
-# quit GUI if open
-.venv/bin/python -m mtpmanager.cli sync --guid <32hex> --confirm --mode stable
+# quit GUI if open — default transport is PyMTP (same as GUI)
+.venv/bin/python -m mtpmanager.cli sync --guid <32hex> --confirm
 
-# Host playlist → device (Experimental bulk + optional on-device playlist)
-.venv/bin/python -m mtpmanager.cli sync --playlist Rock --mode experimental --dry-run
-.venv/bin/python -m mtpmanager.cli sync --playlist Rock --mode experimental --confirm --push-playlist
+# Host playlist → device (PyMTP bulk + optional on-device playlist)
+.venv/bin/python -m mtpmanager.cli sync --playlist Rock --dry-run
+.venv/bin/python -m mtpmanager.cli sync --playlist Rock --confirm --push-playlist
+
+# Only if PyMTP is failing and the user wants mtp-sendtr recovery:
+# .venv/bin/python -m mtpmanager.cli sync --guid <32hex> --confirm --mode stable
 ```
 
 ## MCP server

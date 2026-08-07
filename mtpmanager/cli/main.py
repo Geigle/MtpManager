@@ -158,9 +158,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sync.add_argument(
         "--mode",
-        choices=("stable", "experimental"),
+        choices=(
+            "default",
+            "pymtp",
+            "experimental",
+            "stable",
+            "cmd",
+            "mtp-sendtr",
+        ),
         default=None,
-        help="Override config mode",
+        help=(
+            "Transfer transport. Default (omit): same as GUI — PyMTP unless "
+            "config Stable Mode is on. Prefer default/pymtp; use stable/cmd "
+            "only when the PyMTP path is failing (no silent fallback)."
+        ),
     )
     g = sync.add_mutually_exclusive_group()
     g.add_argument(

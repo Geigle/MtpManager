@@ -181,8 +181,10 @@ TOOL_CATALOG: list[dict[str, Any]] = [
             "Sync track(s) by GUID, path, artist/album, or host playlist name. "
             "Remote ObjectFileName is always the track GUID + extension under "
             "Music folder 100 — never pass nested paths. Use dry_run to plan; "
-            "confirm=true to send. mode: experimental (PyMTP) or stable "
-            "(mtp-sendtr). Playlist sync defaults to batch_size=15 with "
+            "confirm=true to send. Default transport is PyMTP (same as GUI when "
+            "Stable Mode is off). mode aliases: default|pymtp|experimental "
+            "(PyMTP) or stable|cmd (mtp-sendtr recovery only — never silent "
+            "fallback). Playlist sync defaults to batch_size=15 with "
             "reconnect-on-fatal for ZEN session poison; optional "
             "push_playlist creates/updates the on-device playlist after send."
         ),
@@ -218,7 +220,7 @@ TOOL_CATALOG: list[dict[str, Any]] = [
                 "batch_size": {
                     "type": "integer",
                     "description": (
-                        "USB batch size; reconnect after fatal (Experimental). "
+                        "USB batch size; reconnect after fatal (PyMTP). "
                         "Default 15 when playlist is set, else 0 (all at once)."
                     ),
                 },
@@ -232,7 +234,18 @@ TOOL_CATALOG: list[dict[str, Any]] = [
                 },
                 "mode": {
                     "type": "string",
-                    "enum": ["experimental", "stable"],
+                    "enum": [
+                        "default",
+                        "pymtp",
+                        "experimental",
+                        "stable",
+                        "cmd",
+                        "mtp-sendtr",
+                    ],
+                    "description": (
+                        "Omit for config/GUI default (PyMTP). "
+                        "stable only when PyMTP is failing."
+                    ),
                 },
                 "dry_run": {"type": "boolean", "default": False},
                 "confirm": {"type": "boolean", "default": False},
