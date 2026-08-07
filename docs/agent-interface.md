@@ -11,6 +11,8 @@ Headless, machine-readable API for coding agents (Grok Build, Copilot CLI, Claud
 .venv/bin/python -m mtpmanager.cli agent doctor
 .venv/bin/python -m mtpmanager.cli library search 'artist:nightwish' --limit 20
 .venv/bin/python -m mtpmanager.cli library list-roots
+.venv/bin/python -m mtpmanager.cli playlist create 'Nightwish picks'
+.venv/bin/python -m mtpmanager.cli playlist add 'Nightwish picks' --guid <32hex>
 .venv/bin/python -m mtpmanager.cli config get
 .venv/bin/python -m mtpmanager.cli agent tools
 ```
@@ -64,9 +66,12 @@ File: `device_session.lock` under the data dir.
 | `agent doctor` | Paths, ffmpeg, mtp-sendtr, lock, index stats |
 | `agent tools` | Tool catalog + JSON schemas |
 | `library list-roots` | Library roots |
-| `library search QUERY` | Fuzzy search (`artist:`, `album:`, …) |
+| `library search QUERY [--limit N]` | Fuzzy search (`artist:`, `album:`, …); max limit 5000 |
 | `library track --guid G` / `--path P` | One track |
 | `playlist list` / `playlist show NAME` | Host M3U playlists |
+| `playlist create NAME` | Create empty host playlist |
+| `playlist add NAME --guid … / --path …` | Append tracks (skips existing paths by default) |
+| `playlist replace NAME --guid … / --path …` | Replace membership (no tracks → clear) |
 | `config get [key]` | Read `config.json` |
 | `device status` | Lock + connection (no open session required) |
 

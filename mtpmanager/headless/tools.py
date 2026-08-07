@@ -45,7 +45,7 @@ TOOL_CATALOG: list[dict[str, Any]] = [
                 "query": {"type": "string", "description": "Search query"},
                 "limit": {
                     "type": "integer",
-                    "description": "Max results (default 50)",
+                    "description": "Max results (default 50, max 5000)",
                     "default": 50,
                 },
             },
@@ -85,6 +85,86 @@ TOOL_CATALOG: list[dict[str, Any]] = [
         "parameters": {
             "type": "object",
             "properties": {"name": {"type": "string"}},
+            "required": ["name"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "playlist_create",
+        "cli": ["playlist", "create"],
+        "description": (
+            "Create an empty host playlist (M3U in library index). "
+            "Fails if the name already exists (case-insensitive)."
+        ),
+        "host_only": True,
+        "destructive": False,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Playlist name"},
+            },
+            "required": ["name"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "playlist_add",
+        "cli": ["playlist", "add"],
+        "description": (
+            "Append library tracks to a host playlist by GUID and/or path. "
+            "Unknown GUIDs/paths fail hard. Existing paths are skipped by default "
+            "(set skip_existing=false to allow duplicate path entries)."
+        ),
+        "host_only": True,
+        "destructive": False,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Existing playlist name"},
+                "guids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Track GUIDs (32-hex)",
+                },
+                "paths": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Host filesystem paths",
+                },
+                "skip_existing": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "Skip paths already in the playlist (default true)",
+                },
+            },
+            "required": ["name"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "playlist_replace",
+        "cli": ["playlist", "replace"],
+        "description": (
+            "Replace host playlist membership with the given tracks "
+            "(order preserved). Passing neither guids nor paths clears the playlist."
+        ),
+        "host_only": True,
+        "destructive": True,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Existing playlist name"},
+                "guids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Track GUIDs (32-hex), order preserved",
+                },
+                "paths": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Host filesystem paths, order preserved",
+                },
+            },
             "required": ["name"],
             "additionalProperties": False,
         },
