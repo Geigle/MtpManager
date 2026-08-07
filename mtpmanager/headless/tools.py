@@ -178,10 +178,13 @@ TOOL_CATALOG: list[dict[str, Any]] = [
         "name": "sync_tracks",
         "cli": ["sync"],
         "description": (
-            "Sync track(s) by GUID or path. Remote ObjectFileName is always the "
-            "track GUID + extension under Music folder 100 — never pass nested "
-            "paths. Use dry_run to plan; confirm=true to send. "
-            "mode: experimental (PyMTP) or stable (mtp-sendtr)."
+            "Sync track(s) by GUID, path, artist/album, or host playlist name. "
+            "Remote ObjectFileName is always the track GUID + extension under "
+            "Music folder 100 — never pass nested paths. Use dry_run to plan; "
+            "confirm=true to send. mode: experimental (PyMTP) or stable "
+            "(mtp-sendtr). Playlist sync defaults to batch_size=15 with "
+            "reconnect-on-fatal for ZEN session poison; optional "
+            "push_playlist creates/updates the on-device playlist after send."
         ),
         "host_only": False,
         "destructive": True,
@@ -196,6 +199,28 @@ TOOL_CATALOG: list[dict[str, Any]] = [
                 "paths": {
                     "type": "array",
                     "items": {"type": "string"},
+                },
+                "playlist": {
+                    "type": "string",
+                    "description": (
+                        "Host playlist name (M3U in library index). "
+                        "Missing paths are soft-skipped and listed as unresolved_paths."
+                    ),
+                },
+                "push_playlist": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "After sends, push host playlist to device "
+                        "(requires playlist)."
+                    ),
+                },
+                "batch_size": {
+                    "type": "integer",
+                    "description": (
+                        "USB batch size; reconnect after fatal (Experimental). "
+                        "Default 15 when playlist is set, else 0 (all at once)."
+                    ),
                 },
                 "album": {
                     "type": "string",

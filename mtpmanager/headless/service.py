@@ -6,9 +6,10 @@ import logging
 import os
 import shutil
 import sys
+import time
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 from mtpmanager.app.cancellation import JobCancelled
 from mtpmanager.app.device_ops import connect as device_connect
@@ -21,7 +22,7 @@ from mtpmanager.domain.device_profile import match_device_profile
 from mtpmanager.domain.device_profiles import BUILTIN_PROFILES, GENERIC, ZEN_VISION_M
 from mtpmanager.domain.library import primary_artist
 from mtpmanager.domain.library_search import filter_library_tracks_scored
-from mtpmanager.domain.models import Track
+from mtpmanager.domain.models import Track, TrackMetadata
 from mtpmanager.domain.playlist_m3u import parse_m3u
 from mtpmanager.domain.track_id import is_track_guid
 from mtpmanager.headless.dto import AgentResult, ExitCode, fail, ok, to_jsonable
@@ -29,9 +30,12 @@ from mtpmanager.headless.tools import tools_as_dict
 from mtpmanager.infra.app_config import load_app_config
 from mtpmanager.infra.app_paths import default_data_dir
 from mtpmanager.infra.device_index import (
+    DEFAULT_MUSIC_FOLDER_ID,
+    DEFAULT_STORAGE_ID,
     guid_stems_on_device,
     list_cached_files,
     list_known_devices,
+    record_send,
 )
 from mtpmanager.infra.device_session_lock import DeviceSessionBusy, DeviceSessionLock
 from mtpmanager.infra.ffmpeg_transcode import FFmpegTranscoder
@@ -42,9 +46,16 @@ from mtpmanager.infra.library_index import (
 )
 from mtpmanager.infra.logging_setup import default_log_dir
 from mtpmanager.infra.playlists import get_playlist_by_name, list_playlists
+from mtpmanager.infra.remote_naming import build_remote_path, split_remote_path
 from mtpmanager.ports.transport import TransportError
 
 logger = logging.getLogger(__name__)
+
+# ZEN Experimental bulk: small batches + quiet reconnect after PTP poison.
+# See docs/debrief-zen-experimental-bulk-session-poison.md
+DEFAULT_PLAYLIST_BATCH_SIZE = 15
+DEFAULT_RECONNECT_QUIET_S = 15.0
+MAX_BATCH_RETRIES = 4
 
 
 def _track_dict(track: Track, *, score: float | None = None) -> dict[str, Any]:
@@ -452,6 +463,46 @@ class HeadlessService:
 
     # --- sync --------------------------------------------------------------
 
+    def _resolve_playlist_tracks(
+        self, name: str
+    ) -> tuple[list[Track], list[str], str | None, AgentResult | None]:
+        """Resolve host playlist M3U → library tracks (soft missing paths).
+
+        Returns ``(selected, unresolved_paths, playlist_name, error)``.
+        """
+        pl = get_playlist_by_name(name, path=self._index_path)
+        if pl is None:
+            return (
+                [],
+                [],
+                None,
+                fail(
+                    "NOT_FOUND",
+                    f"Playlist not found: {name!r}",
+                    exit_code=ExitCode.NOT_FOUND,
+                ),
+            )
+        entries = parse_m3u(pl.m3u_text or "")
+        tracks = self._load_tracks()
+        by_path = {os.path.normpath(t.path or ""): t for t in tracks}
+        selected: list[Track] = []
+        seen: set[str] = set()
+        unresolved: list[str] = []
+        for e in entries:
+            p = os.path.normpath(e.path or "")
+            if not p:
+                continue
+            t = by_path.get(p)
+            if t is None:
+                unresolved.append(p)
+                continue
+            key = t.guid or t.path
+            if key in seen:
+                continue
+            seen.add(key)
+            selected.append(t)
+        return selected, unresolved, pl.name, None
+
     def _resolve_sync_tracks(
         self,
         *,
@@ -459,12 +510,13 @@ class HeadlessService:
         paths: Sequence[str] | None = None,
         artist: str | None = None,
         album: str | None = None,
-    ) -> tuple[list[Track], AgentResult | None]:
-        tracks = self._load_tracks()
-        by_guid = {t.guid: t for t in tracks if t.guid}
-        by_path = {os.path.normpath(t.path or ""): t for t in tracks}
+        playlist: str | None = None,
+    ) -> tuple[list[Track], list[str], str | None, AgentResult | None]:
+        """Resolve selection. Returns tracks, unresolved_paths, playlist_name, err."""
         selected: list[Track] = []
         seen: set[str] = set()
+        unresolved: list[str] = []
+        playlist_name: str | None = None
 
         def _add(t: Track) -> None:
             key = t.guid or t.path
@@ -472,6 +524,22 @@ class HeadlessService:
                 return
             seen.add(key)
             selected.append(t)
+
+        pl_name = (playlist or "").strip()
+        if pl_name:
+            pl_tracks, pl_unresolved, resolved_name, err = self._resolve_playlist_tracks(
+                pl_name
+            )
+            if err is not None:
+                return [], [], None, err
+            playlist_name = resolved_name
+            unresolved.extend(pl_unresolved)
+            for t in pl_tracks:
+                _add(t)
+
+        tracks = self._load_tracks()
+        by_guid = {t.guid: t for t in tracks if t.guid}
+        by_path = {os.path.normpath(t.path or ""): t for t in tracks}
 
         for g in guids or []:
             g = (g or "").strip()
@@ -482,7 +550,7 @@ class HeadlessService:
                 found = get_tracks_by_guids([g], path=self._index_path)
                 t = found.get(g)
             if t is None:
-                return [], fail(
+                return [], [], playlist_name, fail(
                     "NOT_FOUND",
                     f"Unknown GUID: {g}",
                     exit_code=ExitCode.NOT_FOUND,
@@ -495,7 +563,7 @@ class HeadlessService:
                 continue
             t = by_path.get(p)
             if t is None:
-                return [], fail(
+                return [], [], playlist_name, fail(
                     "NOT_FOUND",
                     f"Unknown path: {p}",
                     exit_code=ExitCode.NOT_FOUND,
@@ -516,12 +584,222 @@ class HeadlessService:
                     _add(t)
 
         if not selected:
-            return [], fail(
+            if pl_name and unresolved:
+                return [], unresolved, playlist_name, fail(
+                    "NOT_FOUND",
+                    (
+                        f"Playlist {playlist_name!r} has {len(unresolved)} path(s) "
+                        "but none resolve in the library index"
+                    ),
+                    exit_code=ExitCode.NOT_FOUND,
+                    data={"unresolved_paths": unresolved, "playlist": playlist_name},
+                )
+            return [], unresolved, playlist_name, fail(
                 "USAGE",
-                "No tracks resolved; pass guids, paths, and/or artist/album",
+                "No tracks resolved; pass --playlist, guids, paths, and/or artist/album",
                 exit_code=ExitCode.USAGE,
             )
-        return selected, None
+        return selected, unresolved, playlist_name, None
+
+    def _on_after_send_record(
+        self, serial: str, stems: set[str]
+    ) -> Callable[[str, str, int | None], None]:
+        """Wire skip-if-present cache after each successful send (GUI parity)."""
+        index = self._index_path
+
+        def on_after_send(guid: str, send_path: str, object_id: int | None) -> None:
+            if not is_track_guid(guid):
+                return
+            _, ext = os.path.splitext(send_path)
+            remote = build_remote_path(
+                TrackMetadata(),
+                ext or ".mp3",
+                music_folder_id=DEFAULT_MUSIC_FOLDER_ID,
+                guid=guid,
+            )
+            _, basename = split_remote_path(remote)
+            try:
+                record_send(
+                    serial,
+                    remote_name=basename,
+                    guid=guid,
+                    item_id=object_id,
+                    parent_id=DEFAULT_MUSIC_FOLDER_ID,
+                    storage_id=DEFAULT_STORAGE_ID,
+                    path=index,
+                )
+                stems.add(guid)
+            except Exception:
+                logger.debug("record_send failed", exc_info=True)
+
+        return on_after_send
+
+    def _reconnect_device(self, *, quiet_s: float) -> AgentResult | None:
+        """Quiet disconnect + reconnect for Experimental session recovery.
+
+        Returns None on success, or a fail AgentResult.
+        """
+        try:
+            try:
+                self.device_disconnect()
+            except Exception:
+                logger.debug("disconnect before reconnect failed", exc_info=True)
+            if quiet_s > 0:
+                time.sleep(quiet_s)
+            conn = self.device_connect()
+            if not conn.ok:
+                return conn
+            return None
+        except Exception as e:
+            logger.exception("reconnect failed")
+            return fail(
+                "DEVICE_ERROR",
+                f"Reconnect failed: {e}",
+                exit_code=ExitCode.ERROR,
+            )
+
+    def _transfer_batches(
+        self,
+        to_send: list[Track],
+        *,
+        mode_s: str,
+        target_format: str,
+        device_formats: set[str],
+        stems: set[str],
+        serial: str,
+        batch_size: int,
+        quiet_s: float,
+        statuses: list[dict[str, str]],
+    ) -> tuple[int, int, AgentResult | None]:
+        """Send tracks, optionally batched with Experimental reconnect.
+
+        Returns ``(succeeded_count, fatal_events, early_fail_or_None)``.
+        """
+        transcoder = FFmpegTranscoder()
+        on_after = self._on_after_send_record(serial, stems) if serial else None
+        fatal_events = 0
+        succeeded = 0
+
+        def on_status(path: str, status: str) -> None:
+            statuses.append({"path": path, "status": status})
+
+        use_batches = batch_size > 0 and len(to_send) > batch_size
+        if not use_batches:
+            # Single shot (or batch covers entire remainder).
+            if mode_s == "stable":
+                from mtpmanager.infra.cmd_transport import CmdTransport
+
+                transport = CmdTransport()
+            else:
+                transport = self._ensure_device()
+            n = transfer_tracks(
+                to_send,
+                target_format=target_format,
+                transport=transport,
+                transcoder=transcoder,
+                device_formats=device_formats,
+                device_guid_stems=stems,
+                on_track_status=on_status,
+                on_after_send=on_after,
+                stop_on_fatal=True,
+            )
+            return int(n), 0, None
+
+        i = 0
+        while i < len(to_send):
+            batch = to_send[i : i + batch_size]
+            batch_n = len(batch)
+            retries = 0
+            while retries < MAX_BATCH_RETRIES:
+                batch_statuses: list[dict[str, str]] = []
+
+                def _batch_status(
+                    path: str, status: str, _bs=batch_statuses
+                ) -> None:
+                    _bs.append({"path": path, "status": status})
+                    on_status(path, status)
+
+                try:
+                    if mode_s == "stable":
+                        from mtpmanager.infra.cmd_transport import CmdTransport
+
+                        transport = CmdTransport()
+                    else:
+                        if not self._connected or self._device is None:
+                            conn = self.device_connect()
+                            if not conn.ok:
+                                return succeeded, fatal_events, conn
+                        transport = self._ensure_device()
+                    n = transfer_tracks(
+                        batch,
+                        target_format=target_format,
+                        transport=transport,
+                        transcoder=transcoder,
+                        device_formats=device_formats,
+                        device_guid_stems=stems,
+                        on_track_status=_batch_status,
+                        on_after_send=on_after,
+                        stop_on_fatal=True,
+                    )
+                    succeeded += int(n)
+                    i += batch_n
+                    break
+                except TransportError as e:
+                    fatal_events += 1
+                    ok_paths = {
+                        s["path"]
+                        for s in batch_statuses
+                        if s["status"] in ("done", "skipped")
+                    }
+                    succeeded += len(ok_paths)
+                    unfinished = [
+                        t
+                        for t in batch
+                        if t.path not in ok_paths
+                        and (not t.guid or t.guid not in stems)
+                    ]
+                    if mode_s != "experimental":
+                        # Stable: do not soft-recover; surface fatal.
+                        raise
+                    rec = self._reconnect_device(quiet_s=quiet_s)
+                    if rec is not None:
+                        return succeeded, fatal_events, rec
+                    if not unfinished:
+                        i += batch_n
+                        break
+                    batch = unfinished
+                    batch_n = len(batch)
+                    retries += 1
+                    logger.info(
+                        "sync batch retry unfinished=%d after transport error: %s",
+                        batch_n,
+                        e,
+                    )
+                except JobCancelled:
+                    raise
+                except Exception as e:
+                    fatal_events += 1
+                    logger.exception("sync batch exception: %s", e)
+                    if mode_s != "experimental":
+                        raise
+                    rec = self._reconnect_device(quiet_s=quiet_s)
+                    if rec is not None:
+                        return succeeded, fatal_events, rec
+                    retries += 1
+            else:
+                # Permanent batch failure: limp past one track so a long
+                # playlist can finish after poison (rock-script pattern).
+                logger.error(
+                    "sync batch failed permanently at offset=%d; advancing by 1",
+                    i,
+                )
+                i += 1
+                if mode_s == "experimental":
+                    rec = self._reconnect_device(quiet_s=quiet_s)
+                    if rec is not None:
+                        return succeeded, fatal_events, rec
+
+        return succeeded, fatal_events, None
 
     def sync_tracks(
         self,
@@ -530,12 +808,20 @@ class HeadlessService:
         paths: Sequence[str] | None = None,
         artist: str | None = None,
         album: str | None = None,
+        playlist: str | None = None,
         mode: str | None = None,
         dry_run: bool = False,
         confirm: bool = False,
+        push_playlist: bool = False,
+        batch_size: int | None = None,
+        reconnect_quiet_s: float | None = None,
     ) -> AgentResult:
-        selected, err = self._resolve_sync_tracks(
-            guids=guids, paths=paths, artist=artist, album=album
+        selected, unresolved, playlist_name, err = self._resolve_sync_tracks(
+            guids=guids,
+            paths=paths,
+            artist=artist,
+            album=album,
+            playlist=playlist,
         )
         if err is not None:
             return err
@@ -549,9 +835,29 @@ class HeadlessService:
                 exit_code=ExitCode.USAGE,
             )
 
+        if push_playlist and not playlist_name:
+            return fail(
+                "USAGE",
+                "push_playlist requires --playlist NAME",
+                exit_code=ExitCode.USAGE,
+            )
+
         target_format = cfg.normalized_send_format()
         device_formats = set(ZEN_VISION_M.supported_audio_formats) | set(
             GENERIC.supported_audio_formats
+        )
+
+        # Default batching for playlist-scoped sync (ZEN poison recovery).
+        if batch_size is None:
+            effective_batch = (
+                DEFAULT_PLAYLIST_BATCH_SIZE if playlist_name else 0
+            )
+        else:
+            effective_batch = max(0, int(batch_size))
+        quiet_s = (
+            DEFAULT_RECONNECT_QUIET_S
+            if reconnect_quiet_s is None
+            else max(0.0, float(reconnect_quiet_s))
         )
 
         serial = self._device_serial
@@ -582,72 +888,160 @@ class HeadlessService:
                 }
             )
 
+        plan_data: dict[str, Any] = {
+            "mode": mode_s,
+            "target_format": target_format,
+            "track_count": len(plan),
+            "would_send": sum(1 for p in plan if p["action"] == "send"),
+            "would_skip": sum(1 for p in plan if p["action"] == "skip"),
+            "tracks": plan,
+            "batch_size": effective_batch,
+        }
+        if playlist_name:
+            plan_data["playlist"] = playlist_name
+            plan_data["push_playlist"] = bool(push_playlist)
+        if unresolved:
+            plan_data["unresolved_paths"] = unresolved
+            plan_data["unresolved_count"] = len(unresolved)
+
         if dry_run or not confirm:
-            code = "ok" if dry_run else "CONFIRM_REQUIRED"
-            exit_c = ExitCode.OK if dry_run else ExitCode.CONFIRM_REQUIRED
             msg = (
                 "Dry-run plan only"
                 if dry_run
                 else "Pass confirm=true to execute (or dry_run=true to plan only)"
             )
-            result = AgentResult(
-                ok=dry_run,
-                code=code if dry_run else "CONFIRM_REQUIRED",
-                message=msg,
-                data={
-                    "mode": mode_s,
-                    "target_format": target_format,
-                    "track_count": len(plan),
-                    "would_send": sum(1 for p in plan if p["action"] == "send"),
-                    "would_skip": sum(1 for p in plan if p["action"] == "skip"),
-                    "tracks": plan,
-                },
-                exit_code=int(exit_c),
-            )
             if not dry_run:
-                return result
-            return ok(result.data, message=msg)
+                return AgentResult(
+                    ok=False,
+                    code="CONFIRM_REQUIRED",
+                    message=msg,
+                    data=plan_data,
+                    exit_code=int(ExitCode.CONFIRM_REQUIRED),
+                )
+            return ok(plan_data, message=msg)
 
         busy = self._require_session_lock("cli-sync")
         if busy is not None:
             return busy
 
+        to_send = [t for t in selected if not (t.guid and t.guid in stems)]
+        already = len(selected) - len(to_send)
+
         try:
             if mode_s == "stable":
-                from mtpmanager.infra.cmd_transport import CmdTransport
-
-                transport = CmdTransport()
+                # CmdTransport needs no open PyMTP session.
+                pass
             else:
                 if not self._connected or self._device is None:
-                    # Auto-connect for experimental sync.
                     conn = self.device_connect()
                     if not conn.ok:
                         return conn
-                transport = self._ensure_device()
+                if not serial:
+                    serial = self._device_serial or ""
+                    if serial:
+                        try:
+                            stems = set(
+                                guid_stems_on_device(serial, path=self._index_path)
+                                or []
+                            )
+                        except Exception:
+                            logger.debug(
+                                "guid_stems after connect failed", exc_info=True
+                            )
+                        to_send = [
+                            t for t in selected if not (t.guid and t.guid in stems)
+                        ]
+                        already = len(selected) - len(to_send)
 
-            transcoder = FFmpegTranscoder()
             statuses: list[dict[str, str]] = []
+            succeeded = 0
+            fatal_events = 0
+            if to_send:
+                succeeded, fatal_events, early = self._transfer_batches(
+                    to_send,
+                    mode_s=mode_s,
+                    target_format=target_format,
+                    device_formats=device_formats,
+                    stems=stems,
+                    serial=serial or self._device_serial or "",
+                    batch_size=effective_batch,
+                    quiet_s=quiet_s,
+                    statuses=statuses,
+                )
+                if early is not None:
+                    early.data = {
+                        **(early.data or {}),
+                        "mode": mode_s,
+                        "target_format": target_format,
+                        "playlist": playlist_name,
+                        "requested": len(selected),
+                        "already_on_device": already,
+                        "to_send": len(to_send),
+                        "succeeded": succeeded,
+                        "fatal_events": fatal_events,
+                        "statuses": statuses,
+                        "unresolved_paths": unresolved,
+                    }
+                    return early
 
-            def on_status(path: str, status: str) -> None:
-                statuses.append({"path": path, "status": status})
+            push_result: dict[str, Any] | None = None
+            if push_playlist and playlist_name:
+                # Push needs a live PyMTP session (Experimental-only path today).
+                if not self._connected or self._device is None:
+                    conn = self.device_connect()
+                    if not conn.ok:
+                        return fail(
+                            conn.code or "DEVICE_ERROR",
+                            conn.message
+                            or "Connect failed before playlist push",
+                            exit_code=conn.exit_code or int(ExitCode.ERROR),
+                            data={
+                                "mode": mode_s,
+                                "playlist": playlist_name,
+                                "requested": len(selected),
+                                "already_on_device": already,
+                                "succeeded": succeeded,
+                                "fatal_events": fatal_events,
+                                "statuses": statuses,
+                                "connect": conn.to_dict(),
+                            },
+                        )
+                push = self.playlist_push(playlist_name, confirm=True)
+                push_result = push.to_dict()
+                if not push.ok:
+                    return fail(
+                        push.code or "PLAYLIST_PUSH_FAILED",
+                        push.message or "Playlist push failed after sync",
+                        exit_code=push.exit_code or int(ExitCode.ERROR),
+                        data={
+                            "mode": mode_s,
+                            "target_format": target_format,
+                            "playlist": playlist_name,
+                            "requested": len(selected),
+                            "already_on_device": already,
+                            "to_send": len(to_send),
+                            "succeeded": succeeded,
+                            "fatal_events": fatal_events,
+                            "statuses": statuses,
+                            "playlist_push": push_result,
+                            "unresolved_paths": unresolved,
+                        },
+                    )
 
-            succeeded = transfer_tracks(
-                selected,
-                target_format=target_format,
-                transport=transport,
-                transcoder=transcoder,
-                device_formats=device_formats,
-                device_guid_stems=stems,
-                on_track_status=on_status,
-                stop_on_fatal=True,
-            )
             return ok(
                 {
                     "mode": mode_s,
                     "target_format": target_format,
+                    "playlist": playlist_name,
                     "requested": len(selected),
+                    "already_on_device": already,
+                    "to_send": len(to_send),
                     "succeeded": succeeded,
+                    "fatal_events": fatal_events,
+                    "batch_size": effective_batch,
                     "statuses": statuses,
+                    "unresolved_paths": unresolved,
+                    "playlist_push": push_result,
                     "note": (
                         "Remote names are track GUIDs under Music 100; "
                         "see docs/device-contract.md"
@@ -670,6 +1064,7 @@ class HeadlessService:
                     "path": e.path,
                     "stderr": (e.stderr or "")[:2000],
                     "returncode": e.returncode,
+                    "playlist": playlist_name,
                 },
             )
         except Exception as e:

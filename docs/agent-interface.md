@@ -80,13 +80,18 @@ File: `device_session.lock` under the data dir.
 | `device delete OBJECT_ID --confirm` | Single object delete |
 | `sync --guid … --dry-run` | Plan send/skip |
 | `sync --guid … --confirm [--mode stable\|experimental]` | Transfer |
-| `playlist push NAME --confirm` | On-device playlist from host M3U |
+| `sync --playlist NAME --dry-run` | Plan entire host M3U (would-send / would-skip / unresolved) |
+| `sync --playlist NAME --confirm [--push-playlist] [--batch-size N]` | Transfer missing tracks; optional on-device playlist push |
+| `playlist push NAME --confirm` | On-device playlist from host M3U (no track send) |
 
 ### Sync guards
 
 - **`--dry-run`**: resolve tracks, report would-send / would-skip (GUID already on device index). No USB write.
 - **`--confirm`**: required to send. Without it, exit 6.
 - **Mode**: defaults to `config.json` (`stable_mode`). Override with `--mode stable|experimental`.
+- **`--playlist NAME`**: resolve host M3U paths via library index. Paths missing from the index are soft-skipped and listed as `unresolved_paths` (not a hard fail if some tracks resolve).
+- **`--push-playlist`**: after sends (or when everything was already on device), create/update the on-device playlist from the host M3U. Requires `--playlist`.
+- **`--batch-size N`**: USB-friendly batches with quiet reconnect on Experimental fatal (ZEN PTP session poison). Default **15** when `--playlist` is set; **0** (all at once) otherwise. Successful sends call `record_send` so skip-if-present stays accurate across batches/restarts.
 - **Never** pass nested remote paths; the app always uses track GUID ObjectFileNames.
 - Experimental failures **do not** fall back to Stable/`mtp-sendtr`.
 
@@ -97,6 +102,10 @@ Example agent flow:
 .venv/bin/python -m mtpmanager.cli sync --guid <32hex> --dry-run
 # quit GUI if open
 .venv/bin/python -m mtpmanager.cli sync --guid <32hex> --confirm --mode stable
+
+# Host playlist → device (Experimental bulk + optional on-device playlist)
+.venv/bin/python -m mtpmanager.cli sync --playlist Rock --mode experimental --dry-run
+.venv/bin/python -m mtpmanager.cli sync --playlist Rock --mode experimental --confirm --push-playlist
 ```
 
 ## MCP server
@@ -134,7 +143,7 @@ Tools mirror `agent tools` names (`library_search`, `sync_tracks`, …). Destruc
 
 | Item | Notes |
 |------|--------|
-| **`sync --playlist NAME`** | First-class CLI/MCP: resolve host M3U → tracks, dry-run / confirm, optional `--push-playlist`, batch + reconnect on fatal (so agents need no ad-hoc scripts). Wire `record_send` on after-send. Full write-up: [todo-agent-cli.md](./todo-agent-cli.md). Interim: `scripts/sync_rock_experimental.py`. |
+| *(none open for agent CLI)* | `sync --playlist` shipped — see above. Historical notes: [todo-agent-cli.md](./todo-agent-cli.md). |
 
 ## Related
 

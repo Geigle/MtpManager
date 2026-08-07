@@ -70,10 +70,12 @@ def main() -> int:
     paths = [e.path for e in entries]
     log.info("Rock playlist entries=%d", len(paths))
 
-    selected, err = svc._resolve_sync_tracks(paths=paths)
+    selected, unresolved, _pl_name, err = svc._resolve_sync_tracks(paths=paths)
     if err is not None:
         log.error("resolve failed: %s", err.message)
         return 1
+    if unresolved:
+        log.warning("unresolved paths=%d (first=%s)", len(unresolved), unresolved[:3])
     log.info("resolved tracks=%d", len(selected))
 
     conn = None

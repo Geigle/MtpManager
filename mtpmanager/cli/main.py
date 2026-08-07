@@ -138,6 +138,25 @@ def build_parser() -> argparse.ArgumentParser:
     sync.add_argument("--artist", default=None, help="Expand to artist tracks")
     sync.add_argument("--album", default=None, help="Filter/expand by album")
     sync.add_argument(
+        "--playlist",
+        default=None,
+        help="Host playlist name (M3U in library index); soft-skips missing paths",
+    )
+    sync.add_argument(
+        "--push-playlist",
+        action="store_true",
+        help="After send, create/update on-device playlist (requires --playlist)",
+    )
+    sync.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        help=(
+            "USB-friendly batch size with reconnect on fatal "
+            f"(default: {15} for --playlist, 0=all-at-once otherwise)"
+        ),
+    )
+    sync.add_argument(
         "--mode",
         choices=("stable", "experimental"),
         default=None,
@@ -210,9 +229,12 @@ def dispatch(svc: HeadlessService, args: argparse.Namespace) -> AgentResult:
             paths=list(args.paths or []),
             artist=args.artist,
             album=args.album,
+            playlist=getattr(args, "playlist", None),
             mode=args.mode,
             dry_run=bool(args.dry_run),
             confirm=bool(args.confirm),
+            push_playlist=bool(getattr(args, "push_playlist", False)),
+            batch_size=getattr(args, "batch_size", None),
         )
 
     return AgentResult(

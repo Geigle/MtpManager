@@ -2,8 +2,8 @@
 
 ## TODO: `sync --playlist NAME`
 
-**Status:** open  
-**Priority:** high (unblocked Rock playlist work only via ad-hoc script)  
+**Status:** done (2026-08-06)  
+**Priority:** high  
 **Created:** 2026-08-06
 
 ### Goal
@@ -18,23 +18,22 @@
 
 ### Why
 
-CLI today has no playlist-scoped sync. Agents cannot pass 700 paths on argv; each CLI process disconnects on exit; a single `transfer_tracks` aborts remaining work on ZEN session poison without resume. Interim operator path: `scripts/sync_rock_experimental.py`.
+CLI had no playlist-scoped sync. Agents cannot pass 700 paths on argv; each CLI process disconnects on exit; a single `transfer_tracks` aborts remaining work on ZEN session poison without resume. Interim operator path was `scripts/sync_rock_experimental.py`.
 
-### Implementation sketch
+### Implementation (shipped)
 
-- Resolve host playlist M3U → library tracks (`infra/playlists`, `domain/playlist_m3u`, index).
-- Reuse `HeadlessService.sync_tracks` / `app.transfer`; skip-if-present via `device_index.guid_stems_on_device`.
-- Wire `on_after_send` → `record_send` (CLI path currently omits this).
-- Long runs: batch + fatal recovery (quiet, reconnect, resume unfinished).
-- MCP: `sync_tracks` + `playlist` param; tool catalog + `docs/agent-interface.md`.
-- Hard invariants: GUID ObjectFileNames under Music 100; no silent Experimental→Stable fallback.
+- Resolve host playlist M3U → library tracks (`HeadlessService._resolve_playlist_tracks`; soft missing paths → `unresolved_paths`).
+- `HeadlessService.sync_tracks(..., playlist=, push_playlist=, batch_size=)` + CLI/MCP.
+- `on_after_send` → `record_send` for all headless syncs (skip-if-present across batches).
+- Playlist default `batch_size=15` + Experimental quiet reconnect on fatal (rock-script pattern).
+- Docs: [agent-interface.md](./agent-interface.md). Tests: `tests/test_headless_cli.py`.
 
 ### Acceptance
 
-- [ ] `--playlist` dry-run JSON (would-send / would-skip for all resolved paths)
-- [ ] `--confirm` transfers missing tracks under device session lock
-- [ ] Optional `--push-playlist` after send
-- [ ] Unit tests without live device; docs updated
+- [x] `--playlist` dry-run JSON (would-send / would-skip for all resolved paths)
+- [x] `--confirm` transfers missing tracks under device session lock
+- [x] Optional `--push-playlist` after send
+- [x] Unit tests without live device; docs updated
 
 ### Crash notes (2026-08-06 Rock Experimental run)
 

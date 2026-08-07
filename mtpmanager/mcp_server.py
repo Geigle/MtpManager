@@ -83,14 +83,19 @@ def _call_tool(svc: HeadlessService, name: str, arguments: dict[str, Any]) -> di
             confirm=bool(args.get("confirm")),
         )
     elif name == "sync_tracks":
+        batch_raw = args.get("batch_size")
+        batch_size = int(batch_raw) if batch_raw is not None else None
         result = svc.sync_tracks(
             guids=list(args.get("guids") or []),
             paths=list(args.get("paths") or []),
             artist=args.get("artist"),
             album=args.get("album"),
+            playlist=args.get("playlist"),
             mode=args.get("mode"),
             dry_run=bool(args.get("dry_run")),
             confirm=bool(args.get("confirm")),
+            push_playlist=bool(args.get("push_playlist")),
+            batch_size=batch_size,
         )
     elif name == "playlist_push":
         result = svc.playlist_push(
