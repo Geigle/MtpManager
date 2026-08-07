@@ -37,6 +37,8 @@ This folder is the **design and incident** map. For run instructions, logs, and 
 | Doc | Purpose |
 |-----|---------|
 | [architecture.md](./architecture.md) | System design: layers, package map, composition root, dual-mode wiring, logging, known gaps |
+| [agent-interface.md](./agent-interface.md) | Headless CLI + MCP for coding agents (JSON ops, device lock, dry-run sync) |
+| [todo-agent-cli.md](./todo-agent-cli.md) | Agent/CLI backlog (e.g. `sync --playlist`) |
 | [decisions.md](./decisions.md) | ADR-lite: dual mode, no silent fallback, shared naming, fatal abort, pymtp patches, license, … |
 | [device-contract.md](./device-contract.md) | MTP/ZEN remote path, storage, basename, tags vs filename — **do not rebreak** |
 | [basename-limit-evidence.md](./basename-limit-evidence.md) | Why `MAX_REMOTE_BASENAME=56`: external vs empirical evidence; long on-device names |
@@ -46,6 +48,7 @@ This folder is the **design and incident** map. For run instructions, logs, and 
 | [libmtp-api-coverage.md](./libmtp-api-coverage.md) | libmtp vs stock pymtp vs MtpManager: what is implemented, stubbed, or unbound |
 | [debrief-zen-track-send-failure.md](./debrief-zen-track-send-failure.md) | Incident: CMD 99% finalize, hang, batch abort (forensic detail) |
 | [debrief-pymtp-transfer-failure.md](./debrief-pymtp-transfer-failure.md) | Incident: layered PyMTP binding failures; no silent CMD fallback |
+| [debrief-zen-experimental-bulk-session-poison.md](./debrief-zen-experimental-bulk-session-poison.md) | Bulk Experimental Rock sync: shared PTP 2002/0x02ff stack, variable session life |
 
 ---
 
