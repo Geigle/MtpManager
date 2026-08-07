@@ -15,7 +15,9 @@ from mtpmanager.app.cancellation import JobCancelled
 from mtpmanager.app.device_io_gate import DEFAULT_USB_QUIET_S, DeviceIoGate
 from mtpmanager.infra.device_session_lock import DeviceSessionLock
 from mtpmanager.app.playlist_device import (
+    RECREATE_METADATA_AUTO_MAX,
     append_ids_to_order,
+    apply_metadata_infos_to_resolved_tracks,
     merge_device_playlists,
     move_ids_by_indices,
     ordered_guids_from_tracks,
@@ -24,7 +26,9 @@ from mtpmanager.app.playlist_device import (
     playlists_parent_id,
     push_playlist_to_device,
     remove_ids_at_indices,
+    resolve_device_playlist_to_host_tracks,
     resolve_track_object_ids,
+    save_resolved_tracks_as_host_playlist,
 )
 from mtpmanager.app.podcast_ops import (
     INITIAL_EPISODE_LIMIT,
@@ -151,6 +155,7 @@ from mtpmanager.infra.playlists import (
     create_playlist,
     delete_playlist,
     get_playlist,
+    get_playlist_by_name,
     list_playlists,
     move_paths_in_playlist,
     remove_paths_from_playlist,
@@ -556,6 +561,7 @@ class AppController:
             on_delete=self.on_device_playlist_delete,
             on_rename=self.on_device_playlist_rename,
             on_refresh=self.action_refresh_device_playlists,
+            on_recreate_local=self.action_recreate_device_playlist_locally,
             on_remove_tracks=self.action_device_playlist_remove_selected,
             on_move_up=lambda: self.action_device_playlist_move_selected(-1),
             on_move_down=lambda: self.action_device_playlist_move_selected(1),
@@ -5059,6 +5065,259 @@ class AppController:
             self._device_io.release(
                 reason="device-playlists-list", quiet_s=_DEVICE_USB_COOLDOWN_S
             )
+
+    def action_recreate_device_playlist_locally(self) -> None:
+        """Build a host M3U from the selected on-device playlist membership.
+
+        Resolution: object id → device_index name/GUID → library tracks or
+        podcast_episodes. Unresolved rows are kept as synthetic paths (greyed
+        out in the host Playlists tab). Optional Get_Trackmetadata for
+        unresolved members (auto if ≤5, else confirm — bulk metadata can
+        poison the ZEN session).
+        """
+        pl = self._current_device_playlist
+        if pl is None or int(pl.playlist_id or 0) <= 0:
+            messagebox.showinfo(
+                "Recreate playlist",
+                "Select an on-device playlist first.",
+            )
+            return
+        serial = self._device_serial or ""
+        if not serial:
+            messagebox.showinfo(
+                "Recreate playlist",
+                "Connect the device so the device index is available.",
+            )
+            return
+        item_ids = [
+            int(x)
+            for x in (
+                self._device_playlist_item_ids
+                or list(pl.track_ids or ())
+            )
+            if int(x) > 0
+        ]
+        if not item_ids:
+            messagebox.showinfo(
+                "Recreate playlist",
+                "This on-device playlist has no track members.",
+            )
+            return
+
+        name = playlist_display_name(pl.name or "", int(pl.playlist_id))
+        resolved = resolve_device_playlist_to_host_tracks(serial, item_ids)
+        unresolved = list(resolved.unresolved_item_ids)
+        n_unres = len(unresolved)
+
+        def finish(final_resolved, *, metadata_fetched: int = 0) -> None:
+            tracks = list(final_resolved.tracks)
+            if not tracks:
+                messagebox.showinfo(
+                    "Recreate playlist",
+                    "No tracks to write into a host playlist.",
+                )
+                return
+            existing = None
+            try:
+                existing = get_playlist_by_name(name)
+            except Exception:
+                existing = None
+            if existing is not None:
+                if not messagebox.askyesno(
+                    "Recreate playlist",
+                    f"A local playlist named “{name}” already exists.\n\n"
+                    f"Replace its membership with the {len(tracks)} track(s) "
+                    "from the device playlist?\n\n"
+                    f"Resolved: {final_resolved.resolved} · "
+                    f"unresolved (kept, greyed out): "
+                    f"{len(final_resolved.unresolved_item_ids)}",
+                ):
+                    return
+            try:
+                result = save_resolved_tracks_as_host_playlist(
+                    name,
+                    tracks,
+                    replace_existing=True,
+                )
+            except Exception as e:
+                messagebox.showerror(
+                    "Recreate playlist",
+                    f"Could not write the host playlist:\n\n{e}",
+                )
+                return
+            verb = "Created" if result.created else "Replaced"
+            status = (
+                f"{verb} local playlist “{result.name}” "
+                f"({result.resolved} resolved, {result.unresolved} unresolved)"
+            )
+            if metadata_fetched:
+                status += f" · metadata fetched for {metadata_fetched}"
+            try:
+                self.win.set_progress_status(status)
+                self.win.lbl_device_playlist_status.configure(text=status)
+            except Exception:
+                pass
+            logger.info(
+                "Recreate device playlist locally name=%r id=%s resolved=%d "
+                "unresolved=%d meta=%d created=%s",
+                result.name,
+                result.playlist_id,
+                result.resolved,
+                result.unresolved,
+                metadata_fetched,
+                result.created,
+            )
+            self._refresh_playlist_tab(keep_selection=False)
+            try:
+                self.win.var_playlist_choice.set(result.name)
+                self._load_playlist_by_name(result.name)
+                self.win.show_playlists_tab()
+            except Exception:
+                pass
+            try:
+                self.win.lbl_playlist_status.configure(text=status)
+            except Exception:
+                pass
+
+        if n_unres == 0:
+            finish(resolved, metadata_fetched=0)
+            return
+
+        # Metadata for unresolved members (tags / possible GUID in ObjectFileName).
+        fetch = False
+        if n_unres <= RECREATE_METADATA_AUTO_MAX:
+            fetch = True
+            logger.info(
+                "Recreate local: auto Get_Trackmetadata for %d unresolved "
+                "(threshold=%d)",
+                n_unres,
+                RECREATE_METADATA_AUTO_MAX,
+            )
+        else:
+            fetch = messagebox.askyesno(
+                "Recreate playlist",
+                f"{n_unres} of {len(item_ids)} track(s) could not be matched "
+                "to the library or podcast index by GUID.\n\n"
+                f"Fetch on-device tags (Get_Trackmetadata) for those "
+                f"{n_unres} items?\n\n"
+                "Many back-to-back metadata requests can crash or poison the "
+                "USB sync session on Creative ZEN. Prefer small batches, or "
+                "skip to keep unresolved rows greyed out in the local "
+                "playlist.\n\n"
+                f"(Auto-fetch without asking when ≤{RECREATE_METADATA_AUTO_MAX} "
+                "unresolved.)",
+                default=messagebox.NO,
+            )
+
+        if not fetch:
+            finish(resolved, metadata_fetched=0)
+            return
+
+        if not self.device.is_connected():
+            messagebox.showinfo(
+                "Recreate playlist",
+                "Device is not connected — saving without metadata fetch.\n"
+                "Unresolved tracks will appear greyed out.",
+            )
+            finish(resolved, metadata_fetched=0)
+            return
+        if self._transfer_busy or self._device_tag_enrich_inflight:
+            messagebox.showinfo(
+                "Recreate playlist",
+                "Device is busy — saving without metadata fetch.",
+            )
+            finish(resolved, metadata_fetched=0)
+            return
+        if not self._device_io.try_acquire("playlist-recreate-meta"):
+            messagebox.showinfo(
+                "Recreate playlist",
+                f"Device is busy ({self._device_io.holder or 'unknown'}) — "
+                "saving without metadata fetch.",
+            )
+            finish(resolved, metadata_fetched=0)
+            return
+
+        refs = [
+            DeviceTrackRef(
+                item_id=oid,
+                name=str(resolved.names_by_item_id.get(oid) or f"id={oid}"),
+            )
+            for oid in unresolved
+        ]
+        gate_reason = "playlist-recreate-meta"
+        try:
+            self.win.set_progress_status(
+                f"Fetching tags for {n_unres} unresolved track(s)…"
+            )
+            self.win.lbl_device_playlist_status.configure(
+                text=f"Get_Trackmetadata × {n_unres}…"
+            )
+        except Exception:
+            pass
+
+        def work():
+            return device_ops.enrich_track_refs(
+                self.device, refs, stop_on_fatal=True
+            )
+
+        def on_done(result) -> None:
+            self._device_io.release(
+                reason=gate_reason, quiet_s=_DEVICE_USB_COOLDOWN_S
+            )
+            try:
+                self.win.set_progress_status("")
+            except Exception:
+                pass
+            infos: dict[int, object] = {}
+            # enrich returns refs with tags applied; rebuild DeviceTrackInfo-like
+            # mapping from refs for apply_metadata_infos.
+            from mtpmanager.domain.models import DeviceTrackInfo
+
+            for ref in result.refs or []:
+                oid = int(getattr(ref, "item_id", 0) or 0)
+                if oid <= 0:
+                    continue
+                infos[oid] = DeviceTrackInfo(
+                    item_id=oid,
+                    name=str(getattr(ref, "name", "") or ""),
+                    title=str(getattr(ref, "title", "") or ""),
+                    artist=str(getattr(ref, "artist", "") or ""),
+                    album=str(getattr(ref, "album", "") or ""),
+                    date=str(getattr(ref, "date", "") or ""),
+                    genre=str(getattr(ref, "genre", "") or ""),
+                )
+            improved = apply_metadata_infos_to_resolved_tracks(
+                resolved, infos, serial=serial
+            )
+            finish(improved, metadata_fetched=int(result.updated or 0))
+
+        def on_error(exc: BaseException) -> None:
+            self._device_io.release(
+                reason=gate_reason, quiet_s=_DEVICE_USB_COOLDOWN_S
+            )
+            try:
+                self.win.set_progress_status("")
+            except Exception:
+                pass
+            logger.warning(
+                "Recreate local metadata fetch failed: %s", exc, exc_info=True
+            )
+            if messagebox.askyesno(
+                "Recreate playlist",
+                "Fetching on-device tags failed or was interrupted:\n\n"
+                f"{exc}\n\n"
+                "Save the local playlist anyway with unresolved tracks "
+                "greyed out?",
+                default=messagebox.YES,
+            ):
+                finish(resolved, metadata_fetched=0)
+
+        self._bg.submit(
+            work,
+            on_done=on_done,
+            on_error=on_error,
+            name="playlist-recreate-meta",
+        )
 
     def action_device_playlist_play_selected(self) -> None:
         """Play host copies of selected device-playlist rows when available."""

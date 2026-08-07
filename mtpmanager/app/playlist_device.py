@@ -1,23 +1,48 @@
-"""Push a host playlist onto the device as an MTP playlist object.
+"""Device playlist push/pull helpers (host M3U ↔ MTP playlist objects).
 
-Track files must already be on the device. Membership is resolved via host
-track GUIDs → real MTP object ids in ``device_files`` (item_id > 0).
+Track files must already be on the device for push. Membership is resolved via
+host track GUIDs → real MTP object ids in ``device_files`` (item_id > 0).
+
+Recreate-local reverses the map: object id → GUID → library or podcast row.
 """
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+import os
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field
+from pathlib import Path
 
 from mtpmanager.domain.device_folders import FolderRole
-from mtpmanager.domain.models import DevicePlaylist, FileEntry, Track
-from mtpmanager.domain.track_id import is_track_guid
-from mtpmanager.infra.device_index import item_ids_for_guids, list_cached_files
+from mtpmanager.domain.models import (
+    DevicePlaylist,
+    DeviceTrackInfo,
+    FileEntry,
+    Track,
+    TrackMetadata,
+)
+from mtpmanager.domain.track_id import guid_from_remote_name, is_track_guid
+from mtpmanager.infra.device_index import (
+    files_by_item_ids,
+    guids_for_item_ids,
+    item_ids_for_guids,
+    list_cached_files,
+)
+from mtpmanager.infra.library_index import get_tracks_by_guids
+from mtpmanager.infra.playlists import (
+    create_playlist,
+    get_playlist_by_name,
+    replace_playlist_tracks,
+)
+from mtpmanager.infra.podcast_index import get_tracks_by_podcast_guids
 from mtpmanager.infra.remote_naming import (
     DEFAULT_PLAYLIST_FOLDER_ID,
     DEFAULT_STORAGE_ID,
 )
+
+# Auto-fetch Get_Trackmetadata when unresolved count is below this threshold.
+RECREATE_METADATA_AUTO_MAX = 5
 
 # libmtp 1.1.23 / pymtp_wrapper FILETYPE map (not stock pymtp's older numbers).
 _LIBMTP_FILETYPE_PLAYLIST = 43
@@ -475,4 +500,284 @@ def merge_device_playlists(
             playlist_display_name(p.name or "", p.playlist_id).casefold(),
             int(p.playlist_id),
         ),
+    )
+
+
+def unresolved_placeholder_path(item_id: int, *, name: str = "", guid: str = "") -> str:
+    """Synthetic path for a device playlist member with no host file.
+
+    Host playlist UI greys out rows whose path is missing on disk (``dead`` tag).
+    """
+    oid = int(item_id or 0)
+    g = (guid or "").strip().lower()
+    label = g if is_track_guid(g) else (name or "").strip() or "unknown"
+    # Keep path unique and non-existent on the host filesystem.
+    return f"unresolved:device:{oid}:{label}"
+
+
+def is_unresolved_placeholder_path(path: str) -> bool:
+    return (path or "").startswith("unresolved:device:")
+
+
+def item_id_from_placeholder_path(path: str) -> int | None:
+    if not is_unresolved_placeholder_path(path):
+        return None
+    parts = (path or "").split(":", 3)
+    if len(parts) < 3:
+        return None
+    try:
+        oid = int(parts[2])
+    except (TypeError, ValueError):
+        return None
+    return oid if oid > 0 else None
+
+
+@dataclass(frozen=True)
+class DevicePlaylistResolveResult:
+    """Ordered host tracks for a device playlist membership list."""
+
+    tracks: tuple[Track, ...]
+    # item_ids that did not map to a library or podcast file path.
+    unresolved_item_ids: tuple[int, ...] = ()
+    resolved: int = 0
+    # item_id → ObjectFileName (for metadata / logging).
+    names_by_item_id: Mapping[int, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class RecreateLocalPlaylistResult:
+    """Host M3U created/replaced from an on-device playlist."""
+
+    playlist_id: int
+    name: str
+    created: bool
+    track_count: int
+    resolved: int
+    unresolved: int
+    metadata_fetched: int = 0
+
+
+def _placeholder_track(
+    item_id: int,
+    *,
+    name: str = "",
+    guid: str = "",
+    title: str = "",
+    artist: str = "",
+    album: str = "",
+) -> Track:
+    oid = int(item_id or 0)
+    g = (guid or "").strip().lower() if is_track_guid(guid or "") else ""
+    remote = (name or "").strip() or (f"{g}.mp3" if g else f"id={oid}")
+    t = (title or "").strip()
+    if not t or t.casefold() == "unknown title":
+        t = remote
+    a = (artist or "").strip() or "Unknown Artist"
+    al = (album or "").strip() or "Unknown Album"
+    return Track(
+        path=unresolved_placeholder_path(oid, name=remote, guid=g),
+        meta=TrackMetadata(
+            title=t,
+            artist=a,
+            albumartist=a,
+            album=al,
+        ),
+        guid=g,
+    )
+
+
+def resolve_device_playlist_to_host_tracks(
+    serial: str,
+    item_ids: Sequence[int],
+    *,
+    path: Path | None = None,
+    library_by_guid: Mapping[str, Track] | None = None,
+    podcast_by_guid: Mapping[str, Track] | None = None,
+) -> DevicePlaylistResolveResult:
+    """Map ordered device object ids → host Tracks (library, then podcast).
+
+    Unresolved members become placeholder tracks with synthetic paths so the
+    host Playlists UI can show them greyed-out (missing file).
+    """
+    ordered = [int(x) for x in item_ids if int(x) > 0]
+    if not ordered:
+        return DevicePlaylistResolveResult(tracks=())
+
+    files = files_by_item_ids(serial, ordered, path=path)
+    guids_map = guids_for_item_ids(serial, ordered, path=path)
+    # Prefer filename stem when guid column empty.
+    for oid, entry in files.items():
+        if oid not in guids_map:
+            g = guid_from_remote_name(entry.name)
+            if g:
+                guids_map[oid] = g
+
+    all_guids = list({g for g in guids_map.values() if is_track_guid(g)})
+    lib = (
+        dict(library_by_guid)
+        if library_by_guid is not None
+        else get_tracks_by_guids(all_guids, path=path)
+    )
+    pod = (
+        dict(podcast_by_guid)
+        if podcast_by_guid is not None
+        else get_tracks_by_podcast_guids(all_guids, path=path)
+    )
+
+    tracks: list[Track] = []
+    unresolved: list[int] = []
+    names: dict[int, str] = {}
+    for oid in ordered:
+        entry = files.get(oid)
+        name = (entry.name if entry else "") or ""
+        names[oid] = name
+        g = guids_map.get(oid) or ""
+        hit: Track | None = None
+        if is_track_guid(g):
+            hit = lib.get(g) or pod.get(g)
+        if hit is not None and hit.path and not is_unresolved_placeholder_path(hit.path):
+            # Keep host path so playback works; preserve guid.
+            tracks.append(
+                Track(path=hit.path, meta=hit.meta, guid=hit.guid or g)
+            )
+            continue
+        unresolved.append(oid)
+        tracks.append(_placeholder_track(oid, name=name, guid=g))
+
+    return DevicePlaylistResolveResult(
+        tracks=tuple(tracks),
+        unresolved_item_ids=tuple(unresolved),
+        resolved=len(ordered) - len(unresolved),
+        names_by_item_id=names,
+    )
+
+
+def apply_metadata_infos_to_resolved_tracks(
+    resolved: DevicePlaylistResolveResult,
+    infos: Mapping[int, DeviceTrackInfo],
+    *,
+    serial: str = "",
+    path: Path | None = None,
+) -> DevicePlaylistResolveResult:
+    """Re-try GUID/host resolution after Get_Trackmetadata; refresh placeholders.
+
+    If metadata ObjectFileName yields a GUID that hits the library/podcast
+    index, the row becomes a real host track. Otherwise EXTINF tags improve
+    and the synthetic path stays (still greyed out).
+    """
+    if not infos:
+        return resolved
+    tracks = list(resolved.tracks)
+    names = dict(resolved.names_by_item_id)
+    # Collect candidate guids from metadata names.
+    meta_guids: list[str] = []
+    oid_to_meta_guid: dict[int, str] = {}
+    for oid, info in infos.items():
+        oid = int(oid)
+        remote = (info.name or "").strip() or names.get(oid, "")
+        if remote:
+            names[oid] = remote
+        g = guid_from_remote_name(remote) or ""
+        if not g and is_track_guid((info.title or "").strip()):
+            g = (info.title or "").strip().lower()
+        if is_track_guid(g):
+            oid_to_meta_guid[oid] = g
+            meta_guids.append(g)
+
+    lib = get_tracks_by_guids(meta_guids, path=path) if meta_guids else {}
+    pod = get_tracks_by_podcast_guids(meta_guids, path=path) if meta_guids else {}
+
+    new_unresolved: list[int] = []
+    for i, track in enumerate(tracks):
+        oid = item_id_from_placeholder_path(track.path)
+        if oid is None:
+            # Already resolved host path.
+            continue
+        info = infos.get(oid)
+        g = oid_to_meta_guid.get(oid) or (track.guid or "")
+        if is_track_guid(g):
+            hit = lib.get(g) or pod.get(g)
+            if hit is not None and hit.path and os.path.isfile(hit.path):
+                tracks[i] = Track(
+                    path=hit.path, meta=hit.meta, guid=hit.guid or g
+                )
+                continue
+        if info is not None:
+            title = (info.title or "").strip()
+            artist = (info.artist or "").strip()
+            album = (info.album or "").strip()
+            remote = names.get(oid, "")
+            tracks[i] = _placeholder_track(
+                oid,
+                name=remote or (info.name or ""),
+                guid=g,
+                title=title,
+                artist=artist,
+                album=album,
+            )
+            # duration if present
+            if info.duration_ms and info.duration_ms > 0:
+                meta = tracks[i].meta
+                tracks[i] = Track(
+                    path=tracks[i].path,
+                    meta=TrackMetadata(
+                        artist=meta.artist,
+                        albumartist=meta.albumartist,
+                        composer=meta.composer,
+                        album=meta.album,
+                        title=meta.title,
+                        genre=meta.genre,
+                        tracknumber=meta.tracknumber,
+                        date=meta.date or (info.date or ""),
+                        length_sec=float(info.duration_ms) / 1000.0,
+                    ),
+                    guid=tracks[i].guid,
+                )
+        new_unresolved.append(oid)
+
+    resolved_n = len(tracks) - len(new_unresolved)
+    return DevicePlaylistResolveResult(
+        tracks=tuple(tracks),
+        unresolved_item_ids=tuple(new_unresolved),
+        resolved=resolved_n,
+        names_by_item_id=names,
+    )
+
+
+def save_resolved_tracks_as_host_playlist(
+    name: str,
+    tracks: Sequence[Track],
+    *,
+    path: Path | None = None,
+    replace_existing: bool = True,
+) -> RecreateLocalPlaylistResult:
+    """Create or replace a host M3U playlist with *tracks* (full membership)."""
+    clean = playlist_display_name(name or "", 0)
+    if not clean or clean == "Playlist":
+        clean = (name or "").strip()
+    if not clean:
+        raise ValueError("Playlist name is required")
+
+    existing = get_playlist_by_name(clean, path=path)
+    created = False
+    if existing is None:
+        pl = create_playlist(clean, path=path)
+        created = True
+    elif not replace_existing:
+        raise ValueError(f"A playlist named {clean!r} already exists")
+    else:
+        pl = existing
+
+    pl = replace_playlist_tracks(pl.id, list(tracks), path=path)
+    unresolved = sum(
+        1 for t in tracks if is_unresolved_placeholder_path(t.path or "")
+    )
+    resolved = len(tracks) - unresolved
+    return RecreateLocalPlaylistResult(
+        playlist_id=int(pl.id),
+        name=pl.name,
+        created=created,
+        track_count=len(tracks),
+        resolved=resolved,
+        unresolved=unresolved,
     )

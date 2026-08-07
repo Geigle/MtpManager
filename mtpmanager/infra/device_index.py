@@ -656,6 +656,83 @@ def guid_stems_on_device(
         conn.close()
 
 
+def files_by_item_ids(
+    serial: str,
+    item_ids: Sequence[int] | Iterable[int],
+    *,
+    path: Path | None = None,
+) -> dict[int, FileEntry]:
+    """Return ``{item_id: FileEntry}`` for positive ids present on *serial*."""
+    key = device_serial_key(serial=serial)
+    oids = sorted({int(x) for x in item_ids if int(x) > 0})
+    if not oids:
+        return {}
+    conn, _ = _open(path)
+    try:
+        placeholders = ",".join("?" * len(oids))
+        rows = conn.execute(
+            f"SELECT item_id, name, parent_id, storage_id, filesize, filetype "
+            f"FROM device_files WHERE serial = ? AND item_id IN ({placeholders})",
+            (key, *oids),
+        ).fetchall()
+        out: dict[int, FileEntry] = {}
+        for r in rows:
+            oid = int(r["item_id"] or 0)
+            if oid <= 0:
+                continue
+            out[oid] = FileEntry(
+                item_id=oid,
+                name=str(r["name"] or ""),
+                parent_id=int(r["parent_id"] or 0),
+                storage_id=int(r["storage_id"] or 0),
+                filesize=int(r["filesize"] or 0),
+                filetype=int(r["filetype"] or 0),
+            )
+        return out
+    except sqlite3.Error as e:
+        logger.warning("files_by_item_ids failed: %s", e)
+        return {}
+    finally:
+        conn.close()
+
+
+def guids_for_item_ids(
+    serial: str,
+    item_ids: Sequence[int] | Iterable[int],
+    *,
+    path: Path | None = None,
+) -> dict[int, str]:
+    """Map positive item ids → GUID (column or ObjectFileName stem)."""
+    key = device_serial_key(serial=serial)
+    oids = sorted({int(x) for x in item_ids if int(x) > 0})
+    if not oids:
+        return {}
+    conn, _ = _open(path)
+    try:
+        placeholders = ",".join("?" * len(oids))
+        rows = conn.execute(
+            f"SELECT item_id, name, guid FROM device_files "
+            f"WHERE serial = ? AND item_id IN ({placeholders})",
+            (key, *oids),
+        ).fetchall()
+        out: dict[int, str] = {}
+        for r in rows:
+            oid = int(r["item_id"] or 0)
+            if oid <= 0:
+                continue
+            g = str(r["guid"] or "").strip().lower()
+            if not is_track_guid(g):
+                g = guid_from_remote_name(str(r["name"] or "")) or ""
+            if is_track_guid(g):
+                out[oid] = g
+        return out
+    except sqlite3.Error as e:
+        logger.warning("guids_for_item_ids failed: %s", e)
+        return {}
+    finally:
+        conn.close()
+
+
 def item_ids_for_guids(
     serial: str,
     guids: Collection[str] | Iterable[str],

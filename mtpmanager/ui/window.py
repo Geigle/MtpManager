@@ -190,6 +190,7 @@ CTX_DEVICE_PLAYLIST_MOVE_DOWN = CTX_PLAYLIST_MOVE_DOWN
 CTX_DEVICE_PLAYLIST_SHUFFLE_ARTIST = CTX_PLAYLIST_SHUFFLE_ARTIST
 CTX_DEVICE_PLAYLIST_SHUFFLE_SPOTIFY = CTX_PLAYLIST_SHUFFLE_SPOTIFY
 CTX_DEVICE_PLAYLIST_REFRESH = "Refresh from device"
+CTX_DEVICE_PLAYLIST_RECREATE_LOCAL = "Recreate playlist locally…"
 
 
 def _bind_playlist_reorder_keys(
@@ -569,6 +570,9 @@ class MainWindow:
             label="Shuffle playlist…", menu=self.menu_device_playlist_shuffle
         )
         self.menu_device_playlist_ctx.add_separator()
+        self.menu_device_playlist_ctx.add_command(
+            label=CTX_DEVICE_PLAYLIST_RECREATE_LOCAL
+        )
         self.menu_device_playlist_ctx.add_command(
             label=CTX_DEVICE_PLAYLIST_REFRESH
         )
@@ -1086,6 +1090,10 @@ class MainWindow:
             dpl_toolbar, text="Refresh from device", state=DISABLED
         )
         self.btn_device_playlist_refresh.pack(side=LEFT, padx=(8, 2))
+        self.btn_device_playlist_recreate = Button(
+            dpl_toolbar, text="Recreate locally…", state=DISABLED
+        )
+        self.btn_device_playlist_recreate.pack(side=LEFT, padx=2)
         self.btn_device_playlist_move_up = Button(
             dpl_toolbar, text="↑", width=3, state=DISABLED
         )
@@ -2268,6 +2276,7 @@ class MainWindow:
         on_delete=None,
         on_rename=None,
         on_refresh=None,
+        on_recreate_local=None,
         on_remove_tracks=None,
         on_move_up=None,
         on_move_down=None,
@@ -2290,6 +2299,11 @@ class MainWindow:
             self.btn_device_playlist_refresh.configure(command=on_refresh)
             self.menu_device_playlist_ctx.entryconfig(
                 CTX_DEVICE_PLAYLIST_REFRESH, command=on_refresh
+            )
+        if on_recreate_local is not None:
+            self.btn_device_playlist_recreate.configure(command=on_recreate_local)
+            self.menu_device_playlist_ctx.entryconfig(
+                CTX_DEVICE_PLAYLIST_RECREATE_LOCAL, command=on_recreate_local
             )
         if on_remove_tracks is not None:
             self.menu_device_playlist_ctx.entryconfig(
@@ -2360,6 +2374,7 @@ class MainWindow:
             self.var_device_playlist_choice.set("")
             self.btn_device_playlist_rename.configure(state=DISABLED)
             self.btn_device_playlist_delete.configure(state=DISABLED)
+            self.btn_device_playlist_recreate.configure(state=DISABLED)
             self.btn_device_playlist_move_up.configure(state=DISABLED)
             self.btn_device_playlist_move_down.configure(state=DISABLED)
             return
@@ -2371,6 +2386,7 @@ class MainWindow:
         btn_state = NORMAL if interactive else DISABLED
         self.btn_device_playlist_rename.configure(state=btn_state)
         self.btn_device_playlist_delete.configure(state=btn_state)
+        self.btn_device_playlist_recreate.configure(state=btn_state)
         self.btn_device_playlist_move_up.configure(state=btn_state)
         self.btn_device_playlist_move_down.configure(state=btn_state)
 

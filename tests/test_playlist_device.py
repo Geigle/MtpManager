@@ -10,7 +10,9 @@ from unittest import mock
 from mtpmanager.app.playlist_device import (
     DevicePlaylistPushResult,
     append_ids_to_order,
+    apply_metadata_infos_to_resolved_tracks,
     find_device_playlist_by_name,
+    is_unresolved_placeholder_path,
     merge_device_playlists,
     move_ids_by_indices,
     ordered_guids_from_tracks,
@@ -19,15 +21,25 @@ from mtpmanager.app.playlist_device import (
     playlists_parent_id,
     push_playlist_to_device,
     remove_ids_at_indices,
+    resolve_device_playlist_to_host_tracks,
     resolve_track_object_ids,
+    save_resolved_tracks_as_host_playlist,
 )
 from mtpmanager.domain.device_folders import (
     DeviceFolderLayout,
     FolderRole,
     legacy_zen_vision_m_layout,
 )
-from mtpmanager.domain.models import DevicePlaylist, FileEntry, Track, TrackMetadata
+from mtpmanager.domain.library import Library
+from mtpmanager.domain.models import (
+    DevicePlaylist,
+    DeviceTrackInfo,
+    FileEntry,
+    Track,
+    TrackMetadata,
+)
 from mtpmanager.infra.device_index import item_ids_for_guids, record_send
+from mtpmanager.infra.library_index import save_library_index
 from mtpmanager.infra.remote_naming import DEFAULT_PLAYLIST_FOLDER_ID
 
 
@@ -301,6 +313,129 @@ class PlaylistDeviceHelpersTests(unittest.TestCase):
                     guids_in_order=["a" * 32],
                     list_playlists=lambda: [],
                 )
+
+
+class RecreateLocalPlaylistTests(unittest.TestCase):
+    def test_resolve_maps_guid_and_placeholders(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "library_index.db"
+            serial = "SER"
+            g1, g2 = "c" * 32, "d" * 32
+            record_send(
+                serial, remote_name=f"{g1}.mp3", guid=g1, item_id=11, path=db
+            )
+            record_send(
+                serial, remote_name=f"{g2}.mp3", guid=g2, item_id=12, path=db
+            )
+            record_send(
+                serial, remote_name="nope.mp3", guid="", item_id=13, path=db
+            )
+            host = Path(tmp) / "a.mp3"
+            host.write_bytes(b"x")
+            save_library_index(
+                Library(
+                    tracks=[
+                        Track(
+                            path=str(host),
+                            meta=TrackMetadata(title="Known", artist="A"),
+                            guid=g1,
+                        )
+                    ],
+                    root_paths=[tmp],
+                ),
+                path=db,
+            )
+            result = resolve_device_playlist_to_host_tracks(
+                serial, [11, 12, 13], path=db
+            )
+            self.assertEqual(result.resolved, 1)
+            self.assertEqual(result.unresolved_item_ids, (12, 13))
+            self.assertEqual(result.tracks[0].path, str(host))
+            self.assertTrue(is_unresolved_placeholder_path(result.tracks[1].path))
+            self.assertTrue(is_unresolved_placeholder_path(result.tracks[2].path))
+
+    def test_metadata_can_recover_guid_and_labels(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "library_index.db"
+            serial = "SER2"
+            g1, g2 = "e" * 32, "f" * 32
+            record_send(
+                serial, remote_name=f"{g1}.mp3", guid=g1, item_id=21, path=db
+            )
+            record_send(
+                serial, remote_name="mystery.mp3", guid="", item_id=22, path=db
+            )
+            p1 = Path(tmp) / "1.mp3"
+            p2 = Path(tmp) / "2.mp3"
+            p1.write_bytes(b"1")
+            p2.write_bytes(b"2")
+            save_library_index(
+                Library(
+                    tracks=[
+                        Track(
+                            path=str(p1),
+                            meta=TrackMetadata(title="One"),
+                            guid=g1,
+                        ),
+                        Track(
+                            path=str(p2),
+                            meta=TrackMetadata(title="Two"),
+                            guid=g2,
+                        ),
+                    ],
+                    root_paths=[tmp],
+                ),
+                path=db,
+            )
+            base = resolve_device_playlist_to_host_tracks(
+                serial, [21, 22], path=db
+            )
+            self.assertEqual(base.resolved, 1)
+            improved = apply_metadata_infos_to_resolved_tracks(
+                base,
+                {
+                    22: DeviceTrackInfo(
+                        item_id=22,
+                        name=f"{g2}.mp3",
+                        title="FromDevice",
+                        artist="Dev",
+                    )
+                },
+                serial=serial,
+                path=db,
+            )
+            self.assertEqual(improved.resolved, 2)
+            self.assertEqual(improved.tracks[1].path, str(p2))
+
+    def test_save_host_playlist_keeps_unresolved(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "library_index.db"
+            host = Path(tmp) / "ok.mp3"
+            host.write_bytes(b"z")
+            tracks = [
+                Track(
+                    path=str(host),
+                    meta=TrackMetadata(title="OK"),
+                    guid="1" * 32,
+                ),
+                Track(
+                    path="unresolved:device:9:missing",
+                    meta=TrackMetadata(title="Missing"),
+                    guid="",
+                ),
+            ]
+            result = save_resolved_tracks_as_host_playlist(
+                "Device Mix", tracks, path=db
+            )
+            self.assertTrue(result.created)
+            self.assertEqual(result.resolved, 1)
+            self.assertEqual(result.unresolved, 1)
+            # Replace is full recreation.
+            result2 = save_resolved_tracks_as_host_playlist(
+                "Device Mix", tracks[:1], path=db, replace_existing=True
+            )
+            self.assertFalse(result2.created)
+            self.assertEqual(result2.track_count, 1)
 
 
 if __name__ == "__main__":
