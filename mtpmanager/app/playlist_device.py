@@ -234,6 +234,34 @@ def remove_ids_at_indices(
     return [int(x) for i, x in enumerate(track_ids) if i not in drop]
 
 
+def append_ids_to_order(
+    track_ids: Sequence[int],
+    new_ids: Sequence[int],
+    *,
+    skip_existing: bool = True,
+) -> tuple[list[int], int, int]:
+    """Append *new_ids* to *track_ids*.
+
+    Returns ``(merged, added_count, skipped_count)``. When *skip_existing* is
+    true, ids already present are not duplicated (first occurrence wins).
+    """
+    out = [int(x) for x in track_ids if int(x) > 0]
+    present = set(out) if skip_existing else set()
+    added = 0
+    skipped = 0
+    for raw in new_ids:
+        oid = int(raw or 0)
+        if oid <= 0:
+            continue
+        if skip_existing and oid in present:
+            skipped += 1
+            continue
+        out.append(oid)
+        present.add(oid)
+        added += 1
+    return out, added, skipped
+
+
 def playlist_display_name(name: str, playlist_id: int = 0) -> str:
     """Human label for a device playlist (strip Creative ``.zpl`` suffix)."""
     raw = (name or "").strip()

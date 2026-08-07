@@ -9,6 +9,7 @@ from unittest import mock
 
 from mtpmanager.app.playlist_device import (
     DevicePlaylistPushResult,
+    append_ids_to_order,
     find_device_playlist_by_name,
     merge_device_playlists,
     move_ids_by_indices,
@@ -104,6 +105,20 @@ class PlaylistDeviceHelpersTests(unittest.TestCase):
         ids = [10, 20, 30, 40]
         self.assertEqual(remove_ids_at_indices(ids, [1, 3]), [10, 30])
         self.assertEqual(remove_ids_at_indices(ids, []), ids)
+
+    def test_append_ids_to_order(self) -> None:
+        merged, added, skipped = append_ids_to_order(
+            [10, 20], [20, 30, 0, 40], skip_existing=True
+        )
+        self.assertEqual(merged, [10, 20, 30, 40])
+        self.assertEqual(added, 2)
+        self.assertEqual(skipped, 1)
+        merged2, added2, skipped2 = append_ids_to_order(
+            [10], [10, 10], skip_existing=False
+        )
+        self.assertEqual(merged2, [10, 10, 10])
+        self.assertEqual(added2, 2)
+        self.assertEqual(skipped2, 0)
 
     def test_playlist_display_name_strips_zpl(self) -> None:
         self.assertEqual(playlist_display_name("Rock.zpl", 1), "Rock")

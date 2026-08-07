@@ -235,9 +235,13 @@ CTX_DEVICE_DELETE = "Delete from device…"
 CTX_DEVICE_PULL = "Pull to library…"
 CTX_DEVICE_PULL_FOLDER = "Pull to folder…"
 CTX_DEVICE_FETCH_TAGS = "Fetch track tags…"
+CTX_DEVICE_ADD_TO_PLAYLIST = "Add to Device Playlist…"
 CTX_DEVICE_DELETE_ARTIST = "Delete all from Artist…"
 CTX_DEVICE_DELETE_ALBUM = "Delete album from device…"
 CTX_DEVICE_DELETE_FOLDER = "Delete all in folder…"
+CTX_DEVICE_ADD_ARTIST_TO_PLAYLIST = "Add Artist to Device Playlist…"
+CTX_DEVICE_ADD_ALBUM_TO_PLAYLIST = "Add Album to Device Playlist…"
+CTX_DEVICE_ADD_FOLDER_TO_PLAYLIST = "Add Folder to Device Playlist…"
 CTX_DEVICE_INFO = "Device Info"
 CTX_DEVICE_DELETE_ALL = "Delete All Tracks…"
 
@@ -586,15 +590,29 @@ class MainWindow:
         self.menu_device_track_ctx.add_command(label=CTX_DEVICE_PULL_FOLDER)
         self.menu_device_track_ctx.add_command(label=CTX_DEVICE_FETCH_TAGS)
         self.menu_device_track_ctx.add_separator()
+        self.menu_device_track_ctx.add_command(label=CTX_DEVICE_ADD_TO_PLAYLIST)
+        self.menu_device_track_ctx.add_separator()
         self.menu_device_track_ctx.add_command(label=CTX_DEVICE_DELETE)
 
         self.menu_device_artist_ctx = Menu(self.root, tearoff=0)
+        self.menu_device_artist_ctx.add_command(
+            label=CTX_DEVICE_ADD_ARTIST_TO_PLAYLIST
+        )
+        self.menu_device_artist_ctx.add_separator()
         self.menu_device_artist_ctx.add_command(label=CTX_DEVICE_DELETE_ARTIST)
 
         self.menu_device_album_ctx = Menu(self.root, tearoff=0)
+        self.menu_device_album_ctx.add_command(
+            label=CTX_DEVICE_ADD_ALBUM_TO_PLAYLIST
+        )
+        self.menu_device_album_ctx.add_separator()
         self.menu_device_album_ctx.add_command(label=CTX_DEVICE_DELETE_ALBUM)
 
         self.menu_device_folder_ctx = Menu(self.root, tearoff=0)
+        self.menu_device_folder_ctx.add_command(
+            label=CTX_DEVICE_ADD_FOLDER_TO_PLAYLIST
+        )
+        self.menu_device_folder_ctx.add_separator()
         self.menu_device_folder_ctx.add_command(label=CTX_DEVICE_DELETE_FOLDER)
 
         # Device panel / graphic (same actions as Device menu).
@@ -3133,9 +3151,13 @@ class MainWindow:
         on_pull=None,
         on_pull_folder=None,
         on_fetch_tags=None,
+        on_add_to_playlist=None,
         on_delete_artist=None,
         on_delete_album=None,
         on_delete_folder=None,
+        on_add_artist_to_playlist=None,
+        on_add_album_to_playlist=None,
+        on_add_folder_to_playlist=None,
         on_device_info=None,
         on_delete_all=None,
     ) -> None:
@@ -3152,21 +3174,38 @@ class MainWindow:
             self.menu_device_track_ctx.entryconfig(
                 CTX_DEVICE_FETCH_TAGS, command=on_fetch_tags
             )
+        if on_add_to_playlist is not None:
+            self.menu_device_track_ctx.entryconfig(
+                CTX_DEVICE_ADD_TO_PLAYLIST, command=on_add_to_playlist
+            )
         if on_delete is not None:
             self.menu_device_track_ctx.entryconfig(
                 CTX_DEVICE_DELETE, command=on_delete
             )
-        if on_delete_artist is not None:
+        if on_add_artist_to_playlist is not None:
             self.menu_device_artist_ctx.entryconfig(
-                0, command=on_delete_artist
+                0, command=on_add_artist_to_playlist
+            )
+        if on_delete_artist is not None:
+            # Index 2: Add, separator, Delete.
+            self.menu_device_artist_ctx.entryconfig(
+                2, command=on_delete_artist
+            )
+        if on_add_album_to_playlist is not None:
+            self.menu_device_album_ctx.entryconfig(
+                0, command=on_add_album_to_playlist
             )
         if on_delete_album is not None:
             self.menu_device_album_ctx.entryconfig(
-                0, command=on_delete_album
+                2, command=on_delete_album
+            )
+        if on_add_folder_to_playlist is not None:
+            self.menu_device_folder_ctx.entryconfig(
+                0, command=on_add_folder_to_playlist
             )
         if on_delete_folder is not None:
             self.menu_device_folder_ctx.entryconfig(
-                0, command=on_delete_folder
+                2, command=on_delete_folder
             )
         if on_device_info is not None:
             self.menu_device_panel_ctx.entryconfig(
