@@ -344,7 +344,13 @@ class HeadlessService:
             )
         except Exception as e:
             logger.exception("device_connect failed")
-            return fail("DEVICE_ERROR", str(e), exit_code=ExitCode.ERROR)
+            msg = str(e).strip() or type(e).__name__
+            return fail(
+                "DEVICE_ERROR",
+                msg,
+                exit_code=ExitCode.ERROR,
+                data={"error_type": type(e).__name__},
+            )
 
     def device_disconnect(self) -> AgentResult:
         try:

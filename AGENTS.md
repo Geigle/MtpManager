@@ -22,6 +22,7 @@
 - PyMTP / filetype / ctypes / fallback policy → [docs/debrief-pymtp-transfer-failure.md](docs/debrief-pymtp-transfer-failure.md)  
 - Opening **any new stock pymtp API** or Device menu path → [docs/pymtp-binding-hazards.md](docs/pymtp-binding-hazards.md) (failure classes + predicted breaks)  
 - “Does libmtp/pymtp support X?” / coverage gaps → [docs/libmtp-api-coverage.md](docs/libmtp-api-coverage.md)  
+- Long Experimental bulk / PTP 2002 session poison → [docs/debrief-zen-experimental-bulk-session-poison.md](docs/debrief-zen-experimental-bulk-session-poison.md)  
 
 Run/setup: [README.md](README.md), [PLATFORMS.md](PLATFORMS.md).
 

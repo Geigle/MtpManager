@@ -130,6 +130,12 @@ Tools mirror `agent tools` names (`library_search`, `sync_tracks`, …). Destruc
 - Not a network/remote API.
 - Not a replacement for [AGENTS.md](../AGENTS.md) (that doc is for **changing code**; this is for **operating** the app).
 
+## TODO / backlog
+
+| Item | Notes |
+|------|--------|
+| **`sync --playlist NAME`** | First-class CLI/MCP: resolve host M3U → tracks, dry-run / confirm, optional `--push-playlist`, batch + reconnect on fatal (so agents need no ad-hoc scripts). Wire `record_send` on after-send. Full write-up: [todo-agent-cli.md](./todo-agent-cli.md). Interim: `scripts/sync_rock_experimental.py`. |
+
 ## Related
 
 - [architecture.md](./architecture.md) — layers / composition
