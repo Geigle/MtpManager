@@ -706,7 +706,19 @@ class AppController:
         return self.device
 
     def _target_format(self) -> str:
-        return self._config.normalized_send_format()
+        return self._config.resolved_audio_encode().normalized_format()
+
+    def _encode_settings(self):
+        """Current audio encode recipe for ffmpeg convert."""
+        from mtpmanager.domain.audio_encode import resolve_settings
+
+        allowed = None
+        if self._active_profile is not None:
+            allowed = self._active_profile.send_formats_for_config()
+        return resolve_settings(
+            settings=self._config.resolved_audio_encode(),
+            allowed_formats=allowed,
+        )
 
     def _device_audio_formats(self) -> frozenset[str] | None:
         """Native playable formats from the USB-matched profile, if any.
@@ -721,16 +733,24 @@ class AppController:
 
     def on_config(self) -> None:
         """Open Config dialog; persist preferences on Save."""
+        allowed = None
+        profile_name = None
+        if self._active_profile is not None:
+            allowed = self._active_profile.send_formats_for_config()
+            profile_name = self._active_profile.display_name
         result = show_config_dialog(
             self.win.root,
             send_format=self._config.normalized_send_format(),
+            audio_encode=self._config.resolved_audio_encode(),
             show_broken_video_presets=bool(
                 self._config.show_broken_video_presets
             ),
+            allowed_send_formats=allowed,
+            profile_display_name=profile_name,
         )
         if result is None:
             return
-        self._config.send_format = result.send_format
+        self._config.apply_audio_encode(result.audio_encode)
         self._config.show_broken_video_presets = bool(
             result.show_broken_video_presets
         )
@@ -741,8 +761,9 @@ class AppController:
             messagebox.showerror("Config", f"Could not save settings:\n{e}")
             return
         logger.info(
-            "Config send_format=%s show_broken_video_presets=%s",
+            "Config send_format=%s preset=%s show_broken_video_presets=%s",
             result.send_format,
+            result.audio_encode.preset_id,
             result.show_broken_video_presets,
         )
 
@@ -9091,6 +9112,8 @@ class AppController:
         transport = self._transport()
         transcoder = self.transcoder
         device_formats = self._device_audio_formats()
+        encode_settings = self._encode_settings()
+        fmt = encode_settings.normalized_format()
         path = track.path
         self._mark_batch_queued([track])
 
@@ -9109,9 +9132,10 @@ class AppController:
 
                 logger.info(
                     "Single-track transfer start: path=%s target_format=%s "
-                    "device_formats=%s",
+                    "encode=%s device_formats=%s",
                     path,
                     fmt,
+                    encode_settings.summary_line(),
                     sorted(device_formats) if device_formats else None,
                 )
                 self._batch_track_by_path = {track.path: track}
@@ -9129,6 +9153,7 @@ class AppController:
                     should_cancel=self._should_cancel_job,
                     device_guid_stems=stems,
                     on_after_send=self._on_after_send,
+                    encode_settings=encode_settings,
                 )
                 report("progress", 1, 1, "")
                 logger.info("Single-track transfer done: path=%s", path)
@@ -9525,6 +9550,8 @@ class AppController:
         transport = self._transport()
         transcoder = self.transcoder
         device_formats = self._device_audio_formats()
+        encode_settings = self._encode_settings()
+        fmt = encode_settings.normalized_format()
         mode = self.win.active_mode()
 
         if resume_job is not None:
@@ -9550,8 +9577,9 @@ class AppController:
         self.win.set_resume_sync_enabled(False)
         self._mark_batch_queued(batch)
         logger.info(
-            "Sync job start: %s (queue=%d)",
+            "Sync job start: %s encode=%s (queue=%d)",
             job.summary_line(),
+            encode_settings.summary_line(),
             track_queue.total(),
         )
 
@@ -9578,6 +9606,7 @@ class AppController:
                 should_cancel=self._should_cancel_job,
                 device_guid_stems=stems,
                 on_after_send=self._on_after_send,
+                encode_settings=encode_settings,
             )
 
         def on_done(succeeded: int) -> None:

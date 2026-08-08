@@ -149,7 +149,16 @@ class DeviceProfile:
     graphic_filename: str = "generic_player.png"
     # Native playable audio extensions (e.g. frozenset({"mp3", "wma", "wav"})).
     supported_audio_formats: frozenset[str] = frozenset({"mp3"})
+    # Formats the user may choose as Config send targets. None = unrestricted
+    # (all app encode formats). ZEN Vision:M sets WAV/MP3/WMA only.
+    allowed_send_formats: frozenset[str] | None = None
     video_options: DeviceVideoOptions | None = None
+
+    def send_formats_for_config(self) -> frozenset[str] | None:
+        """Formats offered in Config for this profile (None = unrestricted)."""
+        if self.allowed_send_formats is not None:
+            return self.allowed_send_formats
+        return None
 
     @property
     def video_encode(self) -> VideoEncodePreset | None:

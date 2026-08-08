@@ -210,6 +210,7 @@ class HeadlessService:
             "library_roots": roots,
             "mode": cfg.active_mode(),
             "send_format": cfg.normalized_send_format(),
+            "audio_encode": cfg.resolved_audio_encode().to_dict(),
             "ffmpeg": ffmpeg,
             "ffprobe": ffprobe,
             "mtp_sendtr": mtp_sendtr,
@@ -1256,6 +1257,7 @@ class HeadlessService:
         batch_size: int,
         quiet_s: float,
         statuses: list[dict[str, str]],
+        encode_settings=None,
     ) -> tuple[int, int, AgentResult | None]:
         """Send tracks, optionally batched with PyMTP reconnect-on-fatal.
 
@@ -1288,6 +1290,7 @@ class HeadlessService:
                 on_track_status=on_status,
                 on_after_send=on_after,
                 stop_on_fatal=True,
+                encode_settings=encode_settings,
             )
             return int(n), 0, None
 
@@ -1326,6 +1329,7 @@ class HeadlessService:
                         on_track_status=_batch_status,
                         on_after_send=on_after,
                         stop_on_fatal=True,
+                        encode_settings=encode_settings,
                     )
                     succeeded += int(n)
                     i += batch_n
@@ -1435,7 +1439,8 @@ class HeadlessService:
                 exit_code=ExitCode.USAGE,
             )
 
-        target_format = cfg.normalized_send_format()
+        encode_settings = cfg.resolved_audio_encode()
+        target_format = encode_settings.normalized_format()
         device_formats = set(ZEN_VISION_M.supported_audio_formats) | set(
             GENERIC.supported_audio_formats
         )
@@ -1560,6 +1565,7 @@ class HeadlessService:
                     batch_size=effective_batch,
                     quiet_s=quiet_s,
                     statuses=statuses,
+                    encode_settings=encode_settings,
                 )
                 if early is not None:
                     early.data = {

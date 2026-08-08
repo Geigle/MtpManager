@@ -21,7 +21,14 @@ class _FakeTranscoder:
         self.temp_dir = temp_dir
         self.calls: list[tuple[str, str, int]] = []
 
-    def convert(self, src_path: str, target_format: str, *, slot: int = 0) -> str:
+    def convert(
+        self,
+        src_path: str,
+        target_format: str,
+        *,
+        slot: int = 0,
+        settings=None,
+    ) -> str:
         target_format = target_format.lower().lstrip(".")
         slot = int(slot) % NUM_SLOTS
         out = os.path.join(self.temp_dir, f"TRANSCODE_{slot}.{target_format}")

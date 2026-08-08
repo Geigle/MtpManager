@@ -6,9 +6,14 @@ import logging
 import os
 import re
 import tempfile
+from typing import Any
 
 from ffmpeg import FFmpeg
 
+from mtpmanager.domain.audio_encode import (
+    AudioEncodeSettings,
+    clamp_settings_for_format,
+)
 from mtpmanager.domain.library import is_format
 
 logger = logging.getLogger(__name__)
@@ -17,6 +22,91 @@ logger = logging.getLogger(__name__)
 # clobber the file still being sent for track N.
 _TEMP_NAME_RE = re.compile(r"^TRANSCODE(?:_[01])?\.[A-Za-z0-9]+$")
 NUM_SLOTS = 2
+
+
+def build_ffmpeg_audio_options(settings: AudioEncodeSettings) -> dict[str, Any]:
+    """Map *settings* to python-ffmpeg output kwargs (no video)."""
+    s = clamp_settings_for_format(settings)
+    fmt = s.normalized_format()
+    opts: dict[str, Any] = {}
+
+    if fmt == "mp3":
+        opts["codec:a"] = "libmp3lame"
+        if s.rate_control == "vbr" and s.vbr_quality is not None:
+            # LAME VBR quality 0 (best) … 9 (worst).
+            q = max(0, min(9, int(round(float(s.vbr_quality)))))
+            opts["q:a"] = str(q)
+        else:
+            br = int(s.bitrate_kbps or 192)
+            opts["b:a"] = f"{br}k"
+            if s.rate_control == "abr":
+                # Approximate ABR via VBR constrained around target.
+                opts["abr"] = "1"
+
+    elif fmt == "wma":
+        opts["codec:a"] = "wmav2"
+        br = int(s.bitrate_kbps or 128)
+        opts["b:a"] = f"{br}k"
+
+    elif fmt == "wav":
+        depth = s.bit_depth or 16
+        if depth >= 32:
+            opts["codec:a"] = "pcm_s32le"
+        elif depth >= 24:
+            opts["codec:a"] = "pcm_s24le"
+        else:
+            opts["codec:a"] = "pcm_s16le"
+
+    elif fmt == "flac":
+        opts["codec:a"] = "flac"
+        level = s.compression_level if s.compression_level is not None else 5
+        opts["compression_level"] = str(max(0, min(12, int(level))))
+        # Sample format hint when we force bit depth.
+        if s.bit_depth and s.bit_depth >= 24:
+            opts["sample_fmt"] = "s32"
+        else:
+            opts["sample_fmt"] = "s16"
+
+    elif fmt in ("aac", "m4a"):
+        opts["codec:a"] = "aac"
+        if s.rate_control == "vbr" and s.vbr_quality is not None:
+            # ffmpeg aac encoder quality roughly 0.1–2.
+            q = max(0.1, min(2.0, float(s.vbr_quality)))
+            opts["q:a"] = str(q)
+        else:
+            br = int(s.bitrate_kbps or 192)
+            opts["b:a"] = f"{br}k"
+
+    elif fmt == "ogg":
+        opts["codec:a"] = "libvorbis"
+        if s.vbr_quality is not None:
+            q = max(0.0, min(10.0, float(s.vbr_quality)))
+            opts["q:a"] = str(q)
+        elif s.bitrate_kbps:
+            opts["b:a"] = f"{int(s.bitrate_kbps)}k"
+        else:
+            opts["q:a"] = "4"
+
+    elif fmt == "opus":
+        opts["codec:a"] = "libopus"
+        br = int(s.bitrate_kbps or 96)
+        opts["b:a"] = f"{br}k"
+        # Prefer VBR for Opus unless user forced CBR.
+        if s.rate_control == "cbr":
+            opts["vbr"] = "off"
+        else:
+            opts["vbr"] = "on"
+
+    else:
+        # Fallback: extension-driven mux + high quality MP3-ish.
+        opts["q:a"] = "0"
+
+    if s.sample_rate and s.sample_rate > 0:
+        opts["ar"] = str(int(s.sample_rate))
+    if s.channels in (1, 2):
+        opts["ac"] = str(int(s.channels))
+
+    return opts
 
 
 class FFmpegTranscoder:
@@ -29,13 +119,30 @@ class FFmpegTranscoder:
         slot = int(slot) % NUM_SLOTS
         return os.path.join(self.temp_dir, f"TRANSCODE_{slot}.{target_format}")
 
-    def convert(self, src_path: str, target_format: str, *, slot: int = 0) -> str:
+    def convert(
+        self,
+        src_path: str,
+        target_format: str,
+        *,
+        slot: int = 0,
+        settings: AudioEncodeSettings | None = None,
+    ) -> str:
         """Transcode *src_path* into dual-buffer *slot*; return path to send.
 
         If *src_path* is already the target format, returns *src_path* unchanged
         (caller must not cleanup the original).
+
+        When *settings* is provided, ffmpeg options come from the encode
+        recipe (bitrate, VBR quality, channels, sample rate, etc.). Otherwise
+        a format-only default is used (legacy behavior).
         """
-        target_format = target_format.lower().lstrip(".")
+        if settings is not None:
+            s = clamp_settings_for_format(settings)
+            target_format = s.file_extension()
+        else:
+            target_format = target_format.lower().lstrip(".")
+            s = None
+
         if is_format(src_path, target_format):
             return src_path
 
@@ -43,20 +150,17 @@ class FFmpegTranscoder:
         if os.path.exists(output_file):
             self.cleanup(output_file)
 
-        if target_format == "wma":
-            output_details: dict = {"codec:a": "wmav2"}
-        elif target_format == "wav":
-            # PCM WAV — widely accepted by older DAP / MTP players.
-            output_details = {"codec:a": "pcm_s16le"}
+        if s is not None:
+            output_details = build_ffmpeg_audio_options(s)
         else:
-            # Default: MP3 (or other) via ffmpeg's extension-based muxer.
-            output_details = {"qscale:a": "0"}
+            output_details = _legacy_format_options(target_format)
 
         logger.info(
-            "Converting %s → %s (slot=%d)",
+            "Converting %s → %s (slot=%d, %s)",
             src_path,
             output_file,
             int(slot) % NUM_SLOTS,
+            (s.summary_line() if s is not None else target_format),
         )
         ffmpeg = FFmpeg().input(src_path).output(output_file, output_details)
         try:
@@ -73,19 +177,24 @@ class FFmpegTranscoder:
         dest_path: str,
         *,
         target_format: str = "mp3",
+        settings: AudioEncodeSettings | None = None,
     ) -> str:
         """Demux/encode audio only from a media file (e.g. video podcast).
 
         Writes *dest_path* and returns it. Always re-encodes (does not
         short-circuit on source extension).
         """
-        target_format = (target_format or "mp3").lower().lstrip(".")
-        if target_format == "wma":
-            output_details: dict = {"vn": None, "codec:a": "wmav2"}
-        elif target_format == "wav":
-            output_details = {"vn": None, "codec:a": "pcm_s16le"}
+        if settings is not None:
+            s = clamp_settings_for_format(settings)
+            target_format = s.file_extension()
+            output_details = build_ffmpeg_audio_options(s)
         else:
-            output_details = {"vn": None, "qscale:a": "0"}
+            target_format = (target_format or "mp3").lower().lstrip(".")
+            s = None
+            output_details = _legacy_format_options(target_format)
+
+        # Strip video for extract path.
+        output_details = {"vn": None, **output_details}
 
         parent = os.path.dirname(dest_path)
         if parent:
@@ -96,7 +205,12 @@ class FFmpegTranscoder:
             except OSError:
                 pass
 
-        logger.info("Extracting audio %s → %s", src_path, dest_path)
+        logger.info(
+            "Extracting audio %s → %s (%s)",
+            src_path,
+            dest_path,
+            s.summary_line() if s is not None else target_format,
+        )
         ffmpeg = FFmpeg().input(src_path).output(dest_path, output_details)
         try:
             ffmpeg.execute()
@@ -125,3 +239,21 @@ class FFmpegTranscoder:
             logger.warning("No permission to delete %s", path)
         except Exception as e:
             logger.warning("Error while deleting %s: %s", path, e)
+
+
+def _legacy_format_options(target_format: str) -> dict[str, Any]:
+    """Pre-preset defaults (match historical MtpManager behavior)."""
+    if target_format == "wma":
+        return {"codec:a": "wmav2"}
+    if target_format == "wav":
+        return {"codec:a": "pcm_s16le"}
+    if target_format == "flac":
+        return {"codec:a": "flac"}
+    if target_format in ("aac", "m4a"):
+        return {"codec:a": "aac", "b:a": "192k"}
+    if target_format == "ogg":
+        return {"codec:a": "libvorbis", "q:a": "4"}
+    if target_format == "opus":
+        return {"codec:a": "libopus", "b:a": "128k"}
+    # Default: MP3 via high-quality VBR (legacy qscale:a 0).
+    return {"qscale:a": "0"}

@@ -5,16 +5,24 @@ from __future__ import annotations
 import json
 import logging
 import os
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 
+from mtpmanager.domain.audio_encode import (
+    ALL_AUDIO_SEND_FORMATS,
+    AudioEncodeSettings,
+    clamp_settings_for_format,
+    default_audio_encode_settings,
+    settings_from_legacy_format,
+)
 from mtpmanager.infra.app_paths import default_data_dir
 
 logger = logging.getLogger(__name__)
 
 CONFIG_FILENAME = "config.json"
 CONFIG_VERSION = 1
-VALID_SEND_FORMATS = frozenset({"mp3", "wma", "wav"})
+# All formats the app can encode; device profiles may restrict further in UI.
+VALID_SEND_FORMATS = frozenset(ALL_AUDIO_SEND_FORMATS)
 DEFAULT_SEND_FORMAT = "mp3"
 
 # Audio→still-video (ZVM ZENcast). Proven on device: 2 fps · 128×96 (~4:3).
@@ -116,6 +124,9 @@ class AppConfig:
     """User preferences loaded from disk."""
 
     send_format: str = DEFAULT_SEND_FORMAT
+    # Full encode recipe (bitrate, VBR, channels, …). Drives ffmpeg convert.
+    # *send_format* is kept in sync with audio_encode.format for older readers.
+    audio_encode: AudioEncodeSettings | None = None
     # When True, transfers use mtp-sendtr (Stable). Default is PyMTP (Experimental).
     stable_mode: bool = False
     # After Experimental (PyMTP) music sync: create/update MTP album objects and
@@ -164,8 +175,30 @@ class AppConfig:
     def normalized_send_format(self) -> str:
         fmt = (self.send_format or DEFAULT_SEND_FORMAT).lower().lstrip(".")
         if fmt not in VALID_SEND_FORMATS:
+            # audio_encode may still be authoritative
+            if self.audio_encode is not None:
+                fmt = self.audio_encode.normalized_format()
+                if fmt in VALID_SEND_FORMATS:
+                    return fmt
             return DEFAULT_SEND_FORMAT
         return fmt
+
+    def resolved_audio_encode(self) -> AudioEncodeSettings:
+        """Concrete encode settings (never None)."""
+        if self.audio_encode is not None:
+            s = clamp_settings_for_format(self.audio_encode)
+            # Keep format aligned with send_format when they drift.
+            if s.normalized_format() != self.normalized_send_format():
+                # Prefer audio_encode as source of truth if present.
+                return s
+            return s
+        return settings_from_legacy_format(self.normalized_send_format())
+
+    def apply_audio_encode(self, settings: AudioEncodeSettings) -> None:
+        """Set encode recipe and mirror format into *send_format*."""
+        s = clamp_settings_for_format(settings)
+        self.audio_encode = s
+        self.send_format = s.normalized_format()
 
     def active_mode(self) -> str:
         """Return ``\"stable\"`` or ``\"experimental\"``."""
@@ -202,6 +235,12 @@ def load_app_config(*, path: Path | None = None) -> AppConfig:
     fmt = raw.get("send_format", DEFAULT_SEND_FORMAT)
     if not isinstance(fmt, str):
         fmt = DEFAULT_SEND_FORMAT
+    audio_raw = raw.get("audio_encode")
+    if isinstance(audio_raw, dict):
+        audio_enc = AudioEncodeSettings.from_dict(audio_raw)
+    else:
+        # Legacy configs only had send_format.
+        audio_enc = settings_from_legacy_format(fmt)
     artist = _as_bool(raw.get("store_tracks_in_artist_folder"), False)
     album = _as_bool(raw.get("store_tracks_in_album_folder"), False)
     # Album folders only make sense under artist folders.
@@ -209,6 +248,7 @@ def load_app_config(*, path: Path | None = None) -> AppConfig:
         album = False
     cfg = AppConfig(
         send_format=fmt,
+        audio_encode=audio_enc,
         stable_mode=_as_bool(raw.get("stable_mode"), False),
         sync_album_art=_as_bool(raw.get("sync_album_art"), True),
         enable_experimental_tools=_as_bool(
@@ -266,7 +306,13 @@ def load_app_config(*, path: Path | None = None) -> AppConfig:
     )
     cfg.audio_podcast_still_width = sw
     cfg.audio_podcast_still_height = sh
+    # Prefer audio_encode.format when present.
+    if cfg.audio_encode is not None:
+        cfg.audio_encode = clamp_settings_for_format(cfg.audio_encode)
+        cfg.send_format = cfg.audio_encode.normalized_format()
     cfg.send_format = cfg.normalized_send_format()
+    if cfg.audio_encode is None:
+        cfg.audio_encode = settings_from_legacy_format(cfg.send_format)
     return cfg
 
 
@@ -276,9 +322,11 @@ def save_app_config(config: AppConfig, *, path: Path | None = None) -> Path:
     dest.parent.mkdir(parents=True, exist_ok=True)
     artist = bool(config.store_tracks_in_artist_folder)
     album = bool(config.store_tracks_in_album_folder) and artist
+    encode = config.resolved_audio_encode()
     payload = {
         "version": CONFIG_VERSION,
-        "send_format": config.normalized_send_format(),
+        "send_format": encode.normalized_format(),
+        "audio_encode": encode.to_dict(),
         "stable_mode": bool(config.stable_mode),
         "sync_album_art": bool(config.sync_album_art),
         "enable_experimental_tools": bool(config.enable_experimental_tools),

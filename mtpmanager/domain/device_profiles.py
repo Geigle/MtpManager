@@ -128,6 +128,8 @@ ZEN_VISION_M = DeviceProfile(
     graphic_filename="zen_vision_m.png",
     # Official Creative formats for Vision:M: MP3, WMA, WAV (PCM).
     supported_audio_formats=frozenset({"mp3", "wma", "wav"}),
+    # Config send targets restricted to what the player can play.
+    allowed_send_formats=frozenset({"mp3", "wma", "wav"}),
     video_options=ZEN_VISION_M_VIDEO_OPTIONS,
 )
 
@@ -140,6 +142,8 @@ GENERIC = DeviceProfile(
     graphic_filename="generic_player.png",
     # Conservative default when the player is unknown.
     supported_audio_formats=frozenset({"mp3"}),
+    # Unrestricted Config encode formats (None = all app-supported).
+    allowed_send_formats=None,
     video_options=None,
 )
 

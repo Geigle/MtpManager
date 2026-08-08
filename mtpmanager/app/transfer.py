@@ -18,6 +18,7 @@ from mtpmanager.app.cancellation import (
     raise_if_cancelled,
 )
 from mtpmanager.app.transfer_queue import BatchTransferQueue
+from mtpmanager.domain.audio_encode import AudioEncodeSettings
 from mtpmanager.domain.device_profile import needs_transcode
 from mtpmanager.domain.models import Track, TrackMetadata
 from mtpmanager.domain.track_id import is_track_guid, new_track_guid
@@ -98,14 +99,21 @@ def prepare_track(
     on_track_status: TrackStatusCallback | None = None,
     device_formats: Collection[str] | None = None,
     should_cancel: CancelCheck | None = None,
+    encode_settings: AudioEncodeSettings | None = None,
 ) -> PreparedTrack:
     """Transcode into *slot* if needed; return path/meta for send (no send yet).
 
     When *device_formats* is set, sources already in a native device format are
     sent as-is (no re-encode), even if they differ from *target_format*.
+
+    *encode_settings* (when set) drives bitrate/VBR/channels for the convert;
+    *target_format* should match the settings file extension.
     """
     raise_if_cancelled(should_cancel)
-    target_format = target_format.lower().lstrip(".")
+    if encode_settings is not None:
+        target_format = encode_settings.file_extension()
+    else:
+        target_format = target_format.lower().lstrip(".")
     src = track.path
     meta = track.meta
     cleanup_path: str | None = None
@@ -114,7 +122,9 @@ def prepare_track(
         src, target_format=target_format, device_formats=device_formats
     ):
         _notify_status(on_track_status, track.path, "transcoding")
-        src = transcoder.convert(src, target_format, slot=slot)
+        src = transcoder.convert(
+            src, target_format, slot=slot, settings=encode_settings
+        )
         cleanup_path = src
         if reread_tags_after_convert:
             converted = read_metadata(src)
@@ -186,6 +196,7 @@ def transfer_track(
     should_cancel: CancelCheck | None = None,
     device_guid_stems: Collection[str] | None = None,
     on_after_send: AfterSendCallback | None = None,
+    encode_settings: AudioEncodeSettings | None = None,
 ) -> None:
     """
     Ensure track is device-ready (transcode if needed), then send via transport.
@@ -217,6 +228,7 @@ def transfer_track(
         on_track_status=on_track_status,
         device_formats=device_formats,
         should_cancel=should_cancel,
+        encode_settings=encode_settings,
     )
     try:
         raise_if_cancelled(should_cancel, total=1)
@@ -259,6 +271,7 @@ def transfer_tracks(
     should_cancel: CancelCheck | None = None,
     device_guid_stems: Collection[str] | None = None,
     on_after_send: AfterSendCallback | None = None,
+    encode_settings: AudioEncodeSettings | None = None,
 ) -> int:
     """Transfer many tracks with dual-slot convert/send pipeline.
 
@@ -353,6 +366,7 @@ def transfer_tracks(
             on_track_status=on_track_status,
             device_formats=device_formats,
             should_cancel=should_cancel,
+            encode_settings=encode_settings,
         )
 
     def _live_total() -> int:

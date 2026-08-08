@@ -132,12 +132,22 @@ class AppConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             dest = Path(tmp) / "config.json"
             dest.write_text(
-                json.dumps({"version": 1, "send_format": "flac"}),
+                json.dumps({"version": 1, "send_format": "not-a-codec"}),
                 encoding="utf-8",
             )
             cfg = load_app_config(path=dest)
             self.assertEqual(cfg.normalized_send_format(), "mp3")
             self.assertFalse(cfg.stable_mode)
+
+    def test_flac_is_valid_send_format(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "config.json"
+            dest.write_text(
+                json.dumps({"version": 1, "send_format": "flac"}),
+                encoding="utf-8",
+            )
+            cfg = load_app_config(path=dest)
+            self.assertEqual(cfg.normalized_send_format(), "flac")
 
     def test_wav_is_valid_send_format(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
