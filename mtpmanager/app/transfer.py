@@ -120,7 +120,10 @@ def prepare_track(
     meta = track.meta
     cleanup_path: str | None = None
 
-    if needs_transcode(
+    force_tempo = bool(
+        encode_settings is not None and encode_settings.needs_tempo_filter()
+    )
+    if force_tempo or needs_transcode(
         src, target_format=target_format, device_formats=device_formats
     ):
         _notify_status(on_track_status, track.path, "transcoding")

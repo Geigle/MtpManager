@@ -32,6 +32,8 @@ from tkinter import ttk
 
 from mtpmanager.domain.audio_encode import (
     BIT_DEPTH_CHOICES,
+    PLAYBACK_SPEED_MAX,
+    PLAYBACK_SPEED_MIN,
     SAMPLE_RATE_CHOICES,
     AudioEncodeSettings,
     bitrate_choices_for_format,
@@ -39,6 +41,7 @@ from mtpmanager.domain.audio_encode import (
     format_display_name,
     formats_allowed,
     get_preset,
+    normalize_playback_speed,
     presets_for_format,
     resolve_settings,
 )
@@ -2344,6 +2347,8 @@ class PodcastShowEncodeResult:
     # True when the show uses a custom recipe; False clears the override.
     use_override: bool
     audio_encode: AudioEncodeSettings | None = None
+    # Encode-time tempo (1.0 = normal). Applied even when use_override is False.
+    playback_speed: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -3038,13 +3043,17 @@ def show_podcast_show_encode_dialog(
     show_title: str,
     use_override: bool = False,
     audio_encode: AudioEncodeSettings | None = None,
+    playback_speed: float = 1.0,
     inherit_summary: str = "",
     allowed_send_formats: frozenset[str] | None = None,
     profile_display_name: str | None = None,
 ) -> PodcastShowEncodeResult | None:
     """Per-show encode override (Podcasts tab context menu). Save → result."""
+    from tkinter import DoubleVar, Scale
+
     title = (show_title or "Podcast").strip() or "Podcast"
     inherit = (inherit_summary or "").strip() or "podcast default / Config"
+    speed0 = normalize_playback_speed(playback_speed)
     if use_override and audio_encode is not None:
         initial = resolve_settings(
             settings=audio_encode,
@@ -3090,8 +3099,51 @@ def show_podcast_show_encode_dialog(
         initial=initial,
         allowed_send_formats=allowed_send_formats,
         checkbox_text="Use custom encode for this show",
-        list_height=6,
+        list_height=5,
     )
+
+    # Playback speed (always available; applied at ffmpeg convert for this show).
+    ttk.Separator(body, orient="horizontal").pack(fill="x", pady=(10, 8))
+    Label(
+        body,
+        text="Playback speed",
+        font=("", 11, "bold"),
+        anchor="w",
+    ).pack(fill="x", pady=(0, 2))
+    Label(
+        body,
+        text=(
+            "Speeds up (or slows down) audio when converting for the device "
+            f"({PLAYBACK_SPEED_MIN:g}×–{PLAYBACK_SPEED_MAX:g}×). 1.0× is normal."
+        ),
+        justify=LEFT,
+        wraplength=420,
+        fg="#333",
+    ).pack(anchor="w", pady=(0, 4))
+    speed_row = Frame(body)
+    speed_row.pack(fill="x", pady=(0, 4))
+    speed_var = DoubleVar(value=float(speed0))
+    speed_label = Label(speed_row, text=f"{speed0:g}×", width=6, anchor="e")
+    speed_label.pack(side=RIGHT)
+
+    def _on_speed(_v=None) -> None:
+        try:
+            s = normalize_playback_speed(speed_var.get())
+        except Exception:
+            s = 1.0
+        speed_label.configure(text=f"{s:g}×")
+
+    Scale(
+        speed_row,
+        from_=PLAYBACK_SPEED_MIN,
+        to=PLAYBACK_SPEED_MAX,
+        resolution=0.05,
+        orient="horizontal",
+        variable=speed_var,
+        length=300,
+        command=_on_speed,
+    ).pack(side=LEFT, fill="x", expand=True)
+    _on_speed()
 
     allowed_tuple = formats_allowed(allowed_send_formats)
     if allowed_send_formats is not None:
@@ -3112,6 +3164,7 @@ def show_podcast_show_encode_dialog(
         result[0] = PodcastShowEncodeResult(
             use_override=use,
             audio_encode=get_settings() if use else None,
+            playback_speed=normalize_playback_speed(speed_var.get()),
         )
         dlg.destroy()
 

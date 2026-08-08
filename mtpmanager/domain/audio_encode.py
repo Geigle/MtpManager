@@ -88,6 +88,9 @@ class AudioEncodeSettings:
     bit_depth: int | None = 16
     # FLAC compression 0–12 (ffmpeg flac).
     compression_level: int | None = 5
+    # Playback speed multiplier for encode-time tempo (1.0 = unchanged).
+    # Applied via ffmpeg atempo; used for podcasts (and any convert with settings).
+    playback_speed: float = 1.0
     # Human label for status / dialogs.
     label: str = "MP3 VBR ~192 kbps"
 
@@ -107,25 +110,36 @@ class AudioEncodeSettings:
             return "aac"
         return fmt
 
+    def normalized_playback_speed(self) -> float:
+        """Clamped speed for ffmpeg atempo (1.0 when unset/invalid)."""
+        return normalize_playback_speed(self.playback_speed)
+
+    def needs_tempo_filter(self) -> bool:
+        return abs(self.normalized_playback_speed() - 1.0) >= 0.01
+
     def summary_line(self) -> str:
         """One-line description for Config / status."""
         if self.label:
-            return self.label
-        fmt = self.normalized_format().upper()
-        parts = [fmt, self.rate_control.upper()]
-        if self.rate_control in ("cbr", "abr") and self.bitrate_kbps:
-            parts.append(f"{self.bitrate_kbps} kbps")
-        elif self.rate_control == "vbr" and self.vbr_quality is not None:
-            parts.append(f"q={self.vbr_quality:g}")
-        if self.sample_rate:
-            parts.append(f"{self.sample_rate} Hz")
-        if self.channels == 1:
-            parts.append("mono")
-        elif self.channels == 2:
-            parts.append("stereo")
-        if self.bit_depth and self.rate_control in ("pcm", "lossless"):
-            parts.append(f"{self.bit_depth}-bit")
-        return " · ".join(parts)
+            base = self.label
+        else:
+            fmt = self.normalized_format().upper()
+            parts = [fmt, self.rate_control.upper()]
+            if self.rate_control in ("cbr", "abr") and self.bitrate_kbps:
+                parts.append(f"{self.bitrate_kbps} kbps")
+            elif self.rate_control == "vbr" and self.vbr_quality is not None:
+                parts.append(f"q={self.vbr_quality:g}")
+            if self.sample_rate:
+                parts.append(f"{self.sample_rate} Hz")
+            if self.channels == 1:
+                parts.append("mono")
+            elif self.channels == 2:
+                parts.append("stereo")
+            if self.bit_depth and self.rate_control in ("pcm", "lossless"):
+                parts.append(f"{self.bit_depth}-bit")
+            base = " · ".join(parts)
+        if self.needs_tempo_filter():
+            return f"{base} · {self.normalized_playback_speed():g}×"
+        return base
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -162,6 +176,9 @@ class AudioEncodeSettings:
             comp = _opt_int(kwargs.get("compression_level"), base.compression_level)
             if comp is not None:
                 comp = max(0, min(12, comp))
+            speed = normalize_playback_speed(
+                kwargs.get("playback_speed", base.playback_speed)
+            )
             label = str(kwargs.get("label") or "").strip() or base.label
             settings = AudioEncodeSettings(
                 format=fmt,
@@ -173,11 +190,46 @@ class AudioEncodeSettings:
                 channels=ch,
                 bit_depth=depth,
                 compression_level=comp,
+                playback_speed=speed,
                 label=label,
             )
             return clamp_settings_for_format(settings)
         except Exception:
             return default_audio_encode_settings()
+
+
+# ffmpeg atempo accepts 0.5–2.0 per filter; we chain for a wider UI range.
+PLAYBACK_SPEED_MIN = 0.5
+PLAYBACK_SPEED_MAX = 3.0
+
+
+def normalize_playback_speed(value: object) -> float:
+    """Return a safe playback-speed multiplier (default 1.0)."""
+    try:
+        s = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 1.0
+    if s <= 0 or s != s:  # non-positive or NaN
+        return 1.0
+    return max(PLAYBACK_SPEED_MIN, min(PLAYBACK_SPEED_MAX, s))
+
+
+def atempo_filter_chain(speed: float) -> str | None:
+    """Build an ffmpeg audio filter chain for *speed*, or None at 1×."""
+    s = normalize_playback_speed(speed)
+    if abs(s - 1.0) < 0.01:
+        return None
+    factors: list[float] = []
+    remaining = s
+    # Each atempo stage must stay within [0.5, 2.0].
+    while remaining > 2.0 + 1e-9:
+        factors.append(2.0)
+        remaining /= 2.0
+    while remaining < 0.5 - 1e-9:
+        factors.append(0.5)
+        remaining /= 0.5
+    factors.append(remaining)
+    return ",".join(f"atempo={f:.6g}" for f in factors)
 
 
 def _opt_int(value: object, default: int | None) -> int | None:
@@ -217,6 +269,7 @@ class AudioEncodePreset:
 def clamp_settings_for_format(s: AudioEncodeSettings) -> AudioEncodeSettings:
     """Coerce rate_control / fields that do not apply to the container."""
     fmt = s.normalized_format()
+    speed = normalize_playback_speed(s.playback_speed)
     if fmt in ("wav",):
         return replace(
             s,
@@ -226,6 +279,7 @@ def clamp_settings_for_format(s: AudioEncodeSettings) -> AudioEncodeSettings:
             vbr_quality=None,
             compression_level=None,
             bit_depth=s.bit_depth if s.bit_depth in BIT_DEPTH_CHOICES else 16,
+            playback_speed=speed,
         )
     if fmt == "flac":
         return replace(
@@ -240,6 +294,7 @@ def clamp_settings_for_format(s: AudioEncodeSettings) -> AudioEncodeSettings:
                 else 5
             ),
             bit_depth=s.bit_depth if s.bit_depth in (16, 24) else 16,
+            playback_speed=speed,
         )
     if fmt == "wma":
         # FFmpeg wmav2 is effectively CBR/ABR via bitrate.
@@ -251,6 +306,7 @@ def clamp_settings_for_format(s: AudioEncodeSettings) -> AudioEncodeSettings:
             bitrate_kbps=max(32, min(320, br)),
             vbr_quality=None,
             compression_level=None,
+            playback_speed=speed,
         )
     if fmt in ("mp3", "aac", "m4a", "ogg", "opus"):
         rc = s.rate_control
@@ -262,8 +318,9 @@ def clamp_settings_for_format(s: AudioEncodeSettings) -> AudioEncodeSettings:
             rate_control=rc,  # type: ignore[arg-type]
             compression_level=None,
             bit_depth=None,
+            playback_speed=speed,
         )
-    return replace(s, format=fmt)
+    return replace(s, format=fmt, playback_speed=speed)
 
 
 def default_audio_encode_settings() -> AudioEncodeSettings:

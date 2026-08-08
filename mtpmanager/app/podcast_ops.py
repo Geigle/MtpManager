@@ -705,6 +705,41 @@ def upsert_scheduled_day_playlist(
     )
 
 
+def add_episode_to_day_host_playlist(
+    episode: PodcastEpisode,
+    *,
+    when: datetime | None = None,
+    path: Path | None = None,
+) -> DayPlaylistResult | None:
+    """Append one episode to today's host day playlist (if not already present)."""
+    return upsert_scheduled_day_playlist([episode], when=when, path=path)
+
+
+def remove_episode_from_day_host_playlist(
+    guid: str,
+    *,
+    when: datetime | None = None,
+    path: Path | None = None,
+) -> bool:
+    """Remove ``podcast:<guid>`` from today's host day playlist if present.
+
+    Returns True when a playlist was found and rewritten (even if path absent).
+    """
+    from mtpmanager.infra.playlists import remove_paths_from_playlist
+
+    g = (guid or "").strip().lower()
+    if not is_track_guid(g):
+        return False
+    name = podcast_day_playlist_name(when)
+    existing = get_playlist_by_name(name, path=path)
+    if existing is None:
+        return False
+    remove_paths_from_playlist(
+        existing.id, [f"podcast:{g}"], path=path
+    )
+    return True
+
+
 def pending_episodes_for_device_sync(
     *,
     device_guids: Collection[str] | None = None,

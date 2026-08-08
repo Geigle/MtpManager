@@ -89,6 +89,8 @@ TREE_COLS = ("title", "artist", "album", "year")
 # Library menu labels (used for entryconfig by label).
 MENU_MANAGE_LIBRARY = "Manage Library…"
 MENU_MANAGE_PLAYLISTS = "Manage Playlists…"
+# Label is updated dynamically with today's day-playlist name.
+MENU_FINISH_DAY_PODCAST_SYNC = "Finish Sync (day playlist)"
 # Back-compat aliases (older docs / call sites).
 MENU_SELECT_ROOT = MENU_MANAGE_LIBRARY
 MENU_UPDATE_LIBRARY = MENU_MANAGE_LIBRARY
@@ -133,6 +135,9 @@ CTX_PODCAST_EPISODE_SYNC = "Sync Episodes Now"
 CTX_PODCAST_PLAY_EPISODE = "Play This Episode"
 CTX_PODCAST_PLAY_EPISODES = "Play These Episodes"
 CTX_PODCAST_REVEAL_DOWNLOAD = "Reveal Download in Finder"
+# Labels updated dynamically with today's day-playlist name.
+CTX_PODCAST_ADD_TO_DAY_PLAYLIST = "Add This Episode to Day Playlist"
+CTX_PODCAST_REMOVE_FROM_DAY_PLAYLIST = "Remove This Episode from Day Playlist"
 
 # Device menu (PyMTP / default)
 MENU_CONNECT = "Connect"
@@ -464,6 +469,11 @@ class MainWindow:
         self.menubar.add_cascade(label="Library", menu=self.menu_library)
         self.menu_library.add_command(label=MENU_MANAGE_LIBRARY)
         self.menu_library.add_command(label=MENU_MANAGE_PLAYLISTS)
+        self.menu_library.add_separator()
+        self.menu_library.add_command(
+            label=MENU_FINISH_DAY_PODCAST_SYNC, state=DISABLED
+        )
+        self._finish_day_podcast_menu_label = MENU_FINISH_DAY_PODCAST_SYNC
 
         self.menu_transfer = Menu(self.menubar, tearoff=0)
         self.menubar.add_cascade(label="Transfer", menu=self.menu_transfer)
@@ -588,6 +598,13 @@ class MainWindow:
         self.menu_podcast_episode_ctx = Menu(self.root, tearoff=0)
         self.menu_podcast_episode_ctx.add_command(label=CTX_PODCAST_PLAY_EPISODE)
         self.menu_podcast_episode_ctx.add_command(label=CTX_PODCAST_EPISODE_SYNC)
+        self.menu_podcast_episode_ctx.add_separator()
+        self.menu_podcast_episode_ctx.add_command(
+            label=CTX_PODCAST_ADD_TO_DAY_PLAYLIST, state=DISABLED
+        )
+        self.menu_podcast_episode_ctx.add_command(
+            label=CTX_PODCAST_REMOVE_FROM_DAY_PLAYLIST, state=DISABLED
+        )
         self.menu_podcast_episode_ctx.add_separator()
         self.menu_podcast_episode_ctx.add_command(
             label=CTX_PODCAST_REVEAL_DOWNLOAD, state=DISABLED
@@ -1600,6 +1617,7 @@ class MainWindow:
         *,
         on_manage_library,
         on_manage_playlists=None,
+        on_finish_day_podcast_sync=None,
         on_select_root=None,
         on_update=None,
         **_legacy,
@@ -1608,6 +1626,7 @@ class MainWindow:
 
         *on_manage_library* opens the roots manager (add/remove/update).
         *on_manage_playlists* focuses the Playlists notebook tab.
+        *on_finish_day_podcast_sync* pushes today's day podcast playlist to the device.
         *on_select_root* / *on_update* / legacy kwargs are ignored.
         """
         del on_select_root, on_update, _legacy
@@ -1618,6 +1637,52 @@ class MainWindow:
             self.menu_library.entryconfig(
                 MENU_MANAGE_PLAYLISTS, command=on_manage_playlists
             )
+        if on_finish_day_podcast_sync is not None:
+            self.menu_library.entryconfig(
+                MENU_FINISH_DAY_PODCAST_SYNC,
+                command=on_finish_day_podcast_sync,
+            )
+
+    def set_finish_day_podcast_sync_menu(
+        self,
+        *,
+        playlist_name: str,
+        enabled: bool,
+        episode_count: int = 0,
+    ) -> None:
+        """Update Library → Finish Sync label and enabled state."""
+        name = (playlist_name or "").strip() or "day playlist"
+        if episode_count > 0:
+            label = f"Finish Sync ({name}) — {episode_count}"
+        else:
+            label = f"Finish Sync ({name})"
+        try:
+            prev = getattr(
+                self, "_finish_day_podcast_menu_label", MENU_FINISH_DAY_PODCAST_SYNC
+            )
+            try:
+                self.menu_library.entryconfig(
+                    prev,
+                    label=label,
+                    state=NORMAL if enabled else DISABLED,
+                )
+            except Exception:
+                end = int(self.menu_library.index(END) or 0)
+                for i in range(end + 1):
+                    try:
+                        lab = str(self.menu_library.entrycget(i, "label") or "")
+                    except Exception:
+                        continue
+                    if lab.startswith("Finish Sync ("):
+                        self.menu_library.entryconfig(
+                            i,
+                            label=label,
+                            state=NORMAL if enabled else DISABLED,
+                        )
+                        break
+            self._finish_day_podcast_menu_label = label
+        except Exception:
+            pass
 
     def set_transfer_menu_commands(
         self,
@@ -1800,6 +1865,8 @@ class MainWindow:
         on_episode_sync=None,
         on_episode_play=None,
         on_episode_reveal_download=None,
+        on_episode_add_to_day_playlist=None,
+        on_episode_remove_from_day_playlist=None,
     ) -> None:
         if on_add is not None:
             self.btn_podcast_add.configure(command=on_add)
@@ -1840,6 +1907,38 @@ class MainWindow:
                 CTX_PODCAST_REVEAL_DOWNLOAD,
                 command=on_episode_reveal_download,
             )
+        if on_episode_add_to_day_playlist is not None:
+            self.menu_podcast_episode_ctx.entryconfig(
+                CTX_PODCAST_ADD_TO_DAY_PLAYLIST,
+                command=on_episode_add_to_day_playlist,
+            )
+        if on_episode_remove_from_day_playlist is not None:
+            self.menu_podcast_episode_ctx.entryconfig(
+                CTX_PODCAST_REMOVE_FROM_DAY_PLAYLIST,
+                command=on_episode_remove_from_day_playlist,
+            )
+
+    def set_podcast_day_playlist_episode_menu(
+        self,
+        *,
+        playlist_name: str,
+        can_add: bool,
+        can_remove: bool,
+    ) -> None:
+        """Update Add/Remove day-playlist labels and enabled state."""
+        name = (playlist_name or "").strip() or "day playlist"
+        add_label = f"Add This Episode to {name}"
+        rem_label = f"Remove This Episode from {name}"
+        try:
+            # Index layout: 0 Play, 1 Sync, 2 sep, 3 Add, 4 Remove, 5 sep, 6 Reveal
+            self.menu_podcast_episode_ctx.entryconfig(
+                3, label=add_label, state=NORMAL if can_add else DISABLED
+            )
+            self.menu_podcast_episode_ctx.entryconfig(
+                4, label=rem_label, state=NORMAL if can_remove else DISABLED
+            )
+        except Exception:
+            pass
 
     def popup_podcast_show_context(self, event) -> str | None:
         try:

@@ -8,9 +8,11 @@ from pathlib import Path
 
 from mtpmanager.domain.audio_encode import (
     AudioEncodeSettings,
+    atempo_filter_chain,
     default_audio_encode_settings,
     formats_allowed,
     get_preset,
+    normalize_playback_speed,
     presets_for_format,
     resolve_settings,
     settings_from_legacy_format,
@@ -70,6 +72,18 @@ class AudioEncodeCatalogTests(unittest.TestCase):
         self.assertEqual(back.bitrate_kbps, 192)
         self.assertEqual(back.rate_control, "cbr")
 
+    def test_playback_speed_normalize_and_atempo(self) -> None:
+        self.assertEqual(normalize_playback_speed(1), 1.0)
+        self.assertEqual(normalize_playback_speed(0), 1.0)
+        self.assertEqual(normalize_playback_speed(99), 3.0)
+        self.assertIsNone(atempo_filter_chain(1.0))
+        self.assertEqual(atempo_filter_chain(1.5), "atempo=1.5")
+        # 2.5× needs a chained filter (atempo max 2.0 per stage).
+        chain = atempo_filter_chain(2.5)
+        assert chain is not None
+        self.assertIn("atempo=2", chain)
+        self.assertIn(",", chain)
+
 
 class FFmpegOptionsTests(unittest.TestCase):
     def test_mp3_vbr(self) -> None:
@@ -90,6 +104,16 @@ class FFmpegOptionsTests(unittest.TestCase):
         self.assertEqual(opts["b:a"], "128k")
         self.assertEqual(opts.get("ac"), "2")
         self.assertEqual(opts.get("map"), "0:a:0")
+        self.assertNotIn("filter:a", opts)
+
+    def test_playback_speed_filter(self) -> None:
+        p = get_preset("mp3_cbr_128")
+        assert p is not None
+        from dataclasses import replace
+
+        s = replace(p.settings, playback_speed=1.25)
+        opts = build_ffmpeg_audio_options(s)
+        self.assertEqual(opts.get("filter:a"), "atempo=1.25")
 
     def test_wma(self) -> None:
         p = get_preset("wma_cbr_128")

@@ -110,7 +110,7 @@ def append_day_playlist_guid(
     *,
     path: Path | None = None,
 ) -> dict[str, Any] | None:
-    """Append a successfully sent episode GUID; returns updated plan."""
+    """Append an episode GUID to today's plan; returns updated plan."""
     g = (guid or "").strip().lower()
     if not is_track_guid(g):
         return None
@@ -121,6 +121,56 @@ def append_day_playlist_guid(
         plan["guids"] = guids
         save_day_playlist_plan(plan, path=path)
     return plan
+
+
+def remove_day_playlist_guid(
+    guid: str,
+    *,
+    path: Path | None = None,
+) -> dict[str, Any] | None:
+    """Remove a GUID from today's plan; returns updated plan or None if stale."""
+    g = (guid or "").strip().lower()
+    if not is_track_guid(g):
+        return None
+    plan = load_day_playlist_plan(path=path)
+    if plan is None:
+        return None
+    guids = [x for x in (plan.get("guids") or []) if str(x).lower() != g]
+    plan["guids"] = guids
+    save_day_playlist_plan(plan, path=path)
+    return plan
+
+
+def day_playlist_contains(
+    guid: str,
+    *,
+    path: Path | None = None,
+) -> bool:
+    """True when *guid* is already in today's durable plan."""
+    g = (guid or "").strip().lower()
+    if not is_track_guid(g):
+        return False
+    plan = load_day_playlist_plan(path=path)
+    if plan is None:
+        return False
+    return g in {str(x).lower() for x in (plan.get("guids") or [])}
+
+
+def day_playlist_display_name(*, path: Path | None = None) -> str:
+    """Today's playlist title (from plan or calendar default)."""
+    plan = load_day_playlist_plan(path=path)
+    if plan is not None:
+        name = str(plan.get("name") or "").strip()
+        if name:
+            return name
+    return podcast_day_playlist_name()
+
+
+def day_playlist_guid_count(*, path: Path | None = None) -> int:
+    plan = load_day_playlist_plan(path=path)
+    if plan is None:
+        return 0
+    return sum(1 for g in (plan.get("guids") or []) if is_track_guid(str(g)))
 
 
 def clear_day_playlist_plan(*, path: Path | None = None) -> None:

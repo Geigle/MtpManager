@@ -22,6 +22,7 @@ from collections.abc import Collection
 from mtpmanager.domain.audio_encode import (
     AudioEncodeSettings,
     clamp_settings_for_format,
+    normalize_playback_speed,
 )
 from mtpmanager.domain.models import Track, TrackMetadata
 from mtpmanager.domain.track_id import is_track_guid, new_track_guid
@@ -50,6 +51,8 @@ class Podcast:
     auto_last_run_local_date: str = ""  # YYYY-MM-DD
     # Per-show encode override (None → podcast default / Config global).
     audio_encode: AudioEncodeSettings | None = None
+    # Encode-time playback speed (1.0 = normal; applied via ffmpeg atempo).
+    playback_speed: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -216,6 +219,11 @@ def _migrate_podcast_auto_columns(conn: sqlite3.Connection) -> None:
             "ALTER TABLE podcasts ADD COLUMN "
             "audio_encode_json TEXT NOT NULL DEFAULT ''"
         )
+    if "playback_speed" not in cols:
+        alters.append(
+            "ALTER TABLE podcasts ADD COLUMN "
+            "playback_speed REAL NOT NULL DEFAULT 1.0"
+        )
     for sql in alters:
         try:
             conn.execute(sql)
@@ -305,6 +313,9 @@ def _podcast_from_row(row: sqlite3.Row, *, episode_count: int = 0) -> Podcast:
     audio_enc = None
     if "audio_encode_json" in keys:
         audio_enc = _parse_audio_encode_json(row["audio_encode_json"])
+    speed = 1.0
+    if "playback_speed" in keys:
+        speed = normalize_playback_speed(row["playback_speed"])
     return Podcast(
         id=int(row["id"]),
         feed_url=str(row["feed_url"] or ""),
@@ -322,6 +333,7 @@ def _podcast_from_row(row: sqlite3.Row, *, episode_count: int = 0) -> Podcast:
         schedule_days=schedule_days,
         auto_last_run_local_date=auto_last,
         audio_encode=audio_enc,
+        playback_speed=speed,
     )
 
 
@@ -1076,6 +1088,35 @@ def set_podcast_audio_encode(
         return get_podcast(podcast_id, path=path)
     except sqlite3.Error as e:
         logger.warning("set_podcast_audio_encode failed: %s", e)
+        return None
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def set_podcast_playback_speed(
+    podcast_id: int,
+    speed: float,
+    *,
+    path: Path | None = None,
+) -> Podcast | None:
+    """Set per-show encode-time playback speed (1.0 = normal)."""
+    now = _utc_now()
+    s = normalize_playback_speed(speed)
+    conn: sqlite3.Connection | None = None
+    try:
+        conn, _ = _open(path)
+        with conn:
+            cur = conn.execute(
+                "UPDATE podcasts SET playback_speed = ?, updated_at = ? "
+                "WHERE id = ?",
+                (s, now, int(podcast_id)),
+            )
+            if int(cur.rowcount or 0) <= 0:
+                return None
+        return get_podcast(podcast_id, path=path)
+    except sqlite3.Error as e:
+        logger.warning("set_podcast_playback_speed failed: %s", e)
         return None
     finally:
         if conn is not None:

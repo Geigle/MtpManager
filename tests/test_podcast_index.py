@@ -29,6 +29,7 @@ from mtpmanager.infra.podcast_index import (
     set_podcast_audio_encode,
     set_podcast_auto_last_run,
     set_podcast_auto_settings,
+    set_podcast_playback_speed,
     upsert_episodes,
 )
 
@@ -125,6 +126,7 @@ class PodcastIndexTests(unittest.TestCase):
                 path=db,
             )
             self.assertIsNone(p.audio_encode)
+            self.assertEqual(p.playback_speed, 1.0)
             updated = set_podcast_audio_encode(p.id, preset.settings, path=db)
             assert updated is not None
             self.assertIsNotNone(updated.audio_encode)
@@ -135,6 +137,12 @@ class PodcastIndexTests(unittest.TestCase):
             cleared = set_podcast_audio_encode(p.id, None, path=db)
             assert cleared is not None
             self.assertIsNone(cleared.audio_encode)
+            sped = set_podcast_playback_speed(p.id, 1.5, path=db)
+            assert sped is not None
+            self.assertEqual(sped.playback_speed, 1.5)
+            reloaded = get_podcast(p.id, path=db)
+            assert reloaded is not None
+            self.assertEqual(reloaded.playback_speed, 1.5)
 
     def test_auto_settings_and_retrieved_at(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

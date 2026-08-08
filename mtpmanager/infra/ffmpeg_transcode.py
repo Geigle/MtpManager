@@ -12,6 +12,7 @@ from ffmpeg import FFmpeg
 
 from mtpmanager.domain.audio_encode import (
     AudioEncodeSettings,
+    atempo_filter_chain,
     clamp_settings_for_format,
 )
 from mtpmanager.domain.library import is_format
@@ -130,6 +131,11 @@ def build_ffmpeg_audio_options(settings: AudioEncodeSettings) -> dict[str, Any]:
     if s.channels in (1, 2):
         opts["ac"] = str(int(s.channels))
 
+    # Tempo (podcasts / speech speed-up). Chain atempo when outside 0.5–2.
+    tempo = atempo_filter_chain(s.playback_speed)
+    if tempo:
+        opts["filter:a"] = tempo
+
     return opts
 
 
@@ -167,7 +173,10 @@ class FFmpegTranscoder:
             target_format = target_format.lower().lstrip(".")
             s = None
 
-        if is_format(src_path, target_format):
+        # Same container can still need a convert when tempo is applied.
+        if is_format(src_path, target_format) and not (
+            s is not None and s.needs_tempo_filter()
+        ):
             return src_path
 
         output_file = self.temp_path(target_format, slot=slot)

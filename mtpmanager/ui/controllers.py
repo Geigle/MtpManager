@@ -55,8 +55,12 @@ from mtpmanager.app.podcast_schedule import (
 from mtpmanager.infra.day_podcast_playlist import (
     append_day_playlist_guid,
     clear_day_playlist_plan,
+    day_playlist_contains,
+    day_playlist_display_name,
+    day_playlist_guid_count,
     ensure_day_playlist_plan,
     load_day_playlist_plan,
+    remove_day_playlist_guid,
 )
 from mtpmanager.app.scan_library import scan_library, scan_library_roots
 from mtpmanager.app.transfer import transfer_track, transfer_tracks
@@ -411,7 +415,9 @@ class AppController:
         w.set_library_menu_commands(
             on_manage_library=self.on_manage_library,
             on_manage_playlists=self.on_manage_playlists,
+            on_finish_day_podcast_sync=self.on_finish_day_podcast_sync,
         )
+        self._refresh_finish_day_podcast_menu()
         w.set_library_search_commands(
             on_change=self.on_library_search_changed,
             on_clear=self.on_library_search_clear,
@@ -476,6 +482,10 @@ class AppController:
             on_episode_sync=self.on_podcast_sync_episodes_selected,
             on_episode_play=self.on_podcast_play_episodes_selected,
             on_episode_reveal_download=self.on_podcast_reveal_download,
+            on_episode_add_to_day_playlist=self.on_podcast_add_to_day_playlist,
+            on_episode_remove_from_day_playlist=(
+                self.on_podcast_remove_from_day_playlist
+            ),
         )
         try:
             w.podcast_show_list.bind(
@@ -730,10 +740,8 @@ class AppController:
             allowed_formats=self._allowed_send_formats(),
         )
 
-    def _podcast_per_show_encode_for_track(
-        self, track: Track
-    ):
-        """Per-subscription encode override for a podcast track, if any."""
+    def _podcast_show_for_track(self, track: Track):
+        """Resolve Podcast row for a podcast episode track (by GUID), if any."""
         from mtpmanager.infra.podcast_index import get_episode_by_guid
 
         guid = (getattr(track, "guid", None) or "").strip()
@@ -747,30 +755,48 @@ class AppController:
         if ep is None:
             return None
         try:
-            show = get_podcast(int(ep.podcast_id))
+            return get_podcast(int(ep.podcast_id))
         except Exception:
             logger.debug("get_podcast failed", exc_info=True)
             return None
+
+    def _podcast_per_show_encode_for_track(
+        self, track: Track
+    ):
+        """Per-subscription encode override for a podcast track, if any."""
+        show = self._podcast_show_for_track(track)
         if show is None:
             return None
         return show.audio_encode
 
     def _encode_settings_for_track(self, track: Track):
         """Encode recipe for one track (audiobook / podcast / music)."""
-        from mtpmanager.domain.audio_encode import resolve_settings
+        from dataclasses import replace
+
+        from mtpmanager.domain.audio_encode import (
+            normalize_playback_speed,
+            resolve_settings,
+        )
 
         per_show = None
+        playback_speed = 1.0
         genre = (
             (track.meta.genre if track and track.meta else "") or ""
         ).strip().casefold()
         if genre == "podcast":
-            per_show = self._podcast_per_show_encode_for_track(track)
-        return resolve_settings(
+            show = self._podcast_show_for_track(track)
+            if show is not None:
+                per_show = show.audio_encode
+                playback_speed = normalize_playback_speed(show.playback_speed)
+        settings = resolve_settings(
             settings=self._config.resolved_audio_encode_for_track(
                 track, podcast_per_show=per_show
             ),
             allowed_formats=self._allowed_send_formats(),
         )
+        if abs(playback_speed - 1.0) >= 0.01:
+            settings = replace(settings, playback_speed=playback_speed)
+        return settings
 
     def _target_format_for_podcast_episode(self, episode) -> str:
         """Audio container for download/extract of one episode."""
@@ -1179,6 +1205,13 @@ class AppController:
                 # ★ = custom encode for this show (context menu).
                 if p.audio_encode is not None:
                     label = f"{label} ★"
+                # Speed marker when encode-time tempo is not 1×.
+                try:
+                    sp = float(p.playback_speed or 1.0)
+                except (TypeError, ValueError):
+                    sp = 1.0
+                if abs(sp - 1.0) >= 0.01:
+                    label = f"{label} {sp:g}×"
                 lb.insert("end", label)
         except Exception:
             logger.debug("refresh podcast list failed", exc_info=True)
@@ -1335,6 +1368,22 @@ class AppController:
             self.win.menu_podcast_episode_ctx.entryconfig(
                 CTX_PODCAST_REVEAL_DOWNLOAD,
                 state=NORMAL if can_reveal else DISABLED,
+            )
+            # Day playlist add/remove (single episode selection only).
+            day_name = day_playlist_display_name()
+            can_add = False
+            can_remove = False
+            if n == 1:
+                ep = get_episode(self._selected_episode_ids()[0])
+                g = (ep.guid if ep is not None else "") or ""
+                if is_track_guid(g):
+                    in_plan = day_playlist_contains(g)
+                    can_add = not in_plan
+                    can_remove = in_plan
+            self.win.set_podcast_day_playlist_episode_menu(
+                playlist_name=day_name,
+                can_add=can_add,
+                can_remove=can_remove,
             )
         except Exception:
             pass
@@ -1722,7 +1771,10 @@ class AppController:
 
     def on_podcast_show_encode(self) -> None:
         """Podcasts tab show context menu → Encode Settings…"""
-        from mtpmanager.infra.podcast_index import set_podcast_audio_encode
+        from mtpmanager.infra.podcast_index import (
+            set_podcast_audio_encode,
+            set_podcast_playback_speed,
+        )
 
         ids = self._selected_podcast_ids()
         if not ids and self._selected_podcast_id is not None:
@@ -1754,6 +1806,7 @@ class AppController:
             show_title=title,
             use_override=show.audio_encode is not None,
             audio_encode=show.audio_encode,
+            playback_speed=float(show.playback_speed or 1.0),
             inherit_summary=inherit,
             allowed_send_formats=self._allowed_send_formats(),
             profile_display_name=profile_name,
@@ -1767,11 +1820,18 @@ class AppController:
                 "Podcast", "Could not save encode settings for this show."
             )
             return
+        speed_updated = set_podcast_playback_speed(pid, result.playback_speed)
+        if speed_updated is None:
+            messagebox.showerror(
+                "Podcast", "Could not save playback speed for this show."
+            )
+            return
         logger.info(
-            "Podcast show encode saved id=%s title=%r encode=%s",
+            "Podcast show encode saved id=%s title=%r encode=%s speed=%g",
             pid,
             title,
             enc.summary_line() if enc is not None else "inherit",
+            float(result.playback_speed),
         )
         # Refresh list labels (★ marker for per-show override).
         self._refresh_podcast_tab()
@@ -1968,9 +2028,17 @@ class AppController:
             except Exception:
                 logger.debug("save last full podcast sync failed", exc_info=True)
 
-            day_pl = self._pending_day_podcast_playlist or {}
+            day_pl = self._pending_day_podcast_playlist or load_day_playlist_plan() or {}
             day_name = str(day_pl.get("name") or "").strip()
-            day_pl_note = f" · device playlist “{day_name}”" if day_name else ""
+            day_n = len(
+                [g for g in (day_pl.get("guids") or []) if is_track_guid(str(g))]
+            )
+            day_pl_note = ""
+            if day_name and day_n:
+                day_pl_note = (
+                    f" · {day_n} in “{day_name}” (Library → Finish Sync)"
+                )
+            self._refresh_finish_day_podcast_menu()
 
             msg = f"{label}: {n} episode(s) ready{day_pl_note}"
             if errs:
@@ -2262,14 +2330,20 @@ class AppController:
                 "(reconnect / Resume Sync if more episodes remain)"
             )
             return
-        # Publish day playlist ASAP after a successful podcast batch (uses
-        # send-cache object ids; no list_files). Then quiet-drain leftovers.
-        if ok:
-            self._try_publish_day_podcast_playlist()
+        # Day playlist is *not* auto-pushed after a podcast flood (PTP 02ff /
+        # session poison on ZEN). Episodes are recorded into today's plan;
+        # user runs Library → Finish Sync when ready.
+        #
+        # TODO(podcast-auto-day-playlist): re-enable automatic on-device day
+        # playlist publish after a quiet period / successful reconnect once
+        # ZEN PTP 02ff after bulk podcast send is mitigated (session recycle,
+        # deferred push with longer quiet, or push on next connect). Until
+        # then Finish Sync is the only publish path.
+        self._refresh_finish_day_podcast_menu()
         self._schedule_podcast_leftover_drain()
 
     def _schedule_podcast_leftover_drain(self) -> None:
-        """After a quiet pause, sync any still-pending episodes + retry day PL."""
+        """After a quiet pause, sync any still-pending episodes (no playlist push)."""
         try:
             self._device_io.mark_quiet()
         except Exception:
@@ -2286,20 +2360,22 @@ class AppController:
             if self._podcast_auto_host_inflight or self._transfer_busy:
                 return
             self._maybe_auto_sync_pending_podcasts()
-            if (
-                not self._podcast_auto_device_inflight
-                and not self._transfer_busy
-            ):
-                # Retry if first publish raced USB quiet / missing handles.
-                self._try_publish_day_podcast_playlist()
+            self._refresh_finish_day_podcast_menu()
 
         try:
+            n = day_playlist_guid_count()
+            day_note = ""
+            if n > 0:
+                day_note = (
+                    f" · {n} ready for Finish Sync "
+                    f"({day_playlist_display_name()})"
+                )
             self.win.lbl_podcast_status.configure(
                 text=(
                     f"Podcast: waiting {delay_ms // 1000}s for device "
-                    "before remaining episodes…"
+                    f"before remaining episodes…{day_note}"
                     if delay_ms >= 1000
-                    else "Podcast: checking for remaining episodes…"
+                    else f"Podcast: checking for remaining episodes…{day_note}"
                 )
             )
         except Exception:
@@ -2310,7 +2386,11 @@ class AppController:
         self.win.root.after(delay_ms, _run)
 
     def _record_day_podcast_playlist_guid(self, guid: str) -> None:
-        """Append a successfully sent episode GUID to today's device playlist."""
+        """Append a successfully sent episode GUID to today's day playlist plan.
+
+        Does **not** push the on-device playlist (that is Library → Finish Sync
+        after the podcast flood, to avoid ZEN PTP 02ff session poison).
+        """
         g = (guid or "").strip().lower()
         if not is_track_guid(g):
             return
@@ -2322,14 +2402,163 @@ class AppController:
             "name": plan.get("name") or podcast_day_playlist_name(),
             "guids": list(plan.get("guids") or []),
         }
+        # Mirror into the host day playlist (Playlists tab).
+        try:
+            from mtpmanager.app.podcast_ops import add_episode_to_day_host_playlist
+            from mtpmanager.infra.podcast_index import get_episode_by_guid
+
+            ep = get_episode_by_guid(g)
+            if ep is not None:
+                add_episode_to_day_host_playlist(ep)
+        except Exception:
+            logger.debug("host day playlist mirror failed", exc_info=True)
+        self._refresh_finish_day_podcast_menu()
         logger.debug(
             "Day podcast playlist +1 guid=%s… total=%d",
             g[:8],
             len(self._pending_day_podcast_playlist["guids"]),
         )
 
-    def _try_publish_day_podcast_playlist(self) -> None:
-        """Create/update today's on-device playlist for just-sent episodes.
+    def _refresh_finish_day_podcast_menu(self) -> None:
+        """Enable Library → Finish Sync when today's plan has episode GUIDs."""
+        try:
+            name = day_playlist_display_name()
+            n = day_playlist_guid_count()
+            self.win.set_finish_day_podcast_sync_menu(
+                playlist_name=name,
+                enabled=n > 0,
+                episode_count=n,
+            )
+        except Exception:
+            logger.debug("refresh Finish Sync menu failed", exc_info=True)
+
+    def on_finish_day_podcast_sync(self) -> None:
+        """Library → Finish Sync (day playlist): push plan to the device."""
+        plan = load_day_playlist_plan()
+        if not plan or not (plan.get("guids") or []):
+            messagebox.showinfo(
+                "Finish Sync",
+                "No episodes are queued for today's day podcast playlist yet.\n\n"
+                "Sync podcasts (or add episodes from the Podcasts tab), then "
+                "try again.",
+            )
+            self._refresh_finish_day_podcast_menu()
+            return
+        name = str(plan.get("name") or day_playlist_display_name())
+        n = len([g for g in plan["guids"] if is_track_guid(str(g))])
+        if not self.device.is_connected():
+            messagebox.showinfo(
+                "Finish Sync",
+                f"“{name}” has {n} episode(s) ready, but no device is connected.\n\n"
+                "Connect the player (Experimental / PyMTP mode), then choose "
+                f"Finish Sync again.",
+            )
+            return
+        if self.win.active_mode() != "experimental":
+            messagebox.showinfo(
+                "Finish Sync",
+                f"Pushing “{name}” needs Experimental mode (PyMTP).\n\n"
+                "Turn off Stable Mode, reconnect, then try again.",
+            )
+            return
+        if self._transfer_busy or self._bg.busy:
+            messagebox.showinfo(
+                "Finish Sync",
+                "Another transfer or background job is still running.\n\n"
+                "Wait for it to finish (or cancel it), then Finish Sync.",
+            )
+            return
+        self._pending_day_podcast_playlist = {
+            "name": name,
+            "guids": list(plan.get("guids") or []),
+        }
+        self._try_publish_day_podcast_playlist(manual=True)
+
+    def on_podcast_add_to_day_playlist(self) -> None:
+        """Episode context: add selected episode GUID to today's day playlist."""
+        from mtpmanager.app.podcast_ops import add_episode_to_day_host_playlist
+
+        eids = self._selected_episode_ids()
+        if len(eids) != 1:
+            messagebox.showinfo(
+                "Day Playlist", "Select a single episode to add."
+            )
+            return
+        ep = get_episode(eids[0])
+        if ep is None:
+            return
+        g = (ep.guid or "").strip().lower()
+        if not is_track_guid(g):
+            messagebox.showerror(
+                "Day Playlist", "That episode has no stable GUID yet."
+            )
+            return
+        if day_playlist_contains(g):
+            self._update_podcast_episode_menu_labels()
+            return
+        plan = append_day_playlist_guid(g)
+        try:
+            add_episode_to_day_host_playlist(ep)
+        except Exception:
+            logger.debug("host day playlist add failed", exc_info=True)
+        if plan is not None:
+            self._pending_day_podcast_playlist = {
+                "name": plan.get("name") or podcast_day_playlist_name(),
+                "guids": list(plan.get("guids") or []),
+            }
+        self._refresh_finish_day_podcast_menu()
+        self._update_podcast_episode_menu_labels()
+        name = day_playlist_display_name()
+        try:
+            self.win.lbl_podcast_status.configure(
+                text=f"Added to “{name}” ({day_playlist_guid_count()} episode(s))"
+            )
+        except Exception:
+            pass
+
+    def on_podcast_remove_from_day_playlist(self) -> None:
+        """Episode context: remove selected episode from today's day playlist."""
+        from mtpmanager.app.podcast_ops import remove_episode_from_day_host_playlist
+
+        eids = self._selected_episode_ids()
+        if len(eids) != 1:
+            messagebox.showinfo(
+                "Day Playlist", "Select a single episode to remove."
+            )
+            return
+        ep = get_episode(eids[0])
+        if ep is None:
+            return
+        g = (ep.guid or "").strip().lower()
+        if not is_track_guid(g):
+            return
+        if not day_playlist_contains(g):
+            self._update_podcast_episode_menu_labels()
+            return
+        plan = remove_day_playlist_guid(g)
+        try:
+            remove_episode_from_day_host_playlist(g)
+        except Exception:
+            logger.debug("host day playlist remove failed", exc_info=True)
+        if plan is not None:
+            self._pending_day_podcast_playlist = {
+                "name": plan.get("name") or podcast_day_playlist_name(),
+                "guids": list(plan.get("guids") or []),
+            }
+        else:
+            self._pending_day_podcast_playlist = None
+        self._refresh_finish_day_podcast_menu()
+        self._update_podcast_episode_menu_labels()
+        name = day_playlist_display_name()
+        try:
+            self.win.lbl_podcast_status.configure(
+                text=f"Removed from “{name}” ({day_playlist_guid_count()} left)"
+            )
+        except Exception:
+            pass
+
+    def _try_publish_day_podcast_playlist(self, *, manual: bool = False) -> None:
+        """Create/update today's on-device playlist from the durable day plan.
 
         Membership is GUID-only (episodes already on the player). Object ids
         come from the incremental device index (``record_send`` after each
@@ -2337,10 +2566,18 @@ class AppController:
         after a long podcast flood — that walk is a common LIBMTP panic
         trigger on ZEN and is unnecessary when send returned real item ids.
 
+        Auto paths no longer call this after a podcast batch (PTP 02ff risk);
+        use Library → Finish Sync… (*manual*=True) when the user is ready.
+
         Requires Experimental mode + connected device.
         """
         pending = self._pending_day_podcast_playlist or load_day_playlist_plan()
         if not pending:
+            if manual:
+                messagebox.showinfo(
+                    "Finish Sync",
+                    "No day podcast playlist is ready to publish.",
+                )
             return
         self._pending_day_podcast_playlist = pending
         name = str(pending.get("name") or "").strip()
@@ -2353,14 +2590,18 @@ class AppController:
             self._pending_day_podcast_playlist = None
             return
         if not guids:
-            if not self._podcast_auto_host_inflight:
+            if manual:
+                messagebox.showinfo(
+                    "Finish Sync",
+                    f"“{name}” has no episode GUIDs yet.",
+                )
+            elif not self._podcast_auto_host_inflight:
                 logger.info(
-                    "Day podcast playlist %r skipped: no successfully sent "
-                    "episode GUIDs",
+                    "Day podcast playlist %r skipped: no episode GUIDs",
                     name,
                 )
-                clear_day_playlist_plan()
-                self._pending_day_podcast_playlist = None
+                # Keep empty plan only while host is still filling it.
+            self._refresh_finish_day_podcast_menu()
             return
         if not self.device.is_connected():
             logger.info(
@@ -2369,6 +2610,12 @@ class AppController:
                 name,
                 len(guids),
             )
+            if manual:
+                messagebox.showinfo(
+                    "Finish Sync",
+                    f"Device not connected. “{name}” still has {len(guids)} "
+                    "episode(s) saved for today.",
+                )
             return
         if self.win.active_mode() != "experimental":
             logger.info(
@@ -2377,10 +2624,26 @@ class AppController:
                 name,
                 len(guids),
             )
+            if manual:
+                messagebox.showinfo(
+                    "Finish Sync",
+                    f"Pushing “{name}” needs Experimental mode (PyMTP).",
+                )
             return
         serial = self._device_serial or ""
         if not serial:
             return
+
+        if manual:
+            try:
+                self.win.set_progress_status(
+                    f"Publishing “{name}” ({len(guids)} episode(s))…"
+                )
+                self.win.lbl_podcast_status.configure(
+                    text=f"Finish Sync: pushing “{name}”…"
+                )
+            except Exception:
+                pass
 
         def work() -> object:
             # Resolve from send cache only — no list_files after batch.
@@ -2425,6 +2688,7 @@ class AppController:
                 pass
             clear_day_playlist_plan()
             self._pending_day_podcast_playlist = None
+            self._refresh_finish_day_podcast_menu()
             if result is None:
                 return
             verb = "Created" if result.created else "Updated"
@@ -2454,12 +2718,20 @@ class AppController:
                 100,
                 lambda: self._refresh_device_playlists_tab(keep_selection=True),
             )
+            if manual and result.missing_guid:
+                messagebox.showinfo(
+                    "Finish Sync",
+                    f"Pushed “{result.name}” with {result.resolved} episode(s).\n\n"
+                    f"{result.missing_guid} GUID(s) were not found on the device "
+                    "(not synced yet or send cache missing handles).",
+                )
 
         def on_error(exc: BaseException) -> None:
             try:
                 self.win.set_progress_status("")
             except Exception:
                 pass
+            self._refresh_finish_day_podcast_menu()
             msg = str(exc).lower()
             if "no on-device object" in msg or "object id" in msg:
                 logger.info(
@@ -2467,6 +2739,12 @@ class AppController:
                     name,
                     exc,
                 )
+                if manual:
+                    messagebox.showwarning(
+                        "Finish Sync",
+                        f"Could not publish “{name}” yet:\n{exc}\n\n"
+                        "Sync the episodes to the device first, then try again.",
+                    )
                 return
             # Keep durable plan for retry after reconnect.
             logger.warning(
@@ -2475,6 +2753,12 @@ class AppController:
                 exc,
                 exc_info=True,
             )
+            if manual:
+                messagebox.showerror(
+                    "Finish Sync",
+                    f"Could not publish “{name}”:\n{exc}\n\n"
+                    "The day playlist was kept — reconnect and try Finish Sync again.",
+                )
 
         try:
             self.win.set_progress_status(
