@@ -2318,13 +2318,13 @@ def ask_add_to_playlist(
 
 
 # ---------------------------------------------------------------------------
-# Podcast Settings (Library → Podcast Settings…)
+# Podcast Settings (Config → Podcast Settings…)
 # ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class PodcastSettingsResult:
-    """Values saved from Library → Podcast Settings…"""
+    """Values saved from Config → Podcast Settings…"""
 
     auto_enabled: bool
     schedule_days: tuple[str, ...]
@@ -2332,9 +2332,6 @@ class PodcastSettingsResult:
     max_new_per_show: int
     auto_sync_to_device: bool
     run_full_sync_now: bool = False
-    # When True, *audiobook_audio_encode* overrides Config for Audiobooks tab.
-    use_audiobook_encode_override: bool = False
-    audiobook_audio_encode: AudioEncodeSettings | None = None
     # When True, *podcast_audio_encode* overrides Config for podcast episodes.
     use_podcast_encode_override: bool = False
     podcast_audio_encode: AudioEncodeSettings | None = None
@@ -2345,6 +2342,14 @@ class PodcastShowEncodeResult:
     """Values saved from a single-show encode dialog (context menu)."""
 
     # True when the show uses a custom recipe; False clears the override.
+    use_override: bool
+    audio_encode: AudioEncodeSettings | None = None
+
+
+@dataclass(frozen=True)
+class AudiobookEncodeResult:
+    """Values saved from Config → Audiobook Encode…"""
+
     use_override: bool
     audio_encode: AudioEncodeSettings | None = None
 
@@ -2637,17 +2642,16 @@ def show_podcast_settings_dialog(
     max_new_per_show: int = 1,
     auto_sync_to_device: bool = True,
     status_line: str = "",
-    use_audiobook_encode_override: bool = False,
-    audiobook_audio_encode: AudioEncodeSettings | None = None,
     use_podcast_encode_override: bool = False,
     podcast_audio_encode: AudioEncodeSettings | None = None,
     global_audio_encode: AudioEncodeSettings | None = None,
     allowed_send_formats: frozenset[str] | None = None,
     profile_display_name: str | None = None,
 ) -> PodcastSettingsResult | None:
-    """Podcast schedule + default podcast/audiobook encode. Save → result.
+    """Podcast schedule + default podcast encode. Save → result.
 
     Per-show encode is edited via the Podcasts tab show context menu.
+    Audiobook encode is Config → Audiobook Encode…
 
     Set ``run_full_sync_now`` when the user chooses **Full Sync Now**
     (settings are still saved first).
@@ -2663,16 +2667,6 @@ def show_podcast_settings_dialog(
         settings=global_audio_encode,
         allowed_formats=allowed_send_formats,
     )
-    if use_audiobook_encode_override and audiobook_audio_encode is not None:
-        ab_initial = resolve_settings(
-            settings=audiobook_audio_encode,
-            allowed_formats=allowed_send_formats,
-        )
-    else:
-        ab_initial = resolve_settings(
-            settings=default_audiobook_audio_encode_settings(),
-            allowed_formats=allowed_send_formats,
-        )
     if use_podcast_encode_override and podcast_audio_encode is not None:
         pod_initial = resolve_settings(
             settings=podcast_audio_encode,
@@ -2852,23 +2846,6 @@ def show_podcast_settings_dialog(
         list_height=4,
     )
 
-    # ---- Audiobook encode (overrides Config for Audiobooks tab only) ----
-    ttk.Separator(body, orient="horizontal").pack(fill="x", pady=(10, 10))
-    ab_override_var, ab_get_settings = _pack_encode_override_section(
-        body,
-        title="Audiobook encode",
-        blurb=(
-            "Optional override for tracks under the Audiobooks tab (genre "
-            "Audiobook). Music still uses Config → Config… "
-            f"({global_enc.summary_line()})."
-        ),
-        use_override=bool(use_audiobook_encode_override),
-        initial=ab_initial,
-        allowed_send_formats=allowed_send_formats,
-        checkbox_text="Use custom encode for audiobooks",
-        list_height=4,
-    )
-
     if allowed_send_formats is not None:
         names = ", ".join(format_display_name(f) for f in allowed_tuple)
         who = profile_display_name or "this device"
@@ -2900,8 +2877,6 @@ def show_podcast_settings_dialog(
                 parent=dlg,
             )
             return None
-        use_ab = bool(ab_override_var.get())
-        ab_settings = ab_get_settings() if use_ab else None
         use_pod = bool(pod_override_var.get())
         pod_settings = pod_get_settings() if use_pod else None
         return PodcastSettingsResult(
@@ -2911,8 +2886,6 @@ def show_podcast_settings_dialog(
             max_new_per_show=n,
             auto_sync_to_device=bool(sync_var.get()),
             run_full_sync_now=run_now,
-            use_audiobook_encode_override=use_ab,
-            audiobook_audio_encode=ab_settings,
             use_podcast_encode_override=use_pod,
             podcast_audio_encode=pod_settings,
         )
@@ -2958,10 +2931,103 @@ def show_podcast_settings_dialog(
     dlg.grab_set()
     try:
         px = parent.winfo_rootx() + max(0, (parent.winfo_width() - 500) // 2)
-        py = parent.winfo_rooty() + max(0, (parent.winfo_height() - 640) // 3)
-        dlg.geometry(f"520x640+{px}+{py}")
+        py = parent.winfo_rooty() + max(0, (parent.winfo_height() - 560) // 3)
+        dlg.geometry(f"520x560+{px}+{py}")
     except Exception:
-        dlg.geometry("520x640")
+        dlg.geometry("520x560")
+    parent.wait_window(dlg)
+    return result[0]
+
+
+def show_audiobook_encode_dialog(
+    parent,
+    *,
+    use_override: bool = False,
+    audio_encode: AudioEncodeSettings | None = None,
+    global_audio_encode: AudioEncodeSettings | None = None,
+    allowed_send_formats: frozenset[str] | None = None,
+    profile_display_name: str | None = None,
+) -> AudiobookEncodeResult | None:
+    """Config → Audiobook Encode… Save → result; Cancel → None."""
+    global_enc = resolve_settings(
+        settings=global_audio_encode,
+        allowed_formats=allowed_send_formats,
+    )
+    if use_override and audio_encode is not None:
+        initial = resolve_settings(
+            settings=audio_encode,
+            allowed_formats=allowed_send_formats,
+        )
+    else:
+        initial = resolve_settings(
+            settings=default_audiobook_audio_encode_settings(),
+            allowed_formats=allowed_send_formats,
+        )
+
+    dlg = Toplevel(parent)
+    dlg.title("Audiobook Encode")
+    dlg.transient(parent)
+    dlg.resizable(False, False)
+
+    body = Frame(dlg, padx=14, pady=12)
+    body.pack(fill=BOTH, expand=True)
+
+    override_var, get_settings = _pack_encode_override_section(
+        body,
+        title="Audiobook encode",
+        blurb=(
+            "Optional override for tracks under the Audiobooks tab (genre "
+            "Audiobook). Music still uses Config → Config… "
+            f"({global_enc.summary_line()})."
+        ),
+        use_override=bool(use_override),
+        initial=initial,
+        allowed_send_formats=allowed_send_formats,
+        checkbox_text="Use custom encode for audiobooks",
+        list_height=6,
+    )
+
+    allowed_tuple = formats_allowed(allowed_send_formats)
+    if allowed_send_formats is not None:
+        names = ", ".join(format_display_name(f) for f in allowed_tuple)
+        who = profile_display_name or "this device"
+        Label(
+            body,
+            text=f"Formats limited by {who}: {names}.",
+            justify=LEFT,
+            wraplength=420,
+            fg="#555",
+        ).pack(anchor="w", pady=(4, 0))
+
+    result: list[AudiobookEncodeResult | None] = [None]
+
+    def on_save() -> None:
+        use = bool(override_var.get())
+        result[0] = AudiobookEncodeResult(
+            use_override=use,
+            audio_encode=get_settings() if use else None,
+        )
+        dlg.destroy()
+
+    def on_cancel() -> None:
+        result[0] = None
+        dlg.destroy()
+
+    btn_row = Frame(body)
+    btn_row.pack(fill="x", pady=(12, 0))
+    Button(btn_row, text="Cancel", width=10, command=on_cancel).pack(
+        side=RIGHT, padx=(6, 0)
+    )
+    Button(btn_row, text="Save", width=10, command=on_save).pack(side=RIGHT)
+
+    dlg.protocol("WM_DELETE_WINDOW", on_cancel)
+    dlg.grab_set()
+    try:
+        px = parent.winfo_rootx() + max(0, (parent.winfo_width() - 460) // 2)
+        py = parent.winfo_rooty() + max(0, (parent.winfo_height() - 420) // 3)
+        dlg.geometry(f"+{px}+{py}")
+    except Exception:
+        pass
     parent.wait_window(dlg)
     return result[0]
 

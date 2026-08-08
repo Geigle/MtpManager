@@ -32,7 +32,7 @@ DEFAULT_AUDIO_PODCAST_STILL_FPS = 2.0
 DEFAULT_AUDIO_PODCAST_STILL_WIDTH = 128
 DEFAULT_AUDIO_PODCAST_STILL_HEIGHT = 96
 
-# Automatic podcast full-sync schedule (Library → Podcast Settings…).
+# Automatic podcast full-sync schedule (Config → Podcast Settings…).
 WEEKDAY_KEYS = ("mon", "tue", "wed", "thu", "fri")
 ALL_DAY_KEYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 DEFAULT_PODCAST_SCHEDULE_TIME = "06:30"

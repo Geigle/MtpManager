@@ -205,6 +205,7 @@ from mtpmanager.ui.dialogs import (
     show_file_info_dialog,
     show_file_list_dialog,
     show_folder_list_dialog,
+    show_audiobook_encode_dialog,
     show_podcast_settings_dialog,
     show_podcast_show_encode_dialog,
     show_track_info_dialog,
@@ -410,7 +411,6 @@ class AppController:
         w.set_library_menu_commands(
             on_manage_library=self.on_manage_library,
             on_manage_playlists=self.on_manage_playlists,
-            on_podcast_settings=self.on_podcast_settings,
         )
         w.set_library_search_commands(
             on_change=self.on_library_search_changed,
@@ -438,6 +438,8 @@ class AppController:
             on_keep_downloaded_podcasts_toggle=self.on_keep_downloaded_podcasts_toggle,
             on_clear_downloaded_podcasts=self.on_clear_downloaded_podcasts,
             on_reveal_podcast_downloads=self.on_reveal_podcast_downloads,
+            on_podcast_settings=self.on_podcast_settings,
+            on_audiobook_encode=self.on_audiobook_encode,
         )
         artist_on = bool(self._config.store_tracks_in_artist_folder)
         album_on = bool(self._config.store_tracks_in_album_folder) and artist_on
@@ -1624,7 +1626,7 @@ class AppController:
         self._bg.submit(work, on_done=on_done, on_error=on_error, name="podcast-more")
 
     def on_podcast_settings(self) -> None:
-        """Library → Podcast Settings…"""
+        """Config → Podcast Settings…"""
         cfg = self._config
         status = self._podcast_schedule_status_line()
         profile_name = None
@@ -1638,8 +1640,6 @@ class AppController:
             max_new_per_show=int(cfg.podcast_max_new_per_show),
             auto_sync_to_device=bool(cfg.podcast_auto_sync_to_device),
             status_line=status,
-            use_audiobook_encode_override=cfg.uses_audiobook_encode_override(),
-            audiobook_audio_encode=cfg.audiobook_audio_encode,
             use_podcast_encode_override=cfg.uses_podcast_encode_override(),
             podcast_audio_encode=cfg.podcast_audio_encode,
             global_audio_encode=cfg.resolved_audio_encode(),
@@ -1653,10 +1653,6 @@ class AppController:
         self._config.podcast_schedule_time = result.schedule_time
         self._config.podcast_max_new_per_show = int(result.max_new_per_show)
         self._config.podcast_auto_sync_to_device = bool(result.auto_sync_to_device)
-        if result.use_audiobook_encode_override and result.audiobook_audio_encode:
-            self._config.apply_audiobook_audio_encode(result.audiobook_audio_encode)
-        else:
-            self._config.apply_audiobook_audio_encode(None)
         if result.use_podcast_encode_override and result.podcast_audio_encode:
             self._config.apply_podcast_audio_encode(result.podcast_audio_encode)
         else:
@@ -1670,7 +1666,7 @@ class AppController:
             return
         logger.info(
             "Podcast settings saved enabled=%s days=%s time=%s max=%s "
-            "podcast_encode=%s audiobook_encode=%s",
+            "podcast_encode=%s",
             self._config.podcast_auto_enabled,
             self._config.podcast_schedule_days,
             self._config.podcast_schedule_time,
@@ -1680,11 +1676,6 @@ class AppController:
                 if self._config.podcast_audio_encode is not None
                 else "global"
             ),
-            (
-                self._config.audiobook_audio_encode.summary_line()
-                if self._config.audiobook_audio_encode is not None
-                else "global"
-            ),
         )
         if result.run_full_sync_now:
             self._start_full_podcast_sync(
@@ -1692,6 +1683,42 @@ class AppController:
             )
         else:
             self.win.root.after(200, self._podcast_schedule_tick)
+
+    def on_audiobook_encode(self) -> None:
+        """Config → Audiobook Encode…"""
+        cfg = self._config
+        profile_name = None
+        if self._active_profile is not None:
+            profile_name = self._active_profile.display_name
+        result = show_audiobook_encode_dialog(
+            self.win.root,
+            use_override=cfg.uses_audiobook_encode_override(),
+            audio_encode=cfg.audiobook_audio_encode,
+            global_audio_encode=cfg.resolved_audio_encode(),
+            allowed_send_formats=self._allowed_send_formats(),
+            profile_display_name=profile_name,
+        )
+        if result is None:
+            return
+        if result.use_override and result.audio_encode is not None:
+            self._config.apply_audiobook_audio_encode(result.audio_encode)
+        else:
+            self._config.apply_audiobook_audio_encode(None)
+        try:
+            save_app_config(self._config)
+        except Exception as e:
+            messagebox.showerror(
+                "Audiobook Encode", f"Could not save settings:\n{e}"
+            )
+            return
+        logger.info(
+            "Audiobook encode saved encode=%s",
+            (
+                self._config.audiobook_audio_encode.summary_line()
+                if self._config.audiobook_audio_encode is not None
+                else "global"
+            ),
+        )
 
     def on_podcast_show_encode(self) -> None:
         """Podcasts tab show context menu → Encode Settings…"""

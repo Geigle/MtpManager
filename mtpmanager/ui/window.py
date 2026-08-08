@@ -89,7 +89,6 @@ TREE_COLS = ("title", "artist", "album", "year")
 # Library menu labels (used for entryconfig by label).
 MENU_MANAGE_LIBRARY = "Manage Library…"
 MENU_MANAGE_PLAYLISTS = "Manage Playlists…"
-MENU_PODCAST_SETTINGS = "Podcast Settings…"
 # Back-compat aliases (older docs / call sites).
 MENU_SELECT_ROOT = MENU_MANAGE_LIBRARY
 MENU_UPDATE_LIBRARY = MENU_MANAGE_LIBRARY
@@ -120,6 +119,8 @@ MENU_AUDIO_PODCASTS_AS_VIDEO = (
 MENU_KEEP_DOWNLOADED_PODCASTS = "Keep downloaded podcasts"
 MENU_CLEAR_DOWNLOADED_PODCASTS = "Clear downloaded podcasts…"
 MENU_REVEAL_PODCAST_DOWNLOADS = "Reveal podcast downloads folder"
+MENU_PODCAST_SETTINGS = "Podcast Settings…"
+MENU_AUDIOBOOK_ENCODE = "Audiobook Encode…"
 MENU_CONFIG = "Config…"
 
 # Video podcast episode row (teal / blue-green; Tk Treeview has no gradient outline).
@@ -463,7 +464,6 @@ class MainWindow:
         self.menubar.add_cascade(label="Library", menu=self.menu_library)
         self.menu_library.add_command(label=MENU_MANAGE_LIBRARY)
         self.menu_library.add_command(label=MENU_MANAGE_PLAYLISTS)
-        self.menu_library.add_command(label=MENU_PODCAST_SETTINGS)
 
         self.menu_transfer = Menu(self.menubar, tearoff=0)
         self.menubar.add_cascade(label="Transfer", menu=self.menu_transfer)
@@ -908,7 +908,7 @@ class MainWindow:
         ab_tree_frame.pack(fill=BOTH, expand=True)
 
         # Podcasts tab: subscriptions + episodes + Sync Latest.
-        # Full-sync schedule: Library → Podcast Settings…
+        # Full-sync schedule: Config → Podcast Settings…
         # TODO(follow-up): OPML import/export
         pod_outer = Frame(self.podcastsLibrary_tab)
         pod_outer.pack(fill=BOTH, expand=True, padx=4, pady=4)
@@ -1600,28 +1600,23 @@ class MainWindow:
         *,
         on_manage_library,
         on_manage_playlists=None,
-        on_podcast_settings=None,
         on_select_root=None,
         on_update=None,
+        **_legacy,
     ) -> None:
         """Wire Library menu entries (called once from the controller).
 
         *on_manage_library* opens the roots manager (add/remove/update).
         *on_manage_playlists* focuses the Playlists notebook tab.
-        *on_podcast_settings* opens Podcast Settings (schedule / full sync).
-        *on_select_root* / *on_update* are ignored legacy kwargs.
+        *on_select_root* / *on_update* / legacy kwargs are ignored.
         """
-        del on_select_root, on_update
+        del on_select_root, on_update, _legacy
         self.menu_library.entryconfig(
             MENU_MANAGE_LIBRARY, command=on_manage_library
         )
         if on_manage_playlists is not None:
             self.menu_library.entryconfig(
                 MENU_MANAGE_PLAYLISTS, command=on_manage_playlists
-            )
-        if on_podcast_settings is not None:
-            self.menu_library.entryconfig(
-                MENU_PODCAST_SETTINGS, command=on_podcast_settings
             )
 
     def set_transfer_menu_commands(
@@ -1725,6 +1720,8 @@ class MainWindow:
         on_keep_downloaded_podcasts_toggle=None,
         on_clear_downloaded_podcasts=None,
         on_reveal_podcast_downloads=None,
+        on_podcast_settings=None,
+        on_audiobook_encode=None,
     ) -> None:
         self._config_menu_commands = {
             "on_config": on_config,
@@ -1739,6 +1736,8 @@ class MainWindow:
             "on_keep_downloaded_podcasts_toggle": on_keep_downloaded_podcasts_toggle,
             "on_clear_downloaded_podcasts": on_clear_downloaded_podcasts,
             "on_reveal_podcast_downloads": on_reveal_podcast_downloads,
+            "on_podcast_settings": on_podcast_settings,
+            "on_audiobook_encode": on_audiobook_encode,
         }
         self._apply_config_menu_commands()
 
@@ -1779,6 +1778,8 @@ class MainWindow:
                 MENU_CLEAR_DOWNLOADED_PODCASTS,
                 cmds.get("on_clear_downloaded_podcasts"),
             ),
+            (MENU_PODCAST_SETTINGS, cmds.get("on_podcast_settings")),
+            (MENU_AUDIOBOOK_ENCODE, cmds.get("on_audiobook_encode")),
         )
         for label, cmd in pairs:
             if cmd is not None:
@@ -2097,6 +2098,9 @@ class MainWindow:
         )
         self.menu_config.add_command(label=MENU_REVEAL_PODCAST_DOWNLOADS)
         self.menu_config.add_command(label=MENU_CLEAR_DOWNLOADED_PODCASTS)
+        self.menu_config.add_command(label=MENU_PODCAST_SETTINGS)
+        self.menu_config.add_separator()
+        self.menu_config.add_command(label=MENU_AUDIOBOOK_ENCODE)
         self.menu_config.add_separator()
         self.menu_config.add_command(label=MENU_CONFIG)
         self._apply_config_menu_commands()

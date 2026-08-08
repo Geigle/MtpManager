@@ -43,7 +43,7 @@ class Podcast:
     created_at: str = ""
     updated_at: str = ""
     episode_count: int = 0
-    # Automatic full-sync (Library → Podcast Settings + per-show override).
+    # Automatic full-sync (Config → Podcast Settings + per-show override).
     auto_update: bool = True
     schedule_time: str = ""  # HH:MM override; empty = global
     schedule_days: str = ""  # reserved; empty = global
