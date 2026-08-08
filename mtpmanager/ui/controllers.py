@@ -212,6 +212,7 @@ from mtpmanager.ui.dialogs import (
     show_audiobook_encode_dialog,
     show_podcast_settings_dialog,
     show_podcast_show_encode_dialog,
+    show_shrink_encode_dialog,
     show_track_info_dialog,
     show_track_list_dialog,
 )
@@ -612,6 +613,7 @@ class AppController:
             on_fetch_tags=self.action_device_fetch_tags_selected,
             on_track_info=self.action_device_track_info_selected,
             on_add_to_playlist=self.action_device_add_selected_to_playlist,
+            on_shrink=self.action_shrink_device_selection,
             on_delete_artist=self.action_device_delete_artist_group,
             on_delete_album=self.action_device_delete_album_group,
             on_delete_folder=self.action_device_delete_folder_group,
@@ -10533,6 +10535,357 @@ class AppController:
             self._start_send_video([track.path])
             return
         self._transfer_one(track, self._target_format())
+
+    def action_shrink_library_selection(self) -> None:
+        """Library tree context: Shrink selected tracks / group contents."""
+        tracks = self._tracks_from_selected_iids(quiet=True)
+        if not tracks:
+            # Artist/album header: use group seed expansion via sync helpers.
+            seed = self._context_group_seed
+            if seed is None:
+                iid = self.win.selected_tree_iid()
+                seed = self._group_seed_by_iid.get(iid or "")
+            if seed is not None:
+                # Expand same as sync album/artist
+                kind = "album"
+                iid = self.win.selected_tree_iid()
+                if iid:
+                    try:
+                        tags = set(self.win.active_library_tree().item(iid, "tags"))
+                    except Exception:
+                        tags = set()
+                    if "group_artist" in tags:
+                        kind = "artist"
+                tracks = self._tracks_for_shrink_from_seed(seed, kind=kind)
+        self._start_shrink(tracks, source="library")
+
+    def action_shrink_podcast_selection(self) -> None:
+        """Podcasts tab episode context: Shrink selected episodes on device."""
+        from mtpmanager.app.podcast_ops import episode_as_track
+
+        eids = self._selected_episode_ids()
+        tracks: list[Track] = []
+        for eid in eids:
+            ep = get_episode(eid)
+            if ep is None:
+                continue
+            show = get_podcast(int(ep.podcast_id))
+            if show is None:
+                continue
+            try:
+                if ep.local_path and os.path.isfile(ep.local_path):
+                    tracks.append(
+                        episode_as_track(
+                            ep,
+                            show,
+                            tracknumber_as_date=bool(
+                                self._config.podcast_tracknumber_as_date
+                            ),
+                        )
+                    )
+                else:
+                    # Display-shaped track with guid; shrink needs a local path
+                    # for re-encode — skip if no download.
+                    if is_track_guid(ep.guid):
+                        tracks.append(
+                            Track(
+                                path=ep.local_path or f"podcast:{ep.guid}",
+                                meta=TrackMetadata(
+                                    title=ep.title or "Episode",
+                                    genre="Podcast",
+                                ),
+                                guid=ep.guid,
+                            )
+                        )
+            except Exception:
+                logger.debug("shrink podcast track build failed", exc_info=True)
+        # Drop tracks without a real local file for re-encode.
+        tracks = [t for t in tracks if t.path and os.path.isfile(t.path)]
+        if not tracks:
+            messagebox.showinfo(
+                "Shrink",
+                "No local episode files to re-encode.\n\n"
+                "Download or Sync the episode first so a cache file exists.",
+            )
+            return
+        self._start_shrink(tracks, source="podcast")
+
+    def action_shrink_device_selection(self) -> None:
+        """Device tree context: Shrink selected on-device objects (by GUID)."""
+        tree = self._device_context_tree or self.win.active_device_tree()
+        iid = self._device_context_row
+        tracks: list[Track] = []
+        if iid:
+            try:
+                tags = set(tree.item(iid, "tags") or ())
+            except Exception:
+                tags = set()
+            if tags & {"group_artist", "group_album", "group_directory", "group_folder"}:
+                tracks = self._device_tracks_under_iid(tree, iid)
+            else:
+                tracks = self._device_tracks_from_tree_selection(tree)
+        else:
+            tracks = self._device_tracks_from_tree_selection(tree)
+        refs = self._device_refs_for_tracks(tracks)
+        # Map device objects → host library/podcast tracks by ObjectFileName GUID.
+        host: list[Track] = []
+        seen: set[str] = set()
+        for ref in refs:
+            g = guid_from_remote_name(ref.name or "")
+            if not is_track_guid(g):
+                continue
+            if g in seen:
+                continue
+            ht = self._host_track_for_guid(g)
+            if ht is not None:
+                seen.add(g)
+                host.append(ht)
+        if not host:
+            messagebox.showinfo(
+                "Shrink",
+                "Could not match selected device items to host library or "
+                "podcast files (GUID join).\n\n"
+                "Refresh the device index after a full sync, or Shrink from "
+                "the Library / Podcasts tab.",
+            )
+            return
+        self._start_shrink(host, source="device")
+
+    def _host_track_for_guid(self, guid: str) -> Track | None:
+        """Resolve a host Track (library or downloaded podcast) by GUID."""
+        g = (guid or "").strip().lower()
+        if not is_track_guid(g):
+            return None
+        for t in self.library.tracks:
+            if (t.guid or "").lower() == g and t.path and os.path.isfile(t.path):
+                return t
+        try:
+            from mtpmanager.app.podcast_ops import episode_as_track
+            from mtpmanager.infra.podcast_index import get_episode_by_guid
+
+            ep = get_episode_by_guid(g)
+            if ep is None or not ep.local_path or not os.path.isfile(ep.local_path):
+                return None
+            show = get_podcast(int(ep.podcast_id))
+            if show is None:
+                return None
+            return episode_as_track(
+                ep,
+                show,
+                tracknumber_as_date=bool(
+                    self._config.podcast_tracknumber_as_date
+                ),
+            )
+        except Exception:
+            logger.debug("host track for guid failed", exc_info=True)
+            return None
+
+    def _tracks_for_shrink_from_seed(
+        self, seed: Track | None, *, kind: str
+    ) -> list[Track]:
+        """Expand artist/album seed the same way sync does (audio only)."""
+        if seed is None:
+            return []
+        # Reuse existing seed expansion via library filters.
+        try:
+            if kind == "artist":
+                artist = (seed.meta.artist or "").strip()
+                return self._audio_tracks_only(
+                    [
+                        t
+                        for t in self.library.tracks
+                        if (t.meta.artist or "").strip() == artist
+                    ]
+                )
+            if kind == "album":
+                artist = (seed.meta.artist or "").strip()
+                album = (seed.meta.album or "").strip()
+                return self._audio_tracks_only(
+                    [
+                        t
+                        for t in self.library.tracks
+                        if (t.meta.artist or "").strip() == artist
+                        and (t.meta.album or "").strip() == album
+                    ]
+                )
+        except Exception:
+            logger.debug("shrink seed expand failed", exc_info=True)
+        return self._audio_tracks_only([seed]) if seed else []
+
+    def _start_shrink(self, tracks: list[Track], *, source: str) -> None:
+        """Confirm, pick encode if needed, delete+re-send with force compress."""
+        from mtpmanager.app.shrink import (
+            collect_shrink_items,
+            shrink_items,
+            suggest_shrink_preset,
+            would_passthrough,
+        )
+        from mtpmanager.domain.audio_encode import (
+            presets_for_format,
+            shrink_presets_at_or_below,
+        )
+
+        audio = self._audio_tracks_only(list(tracks or []))
+        audio = [t for t in audio if t.path and os.path.isfile(t.path)]
+        if not audio:
+            messagebox.showinfo("Shrink", "No local audio tracks to shrink.")
+            return
+        if not self.device.is_connected():
+            messagebox.showinfo(
+                "Shrink",
+                "Connect the device first (Shrink deletes and re-sends "
+                "on-device objects).",
+            )
+            return
+        if self.win.active_mode() != "experimental":
+            messagebox.showinfo(
+                "Shrink",
+                "Shrink needs Experimental mode (PyMTP) so object ids and "
+                "playlists can be updated.",
+            )
+            return
+        serial = self._device_serial or device_serial_key()
+        if not serial:
+            messagebox.showinfo("Shrink", "No device serial available.")
+            return
+        items, missing = collect_shrink_items(audio, serial=serial)
+        if not items:
+            messagebox.showinfo(
+                "Shrink",
+                "None of the selected tracks are on the device "
+                "(no GUID→object-id in the device index).\n\n"
+                "Sync them once first, or refresh the device index.",
+            )
+            return
+        n_miss = len(missing)
+        miss_note = (
+            f"\n\n({n_miss} not on device will be skipped.)" if n_miss else ""
+        )
+        if not messagebox.askyesno(
+            "Shrink",
+            f"Delete and re-encode {len(items)} track(s) already on the device "
+            f"with more aggressive compression?\n\n"
+            "Device playlists that reference these tracks will be updated "
+            f"to the new objects.{miss_note}",
+        ):
+            return
+
+        # Resolve per-track configured settings; detect passthrough cases.
+        need_dialog = False
+        for it in items:
+            conf = self._encode_settings_for_track(it.track)
+            if would_passthrough(it.track.path, conf):
+                need_dialog = True
+                break
+
+        user_settings = None
+        if need_dialog:
+            sample = items[0]
+            conf = self._encode_settings_for_track(sample.track)
+            allowed = self._allowed_send_formats()
+            preset = suggest_shrink_preset(
+                sample.track, configured=conf, allowed_formats=allowed
+            )
+            fmt = conf.normalized_format()
+            ladder = list(presets_for_format(fmt))
+            if allowed is not None:
+                allowed_set = {str(x).lower().lstrip(".") for x in allowed}
+                ladder = [p for p in ladder if p.format in allowed_set]
+            if not ladder:
+                ladder = shrink_presets_at_or_below(fmt)
+            initial = 0
+            if preset is not None:
+                for i, p in enumerate(ladder):
+                    if p.id == preset.id:
+                        initial = i
+                        break
+            # Prefer starting at or below current track quality.
+            dlg = show_shrink_encode_dialog(
+                self.win.root,
+                track_label=(
+                    sample.track.meta.title if sample.track.meta else ""
+                ),
+                presets=ladder,
+                initial_index=initial,
+                n_tracks=len(items),
+            )
+            if dlg is None:
+                return
+            user_settings = dlg.audio_encode
+
+        if not self._begin_transfer_job():
+            return
+        device = self.device
+        transport = self._transport()
+        transcoder = self.transcoder
+        batch = list(items)
+
+        def encode_for(it):
+            conf = self._encode_settings_for_track(it.track)
+            if user_settings is not None and would_passthrough(
+                it.track.path, conf
+            ):
+                return user_settings
+            return conf
+
+        def work():
+            gen = self._bg.generation
+            report = self._bg.progress_callback(gen)
+
+            def on_progress(done, total, path):
+                report("progress", done, total, path)
+
+            return shrink_items(
+                batch,
+                serial=serial,
+                device=device,
+                transport=transport,
+                transcoder=transcoder,
+                encode_for_item=encode_for,
+                resolve_parent_folder=self._parent_folder_resolver(),
+                should_cancel=self._should_cancel_job,
+                on_progress=on_progress,
+                on_after_send=self._on_after_send,
+            )
+
+        def on_done(result) -> None:
+            self._end_transfer_job()
+            self._schedule_device_music_tree_refresh(enrich_missing_tags=False)
+            errs = list(result.errors or [])
+            msg = (
+                f"Shrink finished.\n\n"
+                f"Deleted: {result.deleted}\n"
+                f"Re-sent: {result.resent}\n"
+                f"Playlists updated: {result.playlists_updated}\n"
+                f"Skipped/missing: {result.skipped + n_miss}"
+            )
+            if errs:
+                msg += f"\n\nErrors ({len(errs)}):\n" + "\n".join(errs[:8])
+                messagebox.showwarning("Shrink", msg)
+            else:
+                messagebox.showinfo("Shrink", msg)
+
+        def on_error(exc: BaseException) -> None:
+            self._end_transfer_job()
+            if isinstance(exc, JobCancelled):
+                self._handle_job_cancelled(exc, title="Shrink cancelled")
+                return
+            logger.exception("Shrink failed")
+            messagebox.showerror("Shrink", str(exc))
+
+        logger.info(
+            "Shrink start source=%s items=%d force_dialog=%s",
+            source,
+            len(batch),
+            need_dialog,
+        )
+        self._bg.submit(
+            work,
+            on_done=on_done,
+            on_error=on_error,
+            on_progress=self._on_transfer_ui_event,
+            name="shrink",
+        )
 
     def action_sync_selected(self) -> None:
         """Sync multi-selected tracks (Shift/Ctrl/Cmd selection) as one job."""

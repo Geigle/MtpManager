@@ -102,6 +102,7 @@ def prepare_track(
     device_formats: Collection[str] | None = None,
     should_cancel: CancelCheck | None = None,
     encode_settings: AudioEncodeSettings | None = None,
+    force_transcode: bool = False,
 ) -> PreparedTrack:
     """Transcode into *slot* if needed; return path/meta for send (no send yet).
 
@@ -110,6 +111,9 @@ def prepare_track(
 
     *encode_settings* (when set) drives bitrate/VBR/channels for the convert;
     *target_format* should match the settings file extension.
+
+    *force_transcode*: always run ffmpeg (e.g. Shrink re-encode of an already
+    native MP3 to a lower bitrate).
     """
     raise_if_cancelled(should_cancel)
     if encode_settings is not None:
@@ -123,12 +127,20 @@ def prepare_track(
     force_tempo = bool(
         encode_settings is not None and encode_settings.needs_tempo_filter()
     )
-    if force_tempo or needs_transcode(
-        src, target_format=target_format, device_formats=device_formats
+    if (
+        force_transcode
+        or force_tempo
+        or needs_transcode(
+            src, target_format=target_format, device_formats=device_formats
+        )
     ):
         _notify_status(on_track_status, track.path, "transcoding")
         src = transcoder.convert(
-            src, target_format, slot=slot, settings=encode_settings
+            src,
+            target_format,
+            slot=slot,
+            settings=encode_settings,
+            force=bool(force_transcode or force_tempo),
         )
         cleanup_path = src
         if reread_tags_after_convert:
@@ -219,6 +231,7 @@ def transfer_track(
     on_after_send: AfterSendCallback | None = None,
     encode_settings: AudioEncodeSettings | None = None,
     resolve_encode_settings: EncodeSettingsResolver | None = None,
+    force_transcode: bool = False,
 ) -> None:
     """
     Ensure track is device-ready (transcode if needed), then send via transport.
@@ -261,6 +274,7 @@ def transfer_track(
         device_formats=device_formats,
         should_cancel=should_cancel,
         encode_settings=track_encode,
+        force_transcode=force_transcode,
     )
     try:
         raise_if_cancelled(should_cancel, total=1)

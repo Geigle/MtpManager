@@ -156,11 +156,13 @@ class FFmpegTranscoder:
         *,
         slot: int = 0,
         settings: AudioEncodeSettings | None = None,
+        force: bool = False,
     ) -> str:
         """Transcode *src_path* into dual-buffer *slot*; return path to send.
 
         If *src_path* is already the target format, returns *src_path* unchanged
-        (caller must not cleanup the original).
+        (caller must not cleanup the original) — unless *force* or a tempo
+        filter is set.
 
         When *settings* is provided, ffmpeg options come from the encode
         recipe (bitrate, VBR quality, channels, sample rate, etc.). Otherwise
@@ -173,9 +175,12 @@ class FFmpegTranscoder:
             target_format = target_format.lower().lstrip(".")
             s = None
 
-        # Same container can still need a convert when tempo is applied.
-        if is_format(src_path, target_format) and not (
-            s is not None and s.needs_tempo_filter()
+        # Same container can still need a convert when tempo is applied or
+        # Shrink forces a lower-bitrate re-encode.
+        if (
+            is_format(src_path, target_format)
+            and not force
+            and not (s is not None and s.needs_tempo_filter())
         ):
             return src_path
 

@@ -13,6 +13,7 @@ class Transcoder(Protocol):
         *,
         slot: int = 0,
         settings: AudioEncodeSettings | None = None,
+        force: bool = False,
     ) -> str:
         """Transcode src to target_format into dual-buffer *slot*; return path to send.
 
@@ -21,6 +22,9 @@ class Transcoder(Protocol):
 
         When *settings* is set, bitrate/VBR/channels/etc. come from the recipe;
         *target_format* should match ``settings.file_extension()``.
+
+        *force*: always re-encode even when the source already has *target_format*
+        (used by Shrink for lossy→lossy downsizes).
         """
         ...
 

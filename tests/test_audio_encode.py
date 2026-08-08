@@ -72,6 +72,18 @@ class AudioEncodeCatalogTests(unittest.TestCase):
         self.assertEqual(back.bitrate_kbps, 192)
         self.assertEqual(back.rate_control, "cbr")
 
+    def test_closest_preset_for_bitrate(self) -> None:
+        from mtpmanager.domain.audio_encode import closest_preset_for_bitrate
+
+        p = closest_preset_for_bitrate("mp3", 192)
+        assert p is not None
+        self.assertIn("192", p.id)
+        p2 = closest_preset_for_bitrate("mp3", 40)
+        assert p2 is not None
+        self.assertTrue(
+            "32" in p2.id or "64" in p2.id or "vbr_32" in p2.id
+        )
+
     def test_playback_speed_normalize_and_atempo(self) -> None:
         self.assertEqual(normalize_playback_speed(1), 1.0)
         self.assertEqual(normalize_playback_speed(0), 1.0)

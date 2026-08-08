@@ -3207,3 +3207,120 @@ def show_podcast_show_encode_dialog(
     parent.wait_window(dlg)
     return result[0]
 
+
+
+# ---------------------------------------------------------------------------
+# Shrink encode picker (forced re-encode when source already matches target)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ShrinkEncodeResult:
+    """Preset chosen from the Shrink compression dialog."""
+
+    audio_encode: AudioEncodeSettings
+
+
+def show_shrink_encode_dialog(
+    parent,
+    *,
+    track_label: str = "",
+    presets: list | None = None,
+    initial_index: int = 0,
+    n_tracks: int = 1,
+) -> ShrinkEncodeResult | None:
+    """Slider over quality presets (low → high). Save → result; Cancel → None."""
+    from tkinter import IntVar, Scale
+
+    from mtpmanager.domain.audio_encode import AudioEncodePreset
+
+    ladder: list[AudioEncodePreset] = list(presets or [])
+    if not ladder:
+        return None
+    idx0 = max(0, min(len(ladder) - 1, int(initial_index)))
+
+    dlg = Toplevel(parent)
+    dlg.title("Shrink — choose compression")
+    dlg.transient(parent)
+    dlg.resizable(False, False)
+
+    body = Frame(dlg, padx=14, pady=12)
+    body.pack(fill=BOTH, expand=True)
+
+    noun = "track" if n_tracks == 1 else f"{n_tracks} tracks"
+    Label(
+        body,
+        text=f"Shrink {noun}",
+        font=("", 11, "bold"),
+        anchor="w",
+    ).pack(fill="x", pady=(0, 4))
+    Label(
+        body,
+        text=(
+            "These files already match the current send format, so Shrink "
+            "needs a more aggressive preset. Drag left for smaller files "
+            "(more compression)."
+            + (f"\n\n{track_label}" if track_label else "")
+        ),
+        justify=LEFT,
+        wraplength=420,
+        fg="#333",
+    ).pack(anchor="w", pady=(0, 8))
+
+    idx_var = IntVar(value=idx0)
+    name_var = StringVar(value=ladder[idx0].display_name)
+
+    def on_slide(_v=None) -> None:
+        try:
+            i = int(idx_var.get())
+        except (TypeError, ValueError):
+            i = idx0
+        i = max(0, min(len(ladder) - 1, i))
+        name_var.set(ladder[i].display_name)
+
+    Label(body, textvariable=name_var, anchor="w", font=("", 10, "bold")).pack(
+        fill="x", pady=(0, 4)
+    )
+    Scale(
+        body,
+        from_=0,
+        to=max(0, len(ladder) - 1),
+        orient="horizontal",
+        variable=idx_var,
+        length=360,
+        showvalue=False,
+        command=on_slide,
+    ).pack(fill="x")
+    tick = Frame(body)
+    tick.pack(fill="x")
+    Label(tick, text="More compression", fg="#555").pack(side=LEFT)
+    Label(tick, text="Higher quality", fg="#555").pack(side=RIGHT)
+
+    result: list[ShrinkEncodeResult | None] = [None]
+
+    def on_ok() -> None:
+        i = max(0, min(len(ladder) - 1, int(idx_var.get())))
+        result[0] = ShrinkEncodeResult(audio_encode=ladder[i].settings)
+        dlg.destroy()
+
+    def on_cancel() -> None:
+        result[0] = None
+        dlg.destroy()
+
+    btn = Frame(body)
+    btn.pack(fill="x", pady=(12, 0))
+    Button(btn, text="Cancel", width=10, command=on_cancel).pack(
+        side=RIGHT, padx=(6, 0)
+    )
+    Button(btn, text="Shrink", width=10, command=on_ok).pack(side=RIGHT)
+
+    dlg.protocol("WM_DELETE_WINDOW", on_cancel)
+    dlg.grab_set()
+    try:
+        px = parent.winfo_rootx() + max(0, (parent.winfo_width() - 460) // 2)
+        py = parent.winfo_rooty() + max(0, (parent.winfo_height() - 280) // 3)
+        dlg.geometry(f"+{px}+{py}")
+    except Exception:
+        pass
+    parent.wait_window(dlg)
+    return result[0]

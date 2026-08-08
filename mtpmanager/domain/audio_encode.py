@@ -823,6 +823,78 @@ def get_preset(preset_id: str | None) -> AudioEncodePreset | None:
     return _PRESET_BY_ID.get(preset_id)
 
 
+def estimate_settings_bitrate_kbps(settings: AudioEncodeSettings) -> int | None:
+    """Rough kbps for ranking/compare (None if unknown / lossless)."""
+    s = clamp_settings_for_format(settings)
+    if s.rate_control in ("lossless", "pcm"):
+        return None
+    if s.bitrate_kbps:
+        return int(s.bitrate_kbps)
+    # Rough VBR maps for UI ranking only.
+    if s.rate_control == "vbr" and s.vbr_quality is not None:
+        q = float(s.vbr_quality)
+        fmt = s.normalized_format()
+        if fmt == "mp3":
+            # q 0≈245 … 9≈65
+            return int(max(32, min(320, 245 - q * 20)))
+        if fmt == "ogg":
+            return int(max(32, min(320, 64 + q * 32)))
+        if fmt in ("aac", "m4a"):
+            return int(max(32, min(320, q * 128)))
+    return None
+
+
+def closest_preset_for_bitrate(
+    fmt: str,
+    bitrate_kbps: int | None,
+    *,
+    allowed_formats: Collection[str] | None = None,
+) -> AudioEncodePreset | None:
+    """Pick the ladder step nearest to *bitrate_kbps* (same format)."""
+    ladder = presets_for_format(fmt)
+    if allowed_formats is not None:
+        allowed = {str(x).lower().lstrip(".") for x in allowed_formats}
+        ladder = [p for p in ladder if p.format in allowed or fmt in allowed]
+    if not ladder:
+        return None
+    if bitrate_kbps is None or bitrate_kbps <= 0:
+        # Mid ladder.
+        return ladder[min(len(ladder) - 1, max(0, len(ladder) // 2))]
+    best = ladder[0]
+    best_d = 10**9
+    for p in ladder:
+        est = estimate_settings_bitrate_kbps(p.settings)
+        if est is None:
+            continue
+        d = abs(est - int(bitrate_kbps))
+        if d < best_d:
+            best_d = d
+            best = p
+    return best
+
+
+def shrink_presets_at_or_below(
+    fmt: str,
+    *,
+    max_bitrate_kbps: int | None = None,
+    allowed_formats: Collection[str] | None = None,
+) -> list[AudioEncodePreset]:
+    """Presets for *fmt* ordered low→high, optionally capped by bitrate."""
+    ladder = list(presets_for_format(fmt))
+    if allowed_formats is not None:
+        allowed = {str(x).lower().lstrip(".") for x in allowed_formats}
+        ladder = [p for p in ladder if p.format in allowed or p.format == fmt]
+    if max_bitrate_kbps is not None and max_bitrate_kbps > 0:
+        capped = []
+        for p in ladder:
+            est = estimate_settings_bitrate_kbps(p.settings)
+            if est is None or est <= int(max_bitrate_kbps):
+                capped.append(p)
+        if capped:
+            ladder = capped
+    return ladder
+
+
 def presets_for_format(fmt: str) -> list[AudioEncodePreset]:
     key = (fmt or "").lower().lstrip(".")
     # Treat aac and m4a as one family for the format picker when listing AAC.

@@ -29,6 +29,7 @@ class _FakeTranscoder:
         *,
         slot: int = 0,
         settings=None,
+        force: bool = False,
     ) -> str:
         target_format = target_format.lower().lstrip(".")
         slot = int(slot) % NUM_SLOTS
