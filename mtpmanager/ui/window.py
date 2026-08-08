@@ -127,6 +127,7 @@ BG_VIDEO_PODCAST = "#c5e8e6"
 
 # Podcasts tab
 CTX_PODCAST_SYNC_LATEST = "Sync Latest"
+CTX_PODCAST_ENCODE = "Encode Settings…"
 CTX_PODCAST_EPISODE_SYNC = "Sync Episodes Now"
 CTX_PODCAST_PLAY_EPISODE = "Play This Episode"
 CTX_PODCAST_PLAY_EPISODES = "Play These Episodes"
@@ -582,6 +583,7 @@ class MainWindow:
 
         self.menu_podcast_show_ctx = Menu(self.root, tearoff=0)
         self.menu_podcast_show_ctx.add_command(label=CTX_PODCAST_SYNC_LATEST)
+        self.menu_podcast_show_ctx.add_command(label=CTX_PODCAST_ENCODE)
 
         self.menu_podcast_episode_ctx = Menu(self.root, tearoff=0)
         self.menu_podcast_episode_ctx.add_command(label=CTX_PODCAST_PLAY_EPISODE)
@@ -1793,6 +1795,7 @@ class MainWindow:
         on_show_select=None,
         on_episode_select=None,
         on_show_sync=None,
+        on_show_encode=None,
         on_episode_sync=None,
         on_episode_play=None,
         on_episode_reveal_download=None,
@@ -1818,6 +1821,10 @@ class MainWindow:
         if on_show_sync is not None:
             self.menu_podcast_show_ctx.entryconfig(
                 CTX_PODCAST_SYNC_LATEST, command=on_show_sync
+            )
+        if on_show_encode is not None:
+            self.menu_podcast_show_ctx.entryconfig(
+                CTX_PODCAST_ENCODE, command=on_show_encode
             )
         if on_episode_play is not None:
             # Index 0: Play (label toggles This/These).

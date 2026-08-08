@@ -206,6 +206,7 @@ from mtpmanager.ui.dialogs import (
     show_file_list_dialog,
     show_folder_list_dialog,
     show_podcast_settings_dialog,
+    show_podcast_show_encode_dialog,
     show_track_info_dialog,
     show_track_list_dialog,
 )
@@ -469,6 +470,7 @@ class AppController:
             on_show_select=self.on_podcast_show_select,
             on_episode_select=self.on_podcast_episode_select,
             on_show_sync=self.on_podcast_sync_latest_selected,
+            on_show_encode=self.on_podcast_show_encode,
             on_episode_sync=self.on_podcast_sync_episodes_selected,
             on_episode_play=self.on_podcast_play_episodes_selected,
             on_episode_reveal_download=self.on_podcast_reveal_download,
@@ -1172,6 +1174,9 @@ class AppController:
                     has_video = False
                 if has_video:
                     label = f"▶ {label}"
+                # ★ = custom encode for this show (context menu).
+                if p.audio_encode is not None:
+                    label = f"{label} ★"
                 lb.insert("end", label)
         except Exception:
             logger.debug("refresh podcast list failed", exc_info=True)
@@ -1620,14 +1625,11 @@ class AppController:
 
     def on_podcast_settings(self) -> None:
         """Library → Podcast Settings…"""
-        from mtpmanager.infra.podcast_index import set_podcast_audio_encode
-
         cfg = self._config
         status = self._podcast_schedule_status_line()
         profile_name = None
         if self._active_profile is not None:
             profile_name = self._active_profile.display_name
-        shows = list_podcasts()
         result = show_podcast_settings_dialog(
             self.win.root,
             auto_enabled=bool(cfg.podcast_auto_enabled),
@@ -1643,7 +1645,6 @@ class AppController:
             global_audio_encode=cfg.resolved_audio_encode(),
             allowed_send_formats=self._allowed_send_formats(),
             profile_display_name=profile_name,
-            podcasts=shows,
         )
         if result is None:
             return
@@ -1667,17 +1668,9 @@ class AppController:
                 "Podcast Settings", f"Could not save settings:\n{e}"
             )
             return
-        per_map = result.per_podcast_audio_encode or {}
-        for pid, enc in per_map.items():
-            try:
-                set_podcast_audio_encode(int(pid), enc)
-            except Exception:
-                logger.exception(
-                    "Failed to save per-show encode podcast_id=%s", pid
-                )
         logger.info(
             "Podcast settings saved enabled=%s days=%s time=%s max=%s "
-            "podcast_encode=%s audiobook_encode=%s per_show=%d",
+            "podcast_encode=%s audiobook_encode=%s",
             self._config.podcast_auto_enabled,
             self._config.podcast_schedule_days,
             self._config.podcast_schedule_time,
@@ -1692,7 +1685,6 @@ class AppController:
                 if self._config.audiobook_audio_encode is not None
                 else "global"
             ),
-            sum(1 for v in per_map.values() if v is not None),
         )
         if result.run_full_sync_now:
             self._start_full_podcast_sync(
@@ -1700,6 +1692,62 @@ class AppController:
             )
         else:
             self.win.root.after(200, self._podcast_schedule_tick)
+
+    def on_podcast_show_encode(self) -> None:
+        """Podcasts tab show context menu → Encode Settings…"""
+        from mtpmanager.infra.podcast_index import set_podcast_audio_encode
+
+        ids = self._selected_podcast_ids()
+        if not ids and self._selected_podcast_id is not None:
+            ids = [self._selected_podcast_id]
+        if not ids:
+            messagebox.showinfo("Podcast", "Select a podcast show first.")
+            return
+        # Single-show dialog; if multi-select, use the first selected row.
+        pid = int(ids[0])
+        show = get_podcast(pid)
+        if show is None:
+            messagebox.showerror("Podcast", "Could not load that show.")
+            return
+        title = (show.title or show.feed_url or f"Podcast {pid}").strip()
+        cfg = self._config
+        if cfg.uses_podcast_encode_override() and cfg.podcast_audio_encode:
+            inherit = (
+                f"podcast default ({cfg.podcast_audio_encode.summary_line()})"
+            )
+        else:
+            inherit = (
+                f"Config ({cfg.resolved_audio_encode().summary_line()})"
+            )
+        profile_name = None
+        if self._active_profile is not None:
+            profile_name = self._active_profile.display_name
+        result = show_podcast_show_encode_dialog(
+            self.win.root,
+            show_title=title,
+            use_override=show.audio_encode is not None,
+            audio_encode=show.audio_encode,
+            inherit_summary=inherit,
+            allowed_send_formats=self._allowed_send_formats(),
+            profile_display_name=profile_name,
+        )
+        if result is None:
+            return
+        enc = result.audio_encode if result.use_override else None
+        updated = set_podcast_audio_encode(pid, enc)
+        if updated is None:
+            messagebox.showerror(
+                "Podcast", "Could not save encode settings for this show."
+            )
+            return
+        logger.info(
+            "Podcast show encode saved id=%s title=%r encode=%s",
+            pid,
+            title,
+            enc.summary_line() if enc is not None else "inherit",
+        )
+        # Refresh list labels (★ marker for per-show override).
+        self._refresh_podcast_tab()
 
     def _podcast_schedule_status_line(self) -> str:
         from datetime import datetime

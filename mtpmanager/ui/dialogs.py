@@ -57,7 +57,6 @@ from mtpmanager.infra.app_config import (
     normalize_schedule_days,
     normalize_schedule_time,
 )
-from mtpmanager.infra.podcast_index import Podcast
 from mtpmanager.infra.remote_naming import (
     DEFAULT_TV_FOLDER_ID,
     DEFAULT_VIDEO_FOLDER_ID,
@@ -2339,8 +2338,15 @@ class PodcastSettingsResult:
     # When True, *podcast_audio_encode* overrides Config for podcast episodes.
     use_podcast_encode_override: bool = False
     podcast_audio_encode: AudioEncodeSettings | None = None
-    # Per-subscription encode: podcast_id → settings (None = clear / inherit).
-    per_podcast_audio_encode: dict[int, AudioEncodeSettings | None] | None = None
+
+
+@dataclass(frozen=True)
+class PodcastShowEncodeResult:
+    """Values saved from a single-show encode dialog (context menu)."""
+
+    # True when the show uses a custom recipe; False clears the override.
+    use_override: bool
+    audio_encode: AudioEncodeSettings | None = None
 
 
 def _time_spinner_row(
@@ -2638,9 +2644,10 @@ def show_podcast_settings_dialog(
     global_audio_encode: AudioEncodeSettings | None = None,
     allowed_send_formats: frozenset[str] | None = None,
     profile_display_name: str | None = None,
-    podcasts: list[Podcast] | None = None,
 ) -> PodcastSettingsResult | None:
-    """Podcast schedule + audiobook/podcast encode overrides. Save → result.
+    """Podcast schedule + default podcast/audiobook encode. Save → result.
+
+    Per-show encode is edited via the Podcasts tab show context menu.
 
     Set ``run_full_sync_now`` when the user chooses **Full Sync Now**
     (settings are still saved first).
@@ -2835,7 +2842,8 @@ def show_podcast_settings_dialog(
             "Optional default for podcast episodes (genre Podcast). "
             "Overrides Config → Config… "
             f"({global_enc.summary_line()}) when enabled. "
-            "Individual shows can override this below."
+            "Per-show overrides: right-click a show on the Podcasts tab → "
+            "Encode Settings…"
         ),
         use_override=bool(use_podcast_encode_override),
         initial=pod_initial,
@@ -2843,144 +2851,6 @@ def show_podcast_settings_dialog(
         checkbox_text="Use custom encode for podcasts",
         list_height=4,
     )
-
-    # ---- Per-show encode ----
-    shows = list(podcasts or [])
-    # podcast_id → settings | None (None = inherit podcast default / Config)
-    per_show_state: dict[int, AudioEncodeSettings | None] = {
-        int(p.id): (p.audio_encode if p.audio_encode is not None else None)
-        for p in shows
-    }
-    show_ids: list[int] = [int(p.id) for p in shows]
-
-    if shows:
-        ttk.Separator(body, orient="horizontal").pack(fill="x", pady=(10, 10))
-        Label(
-            body,
-            text="Per-show encode",
-            font=("", 11, "bold"),
-            anchor="w",
-        ).pack(fill="x", pady=(0, 4))
-        Label(
-            body,
-            text=(
-                "Optional override for one show (e.g. talk shows heavily "
-                "compressed; music/RPG shows higher quality). When off, the "
-                "show uses the podcast default above (or Config if that is off)."
-            ),
-            justify=LEFT,
-            wraplength=440,
-            fg="#333",
-        ).pack(anchor="w", pady=(0, 6))
-
-        show_list_frame = Frame(body)
-        show_list_frame.pack(fill="x", pady=(0, 4))
-        show_scroll = Scrollbar(show_list_frame)
-        show_scroll.pack(side=RIGHT, fill=Y)
-        show_list = Listbox(
-            show_list_frame,
-            height=min(6, max(3, len(shows))),
-            exportselection=False,
-            yscrollcommand=show_scroll.set,
-            width=52,
-        )
-        show_list.pack(side=LEFT, fill="x", expand=True)
-        show_scroll.config(command=show_list.yview)
-
-        def _show_label(p: Podcast) -> str:
-            title = (p.title or p.feed_url or f"Show {p.id}").strip()
-            mark = " ★" if p.audio_encode is not None else ""
-            return f"{title}{mark}"
-
-        for p in shows:
-            show_list.insert(END, _show_label(p))
-
-        show_default_settings = resolve_settings(
-            settings=(
-                podcast_audio_encode
-                if use_podcast_encode_override and podcast_audio_encode is not None
-                else default_podcast_audio_encode_settings()
-            ),
-            allowed_formats=allowed_send_formats,
-        )
-        # Seed per-show picker from first show that has override, else default.
-        first_override = next(
-            (per_show_state[i] for i in show_ids if per_show_state.get(i) is not None),
-            None,
-        )
-        show_enc_initial = resolve_settings(
-            settings=first_override or show_default_settings,
-            allowed_formats=allowed_send_formats,
-        )
-        show_override_var, show_get_settings = _pack_encode_override_section(
-            body,
-            title="",
-            blurb="Selected show:",
-            use_override=bool(first_override is not None),
-            initial=show_enc_initial,
-            allowed_send_formats=allowed_send_formats,
-            checkbox_text="Use custom encode for this show",
-            list_height=4,
-        )
-        # Hide empty title label from helper when title is "" — already packed;
-        # blurb still shows "Selected show:".
-
-        current_show_idx: list[int] = [-1]
-
-        def _flush_show_controls() -> None:
-            idx = current_show_idx[0]
-            if idx < 0 or idx >= len(show_ids):
-                return
-            pid = show_ids[idx]
-            if bool(show_override_var.get()):
-                per_show_state[pid] = show_get_settings()
-            else:
-                per_show_state[pid] = None
-            # Update star in list label.
-            p = shows[idx]
-            base = (p.title or p.feed_url or f"Show {p.id}").strip()
-            mark = " ★" if per_show_state[pid] is not None else ""
-            show_list.delete(idx)
-            show_list.insert(idx, f"{base}{mark}")
-            show_list.selection_set(idx)
-
-        def _load_show_controls(idx: int) -> None:
-            if idx < 0 or idx >= len(show_ids):
-                return
-            current_show_idx[0] = idx
-            pid = show_ids[idx]
-            enc = per_show_state.get(pid)
-            if enc is not None:
-                show_override_var.set(True)
-                show_get_settings.set_settings(enc)  # type: ignore[attr-defined]
-            else:
-                show_override_var.set(False)
-                # Preview default without enabling override.
-                fallback = (
-                    pod_get_settings()
-                    if bool(pod_override_var.get())
-                    else show_default_settings
-                )
-                show_get_settings.set_settings(fallback)  # type: ignore[attr-defined]
-
-        def _on_show_select(_e=None) -> None:
-            sel = show_list.curselection()
-            if not sel:
-                return
-            new_idx = int(sel[0])
-            if current_show_idx[0] >= 0 and current_show_idx[0] != new_idx:
-                _flush_show_controls()
-            _load_show_controls(new_idx)
-
-        show_list.bind("<<ListboxSelect>>", _on_show_select)
-        show_list.selection_set(0)
-        _load_show_controls(0)
-    else:
-        show_override_var = None
-        show_get_settings = None
-
-        def _flush_show_controls() -> None:
-            return
 
     # ---- Audiobook encode (overrides Config for Audiobooks tab only) ----
     ttk.Separator(body, orient="horizontal").pack(fill="x", pady=(10, 10))
@@ -3030,14 +2900,10 @@ def show_podcast_settings_dialog(
                 parent=dlg,
             )
             return None
-        _flush_show_controls()
         use_ab = bool(ab_override_var.get())
         ab_settings = ab_get_settings() if use_ab else None
         use_pod = bool(pod_override_var.get())
         pod_settings = pod_get_settings() if use_pod else None
-        per_map: dict[int, AudioEncodeSettings | None] | None = None
-        if shows:
-            per_map = dict(per_show_state)
         return PodcastSettingsResult(
             auto_enabled=bool(enabled_var.get()),
             schedule_days=tuple(normalize_schedule_days(chosen_days)),
@@ -3049,7 +2915,6 @@ def show_podcast_settings_dialog(
             audiobook_audio_encode=ab_settings,
             use_podcast_encode_override=use_pod,
             podcast_audio_encode=pod_settings,
-            per_podcast_audio_encode=per_map,
         )
 
     def _cleanup_bindings() -> None:
@@ -3093,10 +2958,116 @@ def show_podcast_settings_dialog(
     dlg.grab_set()
     try:
         px = parent.winfo_rootx() + max(0, (parent.winfo_width() - 500) // 2)
-        py = parent.winfo_rooty() + max(0, (parent.winfo_height() - 700) // 3)
-        dlg.geometry(f"520x700+{px}+{py}")
+        py = parent.winfo_rooty() + max(0, (parent.winfo_height() - 640) // 3)
+        dlg.geometry(f"520x640+{px}+{py}")
     except Exception:
-        dlg.geometry("520x700")
+        dlg.geometry("520x640")
+    parent.wait_window(dlg)
+    return result[0]
+
+
+def show_podcast_show_encode_dialog(
+    parent,
+    *,
+    show_title: str,
+    use_override: bool = False,
+    audio_encode: AudioEncodeSettings | None = None,
+    inherit_summary: str = "",
+    allowed_send_formats: frozenset[str] | None = None,
+    profile_display_name: str | None = None,
+) -> PodcastShowEncodeResult | None:
+    """Per-show encode override (Podcasts tab context menu). Save → result."""
+    title = (show_title or "Podcast").strip() or "Podcast"
+    inherit = (inherit_summary or "").strip() or "podcast default / Config"
+    if use_override and audio_encode is not None:
+        initial = resolve_settings(
+            settings=audio_encode,
+            allowed_formats=allowed_send_formats,
+        )
+    else:
+        initial = resolve_settings(
+            settings=default_podcast_audio_encode_settings(),
+            allowed_formats=allowed_send_formats,
+        )
+
+    dlg = Toplevel(parent)
+    dlg.title(f"Encode — {title}")
+    dlg.transient(parent)
+    dlg.resizable(False, False)
+
+    body = Frame(dlg, padx=14, pady=12)
+    body.pack(fill=BOTH, expand=True)
+
+    Label(
+        body,
+        text=title,
+        font=("", 11, "bold"),
+        anchor="w",
+    ).pack(fill="x", pady=(0, 4))
+    Label(
+        body,
+        text=(
+            "Optional encode recipe for this show only (e.g. talk shows "
+            "heavily compressed; music/RPG shows higher quality). When off, "
+            f"episodes use: {inherit}."
+        ),
+        justify=LEFT,
+        wraplength=420,
+        fg="#333",
+    ).pack(anchor="w", pady=(0, 8))
+
+    override_var, get_settings = _pack_encode_override_section(
+        body,
+        title="",
+        blurb="",
+        use_override=bool(use_override),
+        initial=initial,
+        allowed_send_formats=allowed_send_formats,
+        checkbox_text="Use custom encode for this show",
+        list_height=6,
+    )
+
+    allowed_tuple = formats_allowed(allowed_send_formats)
+    if allowed_send_formats is not None:
+        names = ", ".join(format_display_name(f) for f in allowed_tuple)
+        who = profile_display_name or "this device"
+        Label(
+            body,
+            text=f"Formats limited by {who}: {names}.",
+            justify=LEFT,
+            wraplength=420,
+            fg="#555",
+        ).pack(anchor="w", pady=(4, 0))
+
+    result: list[PodcastShowEncodeResult | None] = [None]
+
+    def on_save() -> None:
+        use = bool(override_var.get())
+        result[0] = PodcastShowEncodeResult(
+            use_override=use,
+            audio_encode=get_settings() if use else None,
+        )
+        dlg.destroy()
+
+    def on_cancel() -> None:
+        result[0] = None
+        dlg.destroy()
+
+    btn_row = Frame(body)
+    btn_row.pack(fill="x", pady=(12, 0))
+    Button(btn_row, text="Cancel", width=10, command=on_cancel).pack(
+        side=RIGHT, padx=(6, 0)
+    )
+    Button(btn_row, text="Save", width=10, command=on_save).pack(side=RIGHT)
+
+    dlg.protocol("WM_DELETE_WINDOW", on_cancel)
+    dlg.grab_set()
+    try:
+        px = parent.winfo_rootx() + max(0, (parent.winfo_width() - 460) // 2)
+        py = parent.winfo_rooty() + max(0, (parent.winfo_height() - 420) // 3)
+        dlg.geometry(f"+{px}+{py}")
+    except Exception:
+        pass
     parent.wait_window(dlg)
     return result[0]
 
