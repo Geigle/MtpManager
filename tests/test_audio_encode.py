@@ -153,6 +153,22 @@ class AppConfigAudioEncodeTests(unittest.TestCase):
             self.assertEqual(loaded.normalized_send_format(), "wma")
             self.assertEqual(loaded.resolved_audio_encode().normalized_format(), "wma")
 
+    def test_audiobook_encode_saved_separately(self) -> None:
+        music = get_preset("mp3_vbr_192")
+        book = get_preset("mp3_cbr_64")
+        assert music is not None and book is not None
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "config.json"
+            cfg = AppConfig()
+            cfg.apply_audio_encode(music.settings)
+            cfg.apply_audiobook_audio_encode(book.settings)
+            save_app_config(cfg, path=dest)
+            loaded = load_app_config(path=dest)
+            self.assertEqual(loaded.resolved_audio_encode().preset_id, "mp3_vbr_192")
+            self.assertEqual(
+                loaded.resolved_audiobook_audio_encode().preset_id, "mp3_cbr_64"
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

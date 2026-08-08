@@ -13,6 +13,7 @@ from mtpmanager.domain.audio_encode import (
     AudioEncodeSettings,
     clamp_settings_for_format,
     default_audio_encode_settings,
+    get_preset,
     settings_from_legacy_format,
 )
 from mtpmanager.infra.app_paths import default_data_dir
@@ -127,6 +128,9 @@ class AppConfig:
     # Full encode recipe (bitrate, VBR, channels, …). Drives ffmpeg convert.
     # *send_format* is kept in sync with audio_encode.format for older readers.
     audio_encode: AudioEncodeSettings | None = None
+    # When set, overrides *audio_encode* for Audiobooks-tab tracks only
+    # (genre Audiobook). None → use the global recipe for those tracks too.
+    audiobook_audio_encode: AudioEncodeSettings | None = None
     # When True, transfers use mtp-sendtr (Stable). Default is PyMTP (Experimental).
     stable_mode: bool = False
     # After Experimental (PyMTP) music sync: create/update MTP album objects and
@@ -194,11 +198,46 @@ class AppConfig:
             return s
         return settings_from_legacy_format(self.normalized_send_format())
 
+    def uses_audiobook_encode_override(self) -> bool:
+        """True when a dedicated audiobook encode recipe is stored."""
+        return self.audiobook_audio_encode is not None
+
+    def resolved_audiobook_audio_encode(self) -> AudioEncodeSettings:
+        """Encode recipe for Audiobooks-tab tracks (override or global)."""
+        if self.audiobook_audio_encode is not None:
+            return clamp_settings_for_format(self.audiobook_audio_encode)
+        return self.resolved_audio_encode()
+
+    def resolved_audio_encode_for_track(self, track: object) -> AudioEncodeSettings:
+        """Pick global or audiobook override based on track genre.
+
+        *track* should be a :class:`~mtpmanager.domain.models.Track` (or any
+        object with ``meta.genre``). Non-audiobook tracks always use the
+        global Config recipe.
+        """
+        from mtpmanager.domain.library import is_audiobook_track
+
+        try:
+            if is_audiobook_track(track):  # type: ignore[arg-type]
+                return self.resolved_audiobook_audio_encode()
+        except Exception:
+            pass
+        return self.resolved_audio_encode()
+
     def apply_audio_encode(self, settings: AudioEncodeSettings) -> None:
         """Set encode recipe and mirror format into *send_format*."""
         s = clamp_settings_for_format(settings)
         self.audio_encode = s
         self.send_format = s.normalized_format()
+
+    def apply_audiobook_audio_encode(
+        self, settings: AudioEncodeSettings | None
+    ) -> None:
+        """Set or clear the audiobook-only encode override (None = use global)."""
+        if settings is None:
+            self.audiobook_audio_encode = None
+            return
+        self.audiobook_audio_encode = clamp_settings_for_format(settings)
 
     def active_mode(self) -> str:
         """Return ``\"stable\"`` or ``\"experimental\"``."""
@@ -208,6 +247,25 @@ class AppConfig:
 def config_path(*, data_dir: Path | None = None) -> Path:
     base = data_dir if data_dir is not None else default_data_dir()
     return base / CONFIG_FILENAME
+
+
+def default_audiobook_audio_encode_settings() -> AudioEncodeSettings:
+    """Sensible speech-oriented default when enabling the audiobook override."""
+    preset = get_preset("mp3_cbr_32_mono")
+    if preset is not None:
+        return clamp_settings_for_format(preset.settings)
+    return clamp_settings_for_format(
+        AudioEncodeSettings(
+            format="mp3",
+            preset_id="mp3_cbr_32_mono",
+            rate_control="cbr",
+            bitrate_kbps=32,
+            vbr_quality=None,
+            sample_rate=22050,
+            channels=1,
+            label="MP3 32 kbps CBR mono",
+        )
+    )
 
 
 def _as_bool(value: object, default: bool = False) -> bool:
@@ -241,6 +299,11 @@ def load_app_config(*, path: Path | None = None) -> AppConfig:
     else:
         # Legacy configs only had send_format.
         audio_enc = settings_from_legacy_format(fmt)
+    ab_raw = raw.get("audiobook_audio_encode")
+    if isinstance(ab_raw, dict):
+        ab_enc: AudioEncodeSettings | None = AudioEncodeSettings.from_dict(ab_raw)
+    else:
+        ab_enc = None
     artist = _as_bool(raw.get("store_tracks_in_artist_folder"), False)
     album = _as_bool(raw.get("store_tracks_in_album_folder"), False)
     # Album folders only make sense under artist folders.
@@ -249,6 +312,7 @@ def load_app_config(*, path: Path | None = None) -> AppConfig:
     cfg = AppConfig(
         send_format=fmt,
         audio_encode=audio_enc,
+        audiobook_audio_encode=ab_enc,
         stable_mode=_as_bool(raw.get("stable_mode"), False),
         sync_album_art=_as_bool(raw.get("sync_album_art"), True),
         enable_experimental_tools=_as_bool(
@@ -313,6 +377,10 @@ def load_app_config(*, path: Path | None = None) -> AppConfig:
     cfg.send_format = cfg.normalized_send_format()
     if cfg.audio_encode is None:
         cfg.audio_encode = settings_from_legacy_format(cfg.send_format)
+    if cfg.audiobook_audio_encode is not None:
+        cfg.audiobook_audio_encode = clamp_settings_for_format(
+            cfg.audiobook_audio_encode
+        )
     return cfg
 
 
@@ -323,7 +391,7 @@ def save_app_config(config: AppConfig, *, path: Path | None = None) -> Path:
     artist = bool(config.store_tracks_in_artist_folder)
     album = bool(config.store_tracks_in_album_folder) and artist
     encode = config.resolved_audio_encode()
-    payload = {
+    payload: dict = {
         "version": CONFIG_VERSION,
         "send_format": encode.normalized_format(),
         "audio_encode": encode.to_dict(),
@@ -373,6 +441,10 @@ def save_app_config(config: AppConfig, *, path: Path | None = None) -> Path:
             config.podcast_last_full_sync_local_date or ""
         ).strip()[:10],
     }
+    if config.audiobook_audio_encode is not None:
+        payload["audiobook_audio_encode"] = clamp_settings_for_format(
+            config.audiobook_audio_encode
+        ).to_dict()
     text = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
     tmp = dest.with_suffix(dest.suffix + ".tmp")
     tmp.write_text(text, encoding="utf-8")

@@ -51,6 +51,7 @@ from mtpmanager.infra.app_config import (
     MAX_PODCAST_NEW_PER_SHOW,
     VALID_SEND_FORMATS,
     WEEKDAY_KEYS,
+    default_audiobook_audio_encode_settings,
     normalize_max_new_per_show,
     normalize_schedule_days,
     normalize_schedule_time,
@@ -2330,6 +2331,9 @@ class PodcastSettingsResult:
     max_new_per_show: int
     auto_sync_to_device: bool
     run_full_sync_now: bool = False
+    # When True, *audiobook_audio_encode* overrides Config for Audiobooks tab.
+    use_audiobook_encode_override: bool = False
+    audiobook_audio_encode: AudioEncodeSettings | None = None
 
 
 def _time_spinner_row(
@@ -2461,8 +2465,13 @@ def show_podcast_settings_dialog(
     max_new_per_show: int = 1,
     auto_sync_to_device: bool = True,
     status_line: str = "",
+    use_audiobook_encode_override: bool = False,
+    audiobook_audio_encode: AudioEncodeSettings | None = None,
+    global_audio_encode: AudioEncodeSettings | None = None,
+    allowed_send_formats: frozenset[str] | None = None,
+    profile_display_name: str | None = None,
 ) -> PodcastSettingsResult | None:
-    """Global podcast schedule + sync scope. Save → result; Cancel → None.
+    """Global podcast schedule + audiobook encode override. Save → result.
 
     Set ``run_full_sync_now`` when the user chooses **Full Sync Now**
     (settings are still saved first).
@@ -2472,6 +2481,22 @@ def show_podcast_settings_dialog(
     )
     time0 = normalize_schedule_time(schedule_time)
     n0 = normalize_max_new_per_show(max_new_per_show)
+
+    allowed_tuple = formats_allowed(allowed_send_formats)
+    global_enc = resolve_settings(
+        settings=global_audio_encode,
+        allowed_formats=allowed_send_formats,
+    )
+    if use_audiobook_encode_override and audiobook_audio_encode is not None:
+        ab_initial = resolve_settings(
+            settings=audiobook_audio_encode,
+            allowed_formats=allowed_send_formats,
+        )
+    else:
+        ab_initial = resolve_settings(
+            settings=default_audiobook_audio_encode_settings(),
+            allowed_formats=allowed_send_formats,
+        )
 
     dlg = Toplevel(parent)
     dlg.title("Podcast Settings")
@@ -2593,6 +2618,145 @@ def show_podcast_settings_dialog(
             fg="#444",
         ).pack(anchor="w", pady=(6, 10))
 
+    # ---- Audiobook encode (overrides Config for Audiobooks tab only) ----
+    ttk.Separator(body, orient="horizontal").pack(fill="x", pady=(10, 10))
+    Label(
+        body,
+        text="Audiobook encode",
+        font=("", 11, "bold"),
+        anchor="w",
+    ).pack(fill="x", pady=(0, 4))
+    Label(
+        body,
+        text=(
+            "Optional override for tracks under the Audiobooks tab (genre "
+            "Audiobook). Music and other library tabs still use Config → "
+            f"Config… ({global_enc.summary_line()})."
+        ),
+        justify=LEFT,
+        wraplength=440,
+        fg="#333",
+    ).pack(anchor="w", pady=(0, 6))
+
+    ab_override_var = BooleanVar(value=bool(use_audiobook_encode_override))
+    Checkbutton(
+        body,
+        text="Use custom encode for audiobooks",
+        variable=ab_override_var,
+        anchor="w",
+    ).pack(fill="x", pady=(0, 4))
+
+    ab_controls = Frame(body)
+    ab_controls.pack(fill="x", pady=(0, 4))
+
+    ab_fmt_row = Frame(ab_controls)
+    ab_fmt_row.pack(fill="x", pady=(0, 4))
+    Label(ab_fmt_row, text="Output format:").pack(side=LEFT)
+    ab_fmt_keys = list(allowed_tuple)
+    ab_fmt_labels = [format_display_name(f) for f in ab_fmt_keys]
+    ab_label_to_key = dict(zip(ab_fmt_labels, ab_fmt_keys))
+    ab_key_to_label = dict(zip(ab_fmt_keys, ab_fmt_labels))
+    ab_ui_fmt = ab_initial.normalized_format()
+    if ab_ui_fmt == "aac" and "m4a" in ab_fmt_keys and "aac" not in ab_fmt_keys:
+        ab_ui_fmt = "m4a"
+    if ab_ui_fmt not in ab_fmt_keys:
+        ab_ui_fmt = ab_fmt_keys[0] if ab_fmt_keys else "mp3"
+    ab_fmt_var = StringVar(
+        value=ab_key_to_label.get(ab_ui_fmt, ab_fmt_labels[0] if ab_fmt_labels else "MP3")
+    )
+    ab_fmt_combo = ttk.Combobox(
+        ab_fmt_row,
+        textvariable=ab_fmt_var,
+        values=ab_fmt_labels,
+        state="readonly",
+        width=16,
+    )
+    ab_fmt_combo.pack(side=LEFT, padx=(8, 0))
+
+    Label(ab_controls, text="Quality:", anchor="w").pack(fill="x")
+    ab_preset_frame = Frame(ab_controls)
+    ab_preset_frame.pack(fill="x", pady=(2, 0))
+    ab_preset_scroll = Scrollbar(ab_preset_frame)
+    ab_preset_scroll.pack(side=RIGHT, fill=Y)
+    ab_preset_list = Listbox(
+        ab_preset_frame,
+        height=5,
+        exportselection=False,
+        yscrollcommand=ab_preset_scroll.set,
+        width=52,
+    )
+    ab_preset_list.pack(side=LEFT, fill="x", expand=True)
+    ab_preset_scroll.config(command=ab_preset_list.yview)
+
+    ab_preset_ids: list[str] = []
+
+    def _ab_current_fmt_key() -> str:
+        lab = str(ab_fmt_var.get() or "")
+        return ab_label_to_key.get(lab, ab_fmt_keys[0] if ab_fmt_keys else "mp3")
+
+    def _ab_refill_presets(*, select_id: str | None = None) -> None:
+        nonlocal ab_preset_ids
+        ab_preset_list.delete(0, END)
+        ab_preset_ids = []
+        fmt = _ab_current_fmt_key()
+        ladder = presets_for_format(fmt)
+        want = select_id
+        if want and not any(p.id == want for p in ladder):
+            want = None
+        chosen_idx = 0
+        for i, p in enumerate(ladder):
+            ab_preset_list.insert(END, p.display_name)
+            ab_preset_ids.append(p.id)
+            if want and p.id == want:
+                chosen_idx = i
+            elif not want and p.id == ab_initial.preset_id:
+                chosen_idx = i
+        if ab_preset_ids:
+            ab_preset_list.selection_clear(0, END)
+            ab_preset_list.selection_set(chosen_idx)
+            ab_preset_list.see(chosen_idx)
+
+    def _ab_selected_settings() -> AudioEncodeSettings:
+        sel = ab_preset_list.curselection()
+        if sel and ab_preset_ids:
+            pid = ab_preset_ids[int(sel[0])]
+            preset = get_preset(pid)
+            if preset is not None:
+                return resolve_settings(
+                    settings=preset.settings,
+                    allowed_formats=allowed_send_formats,
+                )
+        return resolve_settings(
+            settings=ab_initial,
+            send_format=_ab_current_fmt_key(),
+            allowed_formats=allowed_send_formats,
+        )
+
+    def _ab_on_fmt_change(_e=None) -> None:
+        _ab_refill_presets()
+
+    def _ab_set_controls_state() -> None:
+        enabled = bool(ab_override_var.get())
+        state = "readonly" if enabled else DISABLED
+        ab_fmt_combo.configure(state=state)
+        ab_preset_list.configure(state=NORMAL if enabled else DISABLED)
+
+    ab_fmt_combo.bind("<<ComboboxSelected>>", _ab_on_fmt_change)
+    ab_override_var.trace_add("write", lambda *_a: _ab_set_controls_state())
+    _ab_refill_presets(select_id=ab_initial.preset_id)
+    _ab_set_controls_state()
+
+    if allowed_send_formats is not None:
+        names = ", ".join(format_display_name(f) for f in allowed_tuple)
+        who = profile_display_name or "this device"
+        Label(
+            body,
+            text=f"Formats limited by {who}: {names}.",
+            justify=LEFT,
+            wraplength=440,
+            fg="#555",
+        ).pack(anchor="w", pady=(2, 0))
+
     result: list[PodcastSettingsResult | None] = [None]
 
     def build_result(*, run_now: bool) -> PodcastSettingsResult | None:
@@ -2613,6 +2777,8 @@ def show_podcast_settings_dialog(
                 parent=dlg,
             )
             return None
+        use_ab = bool(ab_override_var.get())
+        ab_settings = _ab_selected_settings() if use_ab else None
         return PodcastSettingsResult(
             auto_enabled=bool(enabled_var.get()),
             schedule_days=tuple(normalize_schedule_days(chosen_days)),
@@ -2620,6 +2786,8 @@ def show_podcast_settings_dialog(
             max_new_per_show=n,
             auto_sync_to_device=bool(sync_var.get()),
             run_full_sync_now=run_now,
+            use_audiobook_encode_override=use_ab,
+            audiobook_audio_encode=ab_settings,
         )
 
     def on_save() -> None:
@@ -2654,7 +2822,7 @@ def show_podcast_settings_dialog(
     dlg.grab_set()
     try:
         px = parent.winfo_rootx() + max(0, (parent.winfo_width() - 480) // 2)
-        py = parent.winfo_rooty() + max(0, (parent.winfo_height() - 520) // 3)
+        py = parent.winfo_rooty() + max(0, (parent.winfo_height() - 620) // 3)
         dlg.geometry(f"+{px}+{py}")
     except Exception:
         pass

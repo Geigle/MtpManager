@@ -37,6 +37,8 @@ TrackStatusCallback = Callable[[str, str], None]
 ParentFolderResolver = Callable[[TrackMetadata], int | None]
 # After a successful send: (guid, remote send path, optional object id)
 AfterSendCallback = Callable[[str, str, int | None], None]
+# Per-track encode recipe (e.g. audiobook override vs global Config).
+EncodeSettingsResolver = Callable[[Track], AudioEncodeSettings | None]
 
 
 @dataclass(frozen=True)
@@ -182,6 +184,22 @@ def _guid_already_on_device(
     return guid in device_guid_stems
 
 
+def _resolve_encode_settings(
+    track: Track,
+    *,
+    encode_settings: AudioEncodeSettings | None,
+    resolve_encode_settings: EncodeSettingsResolver | None,
+) -> AudioEncodeSettings | None:
+    if resolve_encode_settings is not None:
+        try:
+            return resolve_encode_settings(track)
+        except Exception:
+            logger.debug(
+                "resolve_encode_settings failed for %s", track.path, exc_info=True
+            )
+    return encode_settings
+
+
 def transfer_track(
     track: Track,
     *,
@@ -197,6 +215,7 @@ def transfer_track(
     device_guid_stems: Collection[str] | None = None,
     on_after_send: AfterSendCallback | None = None,
     encode_settings: AudioEncodeSettings | None = None,
+    resolve_encode_settings: EncodeSettingsResolver | None = None,
 ) -> None:
     """
     Ensure track is device-ready (transcode if needed), then send via transport.
@@ -219,16 +238,26 @@ def transfer_track(
         _notify_status(on_track_status, track.path, "skipped")
         return
 
+    track_encode = _resolve_encode_settings(
+        track,
+        encode_settings=encode_settings,
+        resolve_encode_settings=resolve_encode_settings,
+    )
+    track_fmt = (
+        track_encode.file_extension()
+        if track_encode is not None
+        else target_format
+    )
     prepared = prepare_track(
         track,
-        target_format=target_format,
+        target_format=track_fmt,
         transcoder=transcoder,
         slot=slot,
         reread_tags_after_convert=reread_tags_after_convert,
         on_track_status=on_track_status,
         device_formats=device_formats,
         should_cancel=should_cancel,
-        encode_settings=encode_settings,
+        encode_settings=track_encode,
     )
     try:
         raise_if_cancelled(should_cancel, total=1)
@@ -272,6 +301,7 @@ def transfer_tracks(
     device_guid_stems: Collection[str] | None = None,
     on_after_send: AfterSendCallback | None = None,
     encode_settings: AudioEncodeSettings | None = None,
+    resolve_encode_settings: EncodeSettingsResolver | None = None,
 ) -> int:
     """Transfer many tracks with dual-slot convert/send pipeline.
 
@@ -291,6 +321,9 @@ def transfer_tracks(
 
     *device_guid_stems*: GUIDs already on the device (durable index); matching
     tracks skip both transcode and send.
+
+    *resolve_encode_settings*: optional per-track encode recipe (e.g. audiobook
+    override). When set, wins over the batch-level *encode_settings*.
 
     *should_cancel*: when true between tracks, remaining items are skipped and
     :class:`~mtpmanager.app.cancellation.JobCancelled` is raised (the track
@@ -358,15 +391,25 @@ def transfer_tracks(
                 guid=guid_hint,
                 already_on_device=True,
             )
+        track_encode = _resolve_encode_settings(
+            track,
+            encode_settings=encode_settings,
+            resolve_encode_settings=resolve_encode_settings,
+        )
+        track_fmt = (
+            track_encode.file_extension()
+            if track_encode is not None
+            else target_format
+        )
         return prepare_track(
             track,
-            target_format=target_format,
+            target_format=track_fmt,
             transcoder=transcoder,
             slot=slot,
             on_track_status=on_track_status,
             device_formats=device_formats,
             should_cancel=should_cancel,
-            encode_settings=encode_settings,
+            encode_settings=track_encode,
         )
 
     def _live_total() -> int:

@@ -156,6 +156,54 @@ class AppConfigTests(unittest.TestCase):
             loaded = load_app_config(path=dest)
             self.assertEqual(loaded.normalized_send_format(), "wav")
 
+    def test_audiobook_encode_override_round_trip(self) -> None:
+        from mtpmanager.domain.audio_encode import get_preset
+        from mtpmanager.domain.models import Track, TrackMetadata
+        from mtpmanager.infra.app_config import default_audiobook_audio_encode_settings
+
+        speech = get_preset("mp3_cbr_32_mono")
+        assert speech is not None
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "config.json"
+            cfg = AppConfig(send_format="mp3")
+            cfg.apply_audio_encode(get_preset("mp3_cbr_320").settings)  # type: ignore[union-attr]
+            cfg.apply_audiobook_audio_encode(speech.settings)
+            save_app_config(cfg, path=dest)
+            loaded = load_app_config(path=dest)
+            self.assertTrue(loaded.uses_audiobook_encode_override())
+            self.assertEqual(
+                loaded.resolved_audiobook_audio_encode().preset_id, "mp3_cbr_32_mono"
+            )
+            self.assertEqual(
+                loaded.resolved_audio_encode().preset_id, "mp3_cbr_320"
+            )
+            music = Track(
+                path="/m.flac",
+                meta=TrackMetadata(title="Song", artist="A", genre="Rock"),
+            )
+            book = Track(
+                path="/b.flac",
+                meta=TrackMetadata(title="Ch1", artist="Author", genre="Audiobook"),
+            )
+            self.assertEqual(
+                loaded.resolved_audio_encode_for_track(music).preset_id,
+                "mp3_cbr_320",
+            )
+            self.assertEqual(
+                loaded.resolved_audio_encode_for_track(book).preset_id,
+                "mp3_cbr_32_mono",
+            )
+            # Clear override → audiobooks fall back to global.
+            loaded.apply_audiobook_audio_encode(None)
+            save_app_config(loaded, path=dest)
+            reloaded = load_app_config(path=dest)
+            self.assertFalse(reloaded.uses_audiobook_encode_override())
+            self.assertEqual(
+                reloaded.resolved_audio_encode_for_track(book).preset_id,
+                "mp3_cbr_320",
+            )
+            self.assertIsNotNone(default_audiobook_audio_encode_settings())
+
 
 if __name__ == "__main__":
     unittest.main()

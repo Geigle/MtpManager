@@ -711,16 +711,28 @@ class AppController:
     def _target_format(self) -> str:
         return self._config.resolved_audio_encode().normalized_format()
 
+    def _allowed_send_formats(self):
+        """Device-profile format restriction for encode UI / resolve, if any."""
+        if self._active_profile is not None:
+            return self._active_profile.send_formats_for_config()
+        return None
+
     def _encode_settings(self):
-        """Current audio encode recipe for ffmpeg convert."""
+        """Global audio encode recipe for ffmpeg convert (music / default)."""
         from mtpmanager.domain.audio_encode import resolve_settings
 
-        allowed = None
-        if self._active_profile is not None:
-            allowed = self._active_profile.send_formats_for_config()
         return resolve_settings(
             settings=self._config.resolved_audio_encode(),
-            allowed_formats=allowed,
+            allowed_formats=self._allowed_send_formats(),
+        )
+
+    def _encode_settings_for_track(self, track: Track):
+        """Encode recipe for one track (audiobook override when applicable)."""
+        from mtpmanager.domain.audio_encode import resolve_settings
+
+        return resolve_settings(
+            settings=self._config.resolved_audio_encode_for_track(track),
+            allowed_formats=self._allowed_send_formats(),
         )
 
     def _device_audio_formats(self) -> frozenset[str] | None:
@@ -1560,6 +1572,9 @@ class AppController:
         """Library → Podcast Settings…"""
         cfg = self._config
         status = self._podcast_schedule_status_line()
+        profile_name = None
+        if self._active_profile is not None:
+            profile_name = self._active_profile.display_name
         result = show_podcast_settings_dialog(
             self.win.root,
             auto_enabled=bool(cfg.podcast_auto_enabled),
@@ -1568,6 +1583,11 @@ class AppController:
             max_new_per_show=int(cfg.podcast_max_new_per_show),
             auto_sync_to_device=bool(cfg.podcast_auto_sync_to_device),
             status_line=status,
+            use_audiobook_encode_override=cfg.uses_audiobook_encode_override(),
+            audiobook_audio_encode=cfg.audiobook_audio_encode,
+            global_audio_encode=cfg.resolved_audio_encode(),
+            allowed_send_formats=self._allowed_send_formats(),
+            profile_display_name=profile_name,
         )
         if result is None:
             return
@@ -1576,6 +1596,10 @@ class AppController:
         self._config.podcast_schedule_time = result.schedule_time
         self._config.podcast_max_new_per_show = int(result.max_new_per_show)
         self._config.podcast_auto_sync_to_device = bool(result.auto_sync_to_device)
+        if result.use_audiobook_encode_override and result.audiobook_audio_encode:
+            self._config.apply_audiobook_audio_encode(result.audiobook_audio_encode)
+        else:
+            self._config.apply_audiobook_audio_encode(None)
         try:
             save_app_config(self._config)
         except Exception as e:
@@ -1584,11 +1608,17 @@ class AppController:
             )
             return
         logger.info(
-            "Podcast settings saved enabled=%s days=%s time=%s max=%s",
+            "Podcast settings saved enabled=%s days=%s time=%s max=%s "
+            "audiobook_encode=%s",
             self._config.podcast_auto_enabled,
             self._config.podcast_schedule_days,
             self._config.podcast_schedule_time,
             self._config.podcast_max_new_per_show,
+            (
+                self._config.audiobook_audio_encode.summary_line()
+                if self._config.audiobook_audio_encode is not None
+                else "global"
+            ),
         )
         if result.run_full_sync_now:
             self._start_full_podcast_sync(
@@ -9475,7 +9505,7 @@ class AppController:
         transport = self._transport()
         transcoder = self.transcoder
         device_formats = self._device_audio_formats()
-        encode_settings = self._encode_settings()
+        encode_settings = self._encode_settings_for_track(track)
         fmt = encode_settings.normalized_format()
         path = track.path
         self._mark_batch_queued([track])
@@ -9517,6 +9547,7 @@ class AppController:
                     device_guid_stems=stems,
                     on_after_send=self._on_after_send,
                     encode_settings=encode_settings,
+                    resolve_encode_settings=self._encode_settings_for_track,
                 )
                 report("progress", 1, 1, "")
                 logger.info("Single-track transfer done: path=%s", path)
@@ -9915,6 +9946,11 @@ class AppController:
         device_formats = self._device_audio_formats()
         encode_settings = self._encode_settings()
         fmt = encode_settings.normalized_format()
+        ab_enc = (
+            self._config.resolved_audiobook_audio_encode()
+            if self._config.uses_audiobook_encode_override()
+            else None
+        )
         mode = self.win.active_mode()
 
         if resume_job is not None:
@@ -9940,9 +9976,10 @@ class AppController:
         self.win.set_resume_sync_enabled(False)
         self._mark_batch_queued(batch)
         logger.info(
-            "Sync job start: %s encode=%s (queue=%d)",
+            "Sync job start: %s encode=%s audiobook_encode=%s (queue=%d)",
             job.summary_line(),
             encode_settings.summary_line(),
+            ab_enc.summary_line() if ab_enc is not None else "global",
             track_queue.total(),
         )
 
@@ -9970,6 +10007,7 @@ class AppController:
                 device_guid_stems=stems,
                 on_after_send=self._on_after_send,
                 encode_settings=encode_settings,
+                resolve_encode_settings=self._encode_settings_for_track,
             )
 
         def on_done(succeeded: int) -> None:

@@ -211,6 +211,11 @@ class HeadlessService:
             "mode": cfg.active_mode(),
             "send_format": cfg.normalized_send_format(),
             "audio_encode": cfg.resolved_audio_encode().to_dict(),
+            "audiobook_audio_encode": (
+                cfg.audiobook_audio_encode.to_dict()
+                if cfg.audiobook_audio_encode is not None
+                else None
+            ),
             "ffmpeg": ffmpeg,
             "ffprobe": ffprobe,
             "mtp_sendtr": mtp_sendtr,
@@ -1258,6 +1263,7 @@ class HeadlessService:
         quiet_s: float,
         statuses: list[dict[str, str]],
         encode_settings=None,
+        resolve_encode_settings=None,
     ) -> tuple[int, int, AgentResult | None]:
         """Send tracks, optionally batched with PyMTP reconnect-on-fatal.
 
@@ -1291,6 +1297,7 @@ class HeadlessService:
                 on_after_send=on_after,
                 stop_on_fatal=True,
                 encode_settings=encode_settings,
+                resolve_encode_settings=resolve_encode_settings,
             )
             return int(n), 0, None
 
@@ -1330,6 +1337,7 @@ class HeadlessService:
                         on_after_send=on_after,
                         stop_on_fatal=True,
                         encode_settings=encode_settings,
+                        resolve_encode_settings=resolve_encode_settings,
                     )
                     succeeded += int(n)
                     i += batch_n
@@ -1441,6 +1449,10 @@ class HeadlessService:
 
         encode_settings = cfg.resolved_audio_encode()
         target_format = encode_settings.normalized_format()
+
+        def resolve_encode_for_track(track: Track):
+            return cfg.resolved_audio_encode_for_track(track)
+
         device_formats = set(ZEN_VISION_M.supported_audio_formats) | set(
             GENERIC.supported_audio_formats
         )
@@ -1566,6 +1578,7 @@ class HeadlessService:
                     quiet_s=quiet_s,
                     statuses=statuses,
                     encode_settings=encode_settings,
+                    resolve_encode_settings=resolve_encode_for_track,
                 )
                 if early is not None:
                     early.data = {

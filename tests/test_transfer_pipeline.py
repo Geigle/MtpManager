@@ -20,6 +20,7 @@ class _FakeTranscoder:
     def __init__(self, temp_dir: str) -> None:
         self.temp_dir = temp_dir
         self.calls: list[tuple[str, str, int]] = []
+        self.settings_calls: list[object] = []
 
     def convert(
         self,
@@ -33,6 +34,7 @@ class _FakeTranscoder:
         slot = int(slot) % NUM_SLOTS
         out = os.path.join(self.temp_dir, f"TRANSCODE_{slot}.{target_format}")
         self.calls.append((src_path, target_format, slot))
+        self.settings_calls.append(settings)
         Path(out).write_text(f"from:{src_path}", encoding="utf-8")
         return out
 
@@ -425,6 +427,54 @@ class DualSlotPipelineTests(unittest.TestCase):
             self.assertEqual(n, 2)
             self.assertEqual(transport.sent, [])
             self.assertEqual(tr.calls, [])
+
+    def test_per_track_encode_settings_resolver(self) -> None:
+        from mtpmanager.domain.audio_encode import get_preset
+
+        music_enc = get_preset("mp3_cbr_320")
+        book_enc = get_preset("mp3_cbr_32_mono")
+        assert music_enc is not None and book_enc is not None
+        with tempfile.TemporaryDirectory() as tmp:
+            music_path = os.path.join(tmp, "song.flac")
+            book_path = os.path.join(tmp, "chapter.flac")
+            Path(music_path).write_bytes(b"x")
+            Path(book_path).write_bytes(b"x")
+            music = Track(
+                path=music_path,
+                meta=TrackMetadata(title="Song", artist="A", genre="Rock"),
+            )
+            book = Track(
+                path=book_path,
+                meta=TrackMetadata(
+                    title="Ch1", artist="Author", genre="Audiobook"
+                ),
+            )
+            tr = _FakeTranscoder(tmp)
+            transport = _RecordingTransport()
+
+            def resolve(track: Track):
+                g = (track.meta.genre or "").casefold()
+                if "audiobook" in g:
+                    return book_enc.settings
+                return music_enc.settings
+
+            n = transfer_tracks(
+                [music, book],
+                target_format="mp3",
+                transport=transport,
+                transcoder=tr,
+                session_log=False,
+                encode_settings=music_enc.settings,
+                resolve_encode_settings=resolve,
+            )
+            self.assertEqual(n, 2)
+            self.assertEqual(len(tr.settings_calls), 2)
+            self.assertEqual(
+                getattr(tr.settings_calls[0], "preset_id", None), "mp3_cbr_320"
+            )
+            self.assertEqual(
+                getattr(tr.settings_calls[1], "preset_id", None), "mp3_cbr_32_mono"
+            )
 
 
 if __name__ == "__main__":
