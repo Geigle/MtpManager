@@ -2830,8 +2830,10 @@ def show_podcast_settings_dialog(
     Checkbutton(
         body,
         text=(
-            "Experimental: set track number from episode date (YYYYMMDD) "
-            "for chronological sort on the player"
+            "Experimental: date-order podcasts — sets track number from "
+            "episode pub date (YYYYMMDD; packed into 16-bit MTP track #) "
+            "and prefixes the same date onto the episode title so it is "
+            "readable on the player. Both apply together."
         ),
         variable=track_date_var,
         anchor="w",

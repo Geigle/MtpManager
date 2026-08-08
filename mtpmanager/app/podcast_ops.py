@@ -386,6 +386,10 @@ def podcast_episode_tracknumber(
 
     When *use_date* is True (experimental), use pub date as ``YYYYMMDD`` so
     episodes sort chronologically on the player. Otherwise use feed index.
+
+    Note: MTP stores track # as ``uint16``; large YYYYMMDD values are packed
+    on the wire (see ``TrackMetadata.tracknumber_for_mtp``). Pair with
+    :func:`podcast_episode_title` so the human-readable date appears in Title.
     """
     if use_date:
         ymd = pub_date_to_yyyymmdd(episode.pub_date)
@@ -395,6 +399,29 @@ def podcast_episode_tracknumber(
     if idx and int(idx) > 0:
         return str(int(idx))
     return "01"
+
+
+def podcast_episode_title(
+    episode: PodcastEpisode,
+    *,
+    use_date: bool = False,
+) -> str:
+    """Episode title for send metadata.
+
+    When *use_date* is True (same experimental flag as track-number-as-date),
+    prefix the title with ``YYYYMMDD`` so the pub date is readable on the
+    player (track # alone is packed into 16 bits and looks opaque).
+    """
+    base = (episode.title or "Episode").strip() or "Episode"
+    if not use_date:
+        return base
+    ymd = pub_date_to_yyyymmdd(episode.pub_date)
+    if not ymd:
+        return base
+    # Avoid double-prefix if re-sent or title already starts with the date.
+    if base.startswith(ymd):
+        return base
+    return f"{ymd} {base}"
 
 
 def episode_as_track(
@@ -410,17 +437,18 @@ def episode_as_track(
         )
     if not is_track_guid(episode.guid):
         raise ValueError(f"Episode missing host GUID: id={episode.id}")
+    date_mode = bool(tracknumber_as_date)
     meta = TrackMetadata(
         artist=(podcast.author or podcast.title or "Podcast").strip()
         or "Podcast",
         albumartist=(podcast.title or "Podcast").strip() or "Podcast",
         album=(podcast.title or "Podcast").strip() or "Podcast",
-        title=(episode.title or "Episode").strip() or "Episode",
+        title=podcast_episode_title(episode, use_date=date_mode),
         genre="Podcast",
         date=(episode.pub_date or "")[:10],
         length_sec=float(episode.duration_sec or 0),
         tracknumber=podcast_episode_tracknumber(
-            episode, use_date=bool(tracknumber_as_date)
+            episode, use_date=date_mode
         ),
     )
     return Track(path=episode.local_path, meta=meta, guid=episode.guid)
@@ -891,7 +919,7 @@ def prepare_episodes_for_sync(
     encode override). Falls back to *target_audio_format*.
 
     *tracknumber_as_date*: experimental — set MTP track # from pub date
-    (``YYYYMMDD``) for chronological sort on the player.
+    (``YYYYMMDD``) and prefix that date onto the episode title.
     """
     prep = PodcastSyncPrep()
     podcast_cache: dict[int, Podcast] = {}

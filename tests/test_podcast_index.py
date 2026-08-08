@@ -10,6 +10,7 @@ from datetime import datetime
 
 from mtpmanager.app.podcast_ops import (
     pick_new_not_on_device,
+    podcast_episode_title,
     podcast_episode_tracknumber,
     pub_date_to_yyyymmdd,
     upsert_scheduled_day_playlist,
@@ -72,6 +73,53 @@ class PodcastIndexTests(unittest.TestCase):
         packed = meta.tracknumber_for_mtp()
         self.assertLessEqual(packed, 0xFFFF)
         self.assertEqual(packed, (2026 - 2000) * 512 + 8 * 32 + 8)
+
+    def test_pub_date_title_prefix(self) -> None:
+        from mtpmanager.infra.podcast_index import PodcastEpisode
+
+        ep = PodcastEpisode(
+            id=1,
+            podcast_id=1,
+            guid="a" * 32,
+            feed_guid="x",
+            title="Morning Brief",
+            pub_date="2026-08-08",
+            episode_index=3,
+        )
+        self.assertEqual(
+            podcast_episode_title(ep, use_date=True),
+            "20260808 Morning Brief",
+        )
+        self.assertEqual(
+            podcast_episode_title(ep, use_date=False),
+            "Morning Brief",
+        )
+        # Already prefixed: do not double-prefix.
+        ep2 = PodcastEpisode(
+            id=2,
+            podcast_id=1,
+            guid="b" * 32,
+            feed_guid="y",
+            title="20260808 Morning Brief",
+            pub_date="2026-08-08",
+        )
+        self.assertEqual(
+            podcast_episode_title(ep2, use_date=True),
+            "20260808 Morning Brief",
+        )
+        # No date → bare title.
+        ep3 = PodcastEpisode(
+            id=3,
+            podcast_id=1,
+            guid="c" * 32,
+            feed_guid="z",
+            title="No Date Ep",
+            pub_date="",
+        )
+        self.assertEqual(
+            podcast_episode_title(ep3, use_date=True),
+            "No Date Ep",
+        )
 
     def test_crud_and_episodes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
