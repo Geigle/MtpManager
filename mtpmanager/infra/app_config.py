@@ -175,8 +175,8 @@ class AppConfig:
     # 1–N most recent new episodes per show per full sync.
     podcast_max_new_per_show: int = DEFAULT_PODCAST_MAX_NEW_PER_SHOW
     podcast_auto_sync_to_device: bool = True
-    # Experimental: MTP track # from episode pub date (YYYYMMDD, packed to
-    # uint16) plus the same date as a Title prefix for readability. Default off.
+    # Experimental: MTP track # = 0xFFFF − packed(YYYYMMDD) so newest episodes
+    # sort first; Title also gets a YYYYMMDD prefix for readability. Default off.
     podcast_tracknumber_as_date: bool = False
     # Last completed full sync (UTC ISO + local calendar date for catch-up).
     podcast_last_full_sync_at: str = ""

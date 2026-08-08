@@ -69,10 +69,14 @@ class PodcastIndexTests(unittest.TestCase):
         )
         meta = TrackMetadata(tracknumber="20260808")
         self.assertEqual(meta.tracknumber_int(), 20260808)
-        # MTP c_ushort packing must stay sortable and in range.
+        # MTP c_ushort: pack date ordinal, invert so newer → smaller track #.
+        ordinal = (2026 - 2000) * 512 + 8 * 32 + 8
         packed = meta.tracknumber_for_mtp()
         self.assertLessEqual(packed, 0xFFFF)
-        self.assertEqual(packed, (2026 - 2000) * 512 + 8 * 32 + 8)
+        self.assertEqual(packed, 0xFFFF - ordinal)
+        older = TrackMetadata(tracknumber="20250101").tracknumber_for_mtp()
+        newer = TrackMetadata(tracknumber="20260808").tracknumber_for_mtp()
+        self.assertLess(newer, older)
 
     def test_pub_date_title_prefix(self) -> None:
         from mtpmanager.infra.podcast_index import PodcastEpisode

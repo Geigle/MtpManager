@@ -384,11 +384,12 @@ def podcast_episode_tracknumber(
 ) -> str:
     """Track number for send metadata.
 
-    When *use_date* is True (experimental), use pub date as ``YYYYMMDD`` so
-    episodes sort chronologically on the player. Otherwise use feed index.
+    When *use_date* is True (experimental), use pub date as ``YYYYMMDD``.
+    Otherwise use feed index.
 
-    Note: MTP stores track # as ``uint16``; large YYYYMMDD values are packed
-    on the wire (see ``TrackMetadata.tracknumber_for_mtp``). Pair with
+    Note: MTP stores track # as ``uint16``; on the wire the date is packed
+    and inverted as ``0xFFFF − ordinal`` so ascending sort lists newest first
+    (see ``TrackMetadata.tracknumber_for_mtp``). Pair with
     :func:`podcast_episode_title` so the human-readable date appears in Title.
     """
     if use_date:
@@ -918,8 +919,8 @@ def prepare_episodes_for_sync(
     *resolve_audio_format*: optional per-episode container (e.g. podcast/show
     encode override). Falls back to *target_audio_format*.
 
-    *tracknumber_as_date*: experimental — set MTP track # from pub date
-    (``YYYYMMDD``) and prefix that date onto the episode title.
+    *tracknumber_as_date*: experimental — MTP track # from pub date
+    (``0xFFFF − packed YYYYMMDD``, newest first) and title date prefix.
     """
     prep = PodcastSyncPrep()
     podcast_cache: dict[int, Podcast] = {}
