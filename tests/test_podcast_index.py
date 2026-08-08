@@ -13,6 +13,7 @@ from mtpmanager.app.podcast_ops import (
     upsert_scheduled_day_playlist,
 )
 from mtpmanager.infra.playlists import get_playlist_by_name
+from mtpmanager.domain.audio_encode import get_preset
 from mtpmanager.infra.podcast_index import (
     create_or_update_podcast,
     delete_podcast,
@@ -25,6 +26,7 @@ from mtpmanager.infra.podcast_index import (
     list_podcasts,
     normalize_feed_url,
     set_episode_local_path,
+    set_podcast_audio_encode,
     set_podcast_auto_last_run,
     set_podcast_auto_settings,
     upsert_episodes,
@@ -111,6 +113,28 @@ class PodcastIndexTests(unittest.TestCase):
             self.assertTrue(delete_podcast(p.id, path=db))
             self.assertIsNone(get_podcast(p.id, path=db))
             self.assertEqual(list_episodes(p.id, path=db), [])
+
+    def test_per_show_audio_encode(self) -> None:
+        preset = get_preset("mp3_cbr_64")
+        assert preset is not None
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "library_index.db"
+            p = create_or_update_podcast(
+                feed_url="https://example.com/rpg",
+                title="RPG Show",
+                path=db,
+            )
+            self.assertIsNone(p.audio_encode)
+            updated = set_podcast_audio_encode(p.id, preset.settings, path=db)
+            assert updated is not None
+            self.assertIsNotNone(updated.audio_encode)
+            self.assertEqual(updated.audio_encode.preset_id, "mp3_cbr_64")
+            again = get_podcast(p.id, path=db)
+            assert again is not None and again.audio_encode is not None
+            self.assertEqual(again.audio_encode.bitrate_kbps, 64)
+            cleared = set_podcast_audio_encode(p.id, None, path=db)
+            assert cleared is not None
+            self.assertIsNone(cleared.audio_encode)
 
     def test_auto_settings_and_retrieved_at(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

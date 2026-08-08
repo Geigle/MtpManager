@@ -216,6 +216,11 @@ class HeadlessService:
                 if cfg.audiobook_audio_encode is not None
                 else None
             ),
+            "podcast_audio_encode": (
+                cfg.podcast_audio_encode.to_dict()
+                if cfg.podcast_audio_encode is not None
+                else None
+            ),
             "ffmpeg": ffmpeg,
             "ffprobe": ffprobe,
             "mtp_sendtr": mtp_sendtr,
@@ -1451,7 +1456,29 @@ class HeadlessService:
         target_format = encode_settings.normalized_format()
 
         def resolve_encode_for_track(track: Track):
-            return cfg.resolved_audio_encode_for_track(track)
+            per_show = None
+            genre = (
+                (track.meta.genre if track and track.meta else "") or ""
+            ).strip().casefold()
+            if genre == "podcast" and track.guid:
+                try:
+                    from mtpmanager.infra.podcast_index import (
+                        get_episode_by_guid,
+                        get_podcast,
+                    )
+
+                    ep = get_episode_by_guid(track.guid)
+                    if ep is not None:
+                        show = get_podcast(int(ep.podcast_id))
+                        if show is not None:
+                            per_show = show.audio_encode
+                except Exception:
+                    logger.debug(
+                        "headless podcast encode lookup failed", exc_info=True
+                    )
+            return cfg.resolved_audio_encode_for_track(
+                track, podcast_per_show=per_show
+            )
 
         device_formats = set(ZEN_VISION_M.supported_audio_formats) | set(
             GENERIC.supported_audio_formats

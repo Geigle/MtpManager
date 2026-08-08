@@ -489,6 +489,7 @@ def run_full_sync_host_pass(
     path: Path | None = None,
     data_dir: Path | None = None,
     target_audio_format: str = "mp3",
+    resolve_audio_format: Callable[[PodcastEpisode], str] | None = None,
     now_local: datetime | None = None,
     since_last_full_sync: str = "",
     on_episode_ready: Callable[[PodcastEpisode, Track], None] | None = None,
@@ -527,6 +528,21 @@ def run_full_sync_host_pass(
             p = get_podcast(int(pid), path=path)
             if p is not None:
                 shows.append(p)
+
+    def _fmt_for(ep: PodcastEpisode) -> str:
+        if resolve_audio_format is not None:
+            try:
+                raw = resolve_audio_format(ep)
+                fmt = (raw or "").lower().lstrip(".")
+                if fmt:
+                    return fmt
+            except Exception:
+                logger.debug(
+                    "resolve_audio_format failed for episode id=%s",
+                    ep.id,
+                    exc_info=True,
+                )
+        return (target_audio_format or "mp3").lower().lstrip(".")
 
     def _notify_ready(ready: PodcastEpisode, show: Podcast) -> None:
         if on_episode_ready is None:
@@ -576,7 +592,7 @@ def run_full_sync_host_pass(
                     ep,
                     path=path,
                     data_dir=data_dir,
-                    target_format=target_audio_format,
+                    target_format=_fmt_for(ep),
                 )
                 if not had_file and ready.local_path and os.path.isfile(
                     ready.local_path
@@ -778,6 +794,7 @@ def prepare_episodes_for_sync(
     allow_video: bool = False,
     audio_as_video: bool = False,
     target_audio_format: str = "mp3",
+    resolve_audio_format: Callable[[PodcastEpisode], str] | None = None,
 ) -> PodcastSyncPrep:
     """Download missing media; return audio tracks and optional video jobs.
 
@@ -788,10 +805,29 @@ def prepare_episodes_for_sync(
     When *audio_as_video* is True (experimental), non-video episodes become
     still-image video jobs (artwork or black + audio) so they can land under
     ZENcast on devices that only list video there.
+
+    *resolve_audio_format*: optional per-episode container (e.g. podcast/show
+    encode override). Falls back to *target_audio_format*.
     """
     prep = PodcastSyncPrep()
     podcast_cache: dict[int, Podcast] = {}
     artwork_cache: dict[int, str | None] = {}
+
+    def _fmt_for(ep: PodcastEpisode) -> str:
+        if resolve_audio_format is not None:
+            try:
+                raw = resolve_audio_format(ep)
+                fmt = (raw or "").lower().lstrip(".")
+                if fmt:
+                    return fmt
+            except Exception:
+                logger.debug(
+                    "resolve_audio_format failed for episode id=%s",
+                    ep.id,
+                    exc_info=True,
+                )
+        return (target_audio_format or "mp3").lower().lstrip(".")
+
     for ep in episodes:
         show = podcast_cache.get(ep.podcast_id)
         if show is None:
@@ -837,7 +873,7 @@ def prepare_episodes_for_sync(
                     ep,
                     path=path,
                     data_dir=data_dir,
-                    target_format=target_audio_format,
+                    target_format=_fmt_for(ep),
                 )
                 if not ready.local_path or not os.path.isfile(ready.local_path):
                     raise FileNotFoundError("audio download missing")
@@ -856,7 +892,7 @@ def prepare_episodes_for_sync(
                     ep,
                     path=path,
                     data_dir=data_dir,
-                    target_format=target_audio_format,
+                    target_format=_fmt_for(ep),
                 )
                 prep.audio_tracks.append(episode_as_track(ready, show))
         except Exception:

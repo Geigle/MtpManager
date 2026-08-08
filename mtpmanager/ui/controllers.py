@@ -726,14 +726,64 @@ class AppController:
             allowed_formats=self._allowed_send_formats(),
         )
 
+    def _podcast_per_show_encode_for_track(
+        self, track: Track
+    ):
+        """Per-subscription encode override for a podcast track, if any."""
+        from mtpmanager.infra.podcast_index import get_episode_by_guid
+
+        guid = (getattr(track, "guid", None) or "").strip()
+        if not guid:
+            return None
+        try:
+            ep = get_episode_by_guid(guid)
+        except Exception:
+            logger.debug("get_episode_by_guid failed", exc_info=True)
+            return None
+        if ep is None:
+            return None
+        try:
+            show = get_podcast(int(ep.podcast_id))
+        except Exception:
+            logger.debug("get_podcast failed", exc_info=True)
+            return None
+        if show is None:
+            return None
+        return show.audio_encode
+
     def _encode_settings_for_track(self, track: Track):
-        """Encode recipe for one track (audiobook override when applicable)."""
+        """Encode recipe for one track (audiobook / podcast / music)."""
+        from mtpmanager.domain.audio_encode import resolve_settings
+
+        per_show = None
+        genre = (
+            (track.meta.genre if track and track.meta else "") or ""
+        ).strip().casefold()
+        if genre == "podcast":
+            per_show = self._podcast_per_show_encode_for_track(track)
+        return resolve_settings(
+            settings=self._config.resolved_audio_encode_for_track(
+                track, podcast_per_show=per_show
+            ),
+            allowed_formats=self._allowed_send_formats(),
+        )
+
+    def _target_format_for_podcast_episode(self, episode) -> str:
+        """Audio container for download/extract of one episode."""
+        per_show = None
+        try:
+            show = get_podcast(int(episode.podcast_id))
+            if show is not None:
+                per_show = show.audio_encode
+        except Exception:
+            logger.debug("podcast encode lookup for episode failed", exc_info=True)
+        enc = self._config.resolved_podcast_audio_encode(per_show=per_show)
         from mtpmanager.domain.audio_encode import resolve_settings
 
         return resolve_settings(
-            settings=self._config.resolved_audio_encode_for_track(track),
+            settings=enc,
             allowed_formats=self._allowed_send_formats(),
-        )
+        ).file_extension()
 
     def _device_audio_formats(self) -> frozenset[str] | None:
         """Native playable formats from the USB-matched profile, if any.
@@ -1570,11 +1620,14 @@ class AppController:
 
     def on_podcast_settings(self) -> None:
         """Library → Podcast Settings…"""
+        from mtpmanager.infra.podcast_index import set_podcast_audio_encode
+
         cfg = self._config
         status = self._podcast_schedule_status_line()
         profile_name = None
         if self._active_profile is not None:
             profile_name = self._active_profile.display_name
+        shows = list_podcasts()
         result = show_podcast_settings_dialog(
             self.win.root,
             auto_enabled=bool(cfg.podcast_auto_enabled),
@@ -1585,9 +1638,12 @@ class AppController:
             status_line=status,
             use_audiobook_encode_override=cfg.uses_audiobook_encode_override(),
             audiobook_audio_encode=cfg.audiobook_audio_encode,
+            use_podcast_encode_override=cfg.uses_podcast_encode_override(),
+            podcast_audio_encode=cfg.podcast_audio_encode,
             global_audio_encode=cfg.resolved_audio_encode(),
             allowed_send_formats=self._allowed_send_formats(),
             profile_display_name=profile_name,
+            podcasts=shows,
         )
         if result is None:
             return
@@ -1600,6 +1656,10 @@ class AppController:
             self._config.apply_audiobook_audio_encode(result.audiobook_audio_encode)
         else:
             self._config.apply_audiobook_audio_encode(None)
+        if result.use_podcast_encode_override and result.podcast_audio_encode:
+            self._config.apply_podcast_audio_encode(result.podcast_audio_encode)
+        else:
+            self._config.apply_podcast_audio_encode(None)
         try:
             save_app_config(self._config)
         except Exception as e:
@@ -1607,18 +1667,32 @@ class AppController:
                 "Podcast Settings", f"Could not save settings:\n{e}"
             )
             return
+        per_map = result.per_podcast_audio_encode or {}
+        for pid, enc in per_map.items():
+            try:
+                set_podcast_audio_encode(int(pid), enc)
+            except Exception:
+                logger.exception(
+                    "Failed to save per-show encode podcast_id=%s", pid
+                )
         logger.info(
             "Podcast settings saved enabled=%s days=%s time=%s max=%s "
-            "audiobook_encode=%s",
+            "podcast_encode=%s audiobook_encode=%s per_show=%d",
             self._config.podcast_auto_enabled,
             self._config.podcast_schedule_days,
             self._config.podcast_schedule_time,
             self._config.podcast_max_new_per_show,
             (
+                self._config.podcast_audio_encode.summary_line()
+                if self._config.podcast_audio_encode is not None
+                else "global"
+            ),
+            (
                 self._config.audiobook_audio_encode.summary_line()
                 if self._config.audiobook_audio_encode is not None
                 else "global"
             ),
+            sum(1 for v in per_map.values() if v is not None),
         )
         if result.run_full_sync_now:
             self._start_full_podcast_sync(
@@ -1786,6 +1860,7 @@ class AppController:
                 max_new_per_show=max_n,
                 device_guids=stems,
                 target_audio_format=fmt,
+                resolve_audio_format=self._target_format_for_podcast_episode,
                 now_local=datetime.now().astimezone(),
                 since_last_full_sync=since,
                 on_episode_ready=on_episode_ready,
@@ -2017,6 +2092,7 @@ class AppController:
                 allow_video=False,
                 audio_as_video=False,
                 target_audio_format=self._target_format(),
+                resolve_audio_format=self._target_format_for_podcast_episode,
             )
 
         def on_done(prep) -> None:
@@ -2418,6 +2494,7 @@ class AppController:
                 episodes,
                 allow_video=False,
                 target_audio_format=self._target_format(),
+                resolve_audio_format=self._target_format_for_podcast_episode,
             )
 
         def on_done(prep) -> None:
@@ -2470,6 +2547,7 @@ class AppController:
                 allow_video=allow_video,
                 audio_as_video=audio_as_video,
                 target_audio_format=self._target_format(),
+                resolve_audio_format=self._target_format_for_podcast_episode,
             )
 
         def on_done(prep) -> None:

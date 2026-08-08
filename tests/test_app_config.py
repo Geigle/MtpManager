@@ -204,6 +204,47 @@ class AppConfigTests(unittest.TestCase):
             )
             self.assertIsNotNone(default_audiobook_audio_encode_settings())
 
+    def test_podcast_encode_override_and_per_show(self) -> None:
+        from mtpmanager.domain.audio_encode import get_preset
+        from mtpmanager.domain.models import Track, TrackMetadata
+
+        speech = get_preset("mp3_cbr_32_mono")
+        high = get_preset("mp3_cbr_192")
+        music_p = get_preset("mp3_cbr_320")
+        assert speech and high and music_p
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "config.json"
+            cfg = AppConfig()
+            cfg.apply_audio_encode(music_p.settings)
+            cfg.apply_podcast_audio_encode(speech.settings)
+            save_app_config(cfg, path=dest)
+            loaded = load_app_config(path=dest)
+            self.assertTrue(loaded.uses_podcast_encode_override())
+            pod = Track(
+                path="/p.mp3",
+                meta=TrackMetadata(title="Ep", artist="Host", genre="Podcast"),
+            )
+            self.assertEqual(
+                loaded.resolved_audio_encode_for_track(pod).preset_id,
+                "mp3_cbr_32_mono",
+            )
+            # Per-show wins over podcast default.
+            self.assertEqual(
+                loaded.resolved_audio_encode_for_track(
+                    pod, podcast_per_show=high.settings
+                ).preset_id,
+                "mp3_cbr_192",
+            )
+            # Music unchanged.
+            music = Track(
+                path="/m.flac",
+                meta=TrackMetadata(title="Song", genre="Rock"),
+            )
+            self.assertEqual(
+                loaded.resolved_audio_encode_for_track(music).preset_id,
+                "mp3_cbr_320",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
