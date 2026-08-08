@@ -186,6 +186,9 @@ def show_config_dialog(
 
     Transfer mode (Stable vs PyMTP) is a separate Config menu checkbutton.
 
+    Layout is a compact notebook (Presets / Advanced / Video) so the dialog
+    stays usable on shorter displays without stacking every control.
+
     *allowed_send_formats*: device-profile restriction (None = unrestricted).
     """
     from tkinter import Scale, ttk
@@ -203,23 +206,35 @@ def show_config_dialog(
     if ui_fmt not in allowed_tuple:
         ui_fmt = allowed_tuple[0] if allowed_tuple else "mp3"
 
+    start_custom = bool(
+        initial_settings.preset_id == "custom"
+        or (
+            initial_settings.preset_id
+            and get_preset(initial_settings.preset_id) is None
+        )
+    )
+
     dlg = Toplevel(parent)
     dlg.title("Config")
     dlg.transient(parent)
     dlg.resizable(True, True)
 
-    outer = Frame(dlg, padx=14, pady=12)
+    outer = Frame(dlg, padx=12, pady=10)
     outer.pack(fill=BOTH, expand=True)
+    outer.rowconfigure(0, weight=1)
+    outer.columnconfigure(0, weight=1)
 
-    # ---- header / format ----
-    Label(
-        outer,
-        text="Audio transcoding (when conversion is needed)",
-        font=("", 11, "bold"),
-        anchor="w",
-    ).pack(fill="x")
+    nb = ttk.Notebook(outer)
+    nb.grid(row=0, column=0, sticky="nsew")
 
-    restrict_note = ""
+    tab_presets = Frame(nb, padx=10, pady=8)
+    tab_advanced = Frame(nb, padx=10, pady=8)
+    tab_video = Frame(nb, padx=10, pady=8)
+    nb.add(tab_presets, text="Audio presets")
+    nb.add(tab_advanced, text="Advanced")
+    nb.add(tab_video, text="Video")
+
+    # ---- Tab: Audio presets ----
     if allowed_send_formats is not None:
         names = ", ".join(format_display_name(f) for f in allowed_tuple)
         who = profile_display_name or "this device"
@@ -228,18 +243,19 @@ def show_config_dialog(
         restrict_note = "No device profile restriction (all encode formats)."
 
     Label(
-        outer,
+        tab_presets,
         text=(
-            "Tracks already in a device-supported format are sent as-is "
-            "(no re-encode). Native formats differ per player.\n"
+            "When conversion is needed, encode with the selected preset. "
+            "Tracks already in a device-supported format are sent as-is.\n"
             + restrict_note
         ),
         justify=LEFT,
-        wraplength=520,
-    ).pack(anchor="w", pady=(2, 8))
+        wraplength=640,
+        fg="#333",
+    ).pack(anchor="w", pady=(0, 6))
 
-    fmt_row = Frame(outer)
-    fmt_row.pack(fill="x", pady=(0, 6))
+    fmt_row = Frame(tab_presets)
+    fmt_row.pack(fill="x", pady=(0, 4))
     Label(fmt_row, text="Output format:").pack(side=LEFT)
     fmt_keys = list(allowed_tuple)
     fmt_labels = [format_display_name(f) for f in fmt_keys]
@@ -251,23 +267,20 @@ def show_config_dialog(
         textvariable=fmt_var,
         values=fmt_labels,
         state="readonly",
-        width=18,
+        width=16,
     )
     fmt_combo.pack(side=LEFT, padx=(8, 0))
 
-    # ---- presets (simple view) ----
-    preset_frame = Frame(outer)
-    preset_frame.pack(fill=BOTH, expand=True, pady=(4, 4))
-    Label(preset_frame, text="Quality preset (low → high):").pack(anchor="w")
+    Label(tab_presets, text="Quality (low → high):").pack(anchor="w", pady=(4, 0))
 
-    preset_list_frame = Frame(preset_frame)
-    preset_list_frame.pack(fill=BOTH, expand=True, pady=(4, 0))
+    preset_list_frame = Frame(tab_presets)
+    preset_list_frame.pack(fill=BOTH, expand=True, pady=(4, 2))
     preset_scroll = Scrollbar(preset_list_frame)
     preset_scroll.pack(side=RIGHT, fill=Y)
     preset_list = Listbox(
         preset_list_frame,
-        height=10,
-        width=52,
+        height=8,
+        width=62,
         exportselection=False,
         yscrollcommand=preset_scroll.set,
     )
@@ -275,35 +288,38 @@ def show_config_dialog(
     preset_scroll.config(command=preset_list.yview)
 
     preset_blurb = Label(
-        preset_frame, text="", justify=LEFT, wraplength=520, fg="#444"
+        tab_presets, text="", justify=LEFT, wraplength=640, fg="#444", height=2
     )
-    preset_blurb.pack(anchor="w", pady=(4, 0))
+    preset_blurb.pack(anchor="w", fill="x", pady=(2, 0))
 
-    # Track current preset ids shown in listbox
+    Label(
+        tab_presets,
+        text=(
+            "Transfer engine: Config → Stable Mode "
+            "(off = PyMTP, on = mtp-sendtr)."
+        ),
+        justify=LEFT,
+        wraplength=640,
+        fg="#666",
+    ).pack(anchor="w", pady=(6, 0))
+
     shown_presets: list = []
 
-    # ---- advanced toggle + panel ----
-    advanced_var = BooleanVar(
-        value=bool(
-            initial_settings.preset_id == "custom"
-            or (
-                initial_settings.preset_id
-                and get_preset(initial_settings.preset_id) is None
-            )
-        )
-    )
-    adv_check = Checkbutton(
-        outer,
-        text="Advanced encode options",
-        variable=advanced_var,
-        anchor="w",
-    )
-    adv_check.pack(fill="x", pady=(8, 2))
+    # ---- Tab: Advanced ----
+    Label(
+        tab_advanced,
+        text=(
+            "Granular encode options. Editing any control marks the recipe "
+            "as custom (overrides the Presets list until you pick a preset again)."
+        ),
+        justify=LEFT,
+        wraplength=640,
+        fg="#333",
+    ).pack(anchor="w", pady=(0, 8))
 
-    adv = Frame(outer, relief="groove", borderwidth=1, padx=8, pady=8)
-    # packed/unpacked when advanced toggles
+    adv = Frame(tab_advanced)
+    adv.pack(fill=BOTH, expand=True)
 
-    # Rate control
     Label(adv, text="Rate control:", anchor="w").grid(row=0, column=0, sticky="w")
     rc_var = StringVar(value=initial_settings.rate_control)
     rc_row = Frame(adv)
@@ -320,24 +336,22 @@ def show_config_dialog(
         )
 
     Label(adv, text="Bitrate (kbps):", anchor="w").grid(
-        row=1, column=0, sticky="w", pady=(6, 0)
+        row=1, column=0, sticky="w", pady=(8, 0)
     )
-    br_var = StringVar(
-        value=str(initial_settings.bitrate_kbps or 192)
-    )
+    br_var = StringVar(value=str(initial_settings.bitrate_kbps or 192))
     br_combo = ttk.Combobox(
         adv,
         textvariable=br_var,
         values=[str(b) for b in bitrate_choices_for_format(ui_fmt)],
         width=10,
     )
-    br_combo.grid(row=1, column=1, sticky="w", padx=(8, 0), pady=(6, 0))
+    br_combo.grid(row=1, column=1, sticky="w", padx=(8, 0), pady=(8, 0))
 
     Label(adv, text="VBR quality:", anchor="w").grid(
-        row=2, column=0, sticky="w", pady=(6, 0)
+        row=2, column=0, sticky="w", pady=(8, 0)
     )
     vbr_frame = Frame(adv)
-    vbr_frame.grid(row=2, column=1, sticky="we", padx=(8, 0), pady=(6, 0))
+    vbr_frame.grid(row=2, column=1, sticky="we", padx=(8, 0), pady=(8, 0))
     vbr_var = StringVar(
         value=str(
             int(initial_settings.vbr_quality)
@@ -355,7 +369,7 @@ def show_config_dialog(
         from_=0,
         to=10,
         orient="horizontal",
-        length=220,
+        length=260,
         resolution=0.5,
         showvalue=0,
         command=lambda v: vbr_var.set(
@@ -367,16 +381,15 @@ def show_config_dialog(
     except Exception:
         vbr_scale.set(2)
     vbr_scale.pack(side=LEFT)
-    vbr_label = Label(vbr_frame, textvariable=vbr_var, width=5)
-    vbr_label.pack(side=LEFT, padx=(6, 0))
+    Label(vbr_frame, textvariable=vbr_var, width=4).pack(side=LEFT, padx=(4, 0))
     Label(
         vbr_frame,
-        text="(MP3: 0=best…9=worst · Vorbis: 0–10)",
+        text="MP3 0=best…9 · Vorbis 0–10",
         fg="#666",
-    ).pack(side=LEFT, padx=(8, 0))
+    ).pack(side=LEFT, padx=(6, 0))
 
     Label(adv, text="Sample rate:", anchor="w").grid(
-        row=3, column=0, sticky="w", pady=(6, 0)
+        row=3, column=0, sticky="w", pady=(8, 0)
     )
     sr_choices = ["Source (keep)"] + [str(r) for r in SAMPLE_RATE_CHOICES]
     sr_var = StringVar(
@@ -387,12 +400,12 @@ def show_config_dialog(
         )
     )
     sr_combo = ttk.Combobox(
-        adv, textvariable=sr_var, values=sr_choices, state="readonly", width=16
+        adv, textvariable=sr_var, values=sr_choices, state="readonly", width=14
     )
-    sr_combo.grid(row=3, column=1, sticky="w", padx=(8, 0), pady=(6, 0))
+    sr_combo.grid(row=3, column=1, sticky="w", padx=(8, 0), pady=(8, 0))
 
     Label(adv, text="Channels:", anchor="w").grid(
-        row=4, column=0, sticky="w", pady=(6, 0)
+        row=4, column=0, sticky="w", pady=(8, 0)
     )
     ch_var = StringVar(
         value=(
@@ -408,16 +421,14 @@ def show_config_dialog(
         textvariable=ch_var,
         values=("Source (keep)", "Mono", "Stereo"),
         state="readonly",
-        width=16,
+        width=14,
     )
-    ch_combo.grid(row=4, column=1, sticky="w", padx=(8, 0), pady=(6, 0))
+    ch_combo.grid(row=4, column=1, sticky="w", padx=(8, 0), pady=(8, 0))
 
-    Label(adv, text="Bit depth (PCM/FLAC):", anchor="w").grid(
-        row=5, column=0, sticky="w", pady=(6, 0)
+    Label(adv, text="Bit depth:", anchor="w").grid(
+        row=5, column=0, sticky="w", pady=(8, 0)
     )
-    depth_var = StringVar(
-        value=str(initial_settings.bit_depth or 16)
-    )
+    depth_var = StringVar(value=str(initial_settings.bit_depth or 16))
     depth_combo = ttk.Combobox(
         adv,
         textvariable=depth_var,
@@ -425,13 +436,16 @@ def show_config_dialog(
         state="readonly",
         width=10,
     )
-    depth_combo.grid(row=5, column=1, sticky="w", padx=(8, 0), pady=(6, 0))
+    depth_combo.grid(row=5, column=1, sticky="w", padx=(8, 0), pady=(8, 0))
+    Label(adv, text="(PCM / FLAC)", fg="#666").grid(
+        row=5, column=2, sticky="w", padx=(4, 0), pady=(8, 0)
+    )
 
-    Label(adv, text="FLAC compression:", anchor="w").grid(
-        row=6, column=0, sticky="w", pady=(6, 0)
+    Label(adv, text="FLAC level:", anchor="w").grid(
+        row=6, column=0, sticky="w", pady=(8, 0)
     )
     flac_frame = Frame(adv)
-    flac_frame.grid(row=6, column=1, sticky="we", padx=(8, 0), pady=(6, 0))
+    flac_frame.grid(row=6, column=1, sticky="we", padx=(8, 0), pady=(8, 0))
     flac_var = StringVar(
         value=str(
             initial_settings.compression_level
@@ -444,7 +458,7 @@ def show_config_dialog(
         from_=0,
         to=12,
         orient="horizontal",
-        length=220,
+        length=260,
         resolution=1,
         showvalue=0,
         command=lambda v: flac_var.set(str(int(float(v)))),
@@ -457,58 +471,62 @@ def show_config_dialog(
         )
     )
     flac_scale.pack(side=LEFT)
-    Label(flac_frame, textvariable=flac_var, width=3).pack(side=LEFT, padx=(6, 0))
-    Label(flac_frame, text="(0=fast … 12=smallest)", fg="#666").pack(
-        side=LEFT, padx=(8, 0)
+    Label(flac_frame, textvariable=flac_var, width=3).pack(side=LEFT, padx=(4, 0))
+    Label(flac_frame, text="0=fast … 12=smallest", fg="#666").pack(
+        side=LEFT, padx=(6, 0)
     )
 
-    summary_var = StringVar(value=initial_settings.summary_line())
+    # ---- Tab: Video ----
     Label(
-        outer,
-        textvariable=summary_var,
-        justify=LEFT,
-        wraplength=520,
-        font=("", 10, "italic"),
-    ).pack(anchor="w", pady=(8, 4))
-
-    Label(
-        outer,
-        text=(
-            "Transfer engine is under Config → Stable Mode:\n"
-            "off = PyMTP (default, Device menu + auto-connect);\n"
-            "on = mtp-sendtr subprocess per track."
-        ),
-        justify=LEFT,
-        wraplength=520,
-        fg="#444",
-    ).pack(anchor="w", pady=(4, 8))
-
-    # ---- Send Video section ----
-    Label(
-        outer,
+        tab_video,
         text="Send Video (device-specific)",
         font=("", 11, "bold"),
         anchor="w",
-    ).pack(fill="x", pady=(4, 2))
+    ).pack(fill="x", pady=(0, 6))
 
     broken_var = BooleanVar(value=bool(show_broken_video_presets))
     Checkbutton(
-        outer,
+        tab_video,
         text="Show broken video encode presets (experimental)",
         variable=broken_var,
         anchor="w",
         justify=LEFT,
-    ).pack(fill="x", pady=(0, 2))
+    ).pack(fill="x", pady=(0, 4))
     Label(
-        outer,
+        tab_video,
         text=(
             "When enabled, Device → Send Video can offer recipes marked "
             "broken (e.g. ZEN Vision:M WMV · WMA). They are hidden by "
             "default because they do not play reliably."
         ),
         justify=LEFT,
-        wraplength=520,
-    ).pack(anchor="w", pady=(0, 12))
+        wraplength=640,
+        fg="#333",
+    ).pack(anchor="w")
+
+    # ---- Footer: active recipe + buttons ----
+    foot = Frame(outer)
+    foot.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+
+    use_advanced = {"v": start_custom}
+    summary_var = StringVar(value=initial_settings.summary_line())
+    source_var = StringVar(
+        value="Using: custom advanced" if start_custom else "Using: preset"
+    )
+    Label(
+        foot,
+        textvariable=source_var,
+        anchor="w",
+        fg="#555",
+    ).pack(fill="x")
+    Label(
+        foot,
+        textvariable=summary_var,
+        justify=LEFT,
+        wraplength=640,
+        font=("", 10, "italic"),
+        anchor="w",
+    ).pack(fill="x", pady=(2, 6))
 
     # ---- state helpers ----
     _suppress = {"n": False}
@@ -521,14 +539,11 @@ def show_config_dialog(
         nonlocal shown_presets
         fmt = _current_fmt_key()
         shown_presets = presets_for_format(fmt)
-        # For m4a UI key, presets_for_format("m4a") works; for aac family
-        # when user picked AAC (M4A), include m4a presets.
         if fmt == "m4a" and not shown_presets:
             shown_presets = presets_for_format("aac")
         preset_list.delete(0, END)
         for p in shown_presets:
             preset_list.insert(END, p.display_name)
-        # Select matching preset
         idx = 0
         want = select_id or initial_settings.preset_id
         for i, p in enumerate(shown_presets):
@@ -536,14 +551,16 @@ def show_config_dialog(
                 idx = i
                 break
         else:
-            # Mid-high default
             if shown_presets:
                 idx = min(len(shown_presets) - 1, max(0, len(shown_presets) // 2 + 1))
         if shown_presets:
             preset_list.selection_clear(0, END)
             preset_list.selection_set(idx)
             preset_list.see(idx)
-            blurb = shown_presets[idx].blurb or shown_presets[idx].settings.summary_line()
+            blurb = (
+                shown_presets[idx].blurb
+                or shown_presets[idx].settings.summary_line()
+            )
             preset_blurb.config(text=blurb)
         else:
             preset_blurb.config(text="No presets for this format.")
@@ -594,10 +611,8 @@ def show_config_dialog(
             comp = int(float(flac_var.get()))
         except (TypeError, ValueError):
             comp = 5
-        # File format for AAC UI key
-        file_fmt = fmt
         s = AudioEncodeSettings(
-            format=file_fmt,
+            format=fmt,
             preset_id="custom",
             rate_control=rc,  # type: ignore[arg-type]
             bitrate_kbps=br,
@@ -609,22 +624,19 @@ def show_config_dialog(
             label="",
         )
         s = clamp_settings_for_format(s)
-        # Build a readable label
-        label = s.summary_line() if not s.label else s.label
-        if not s.label or s.preset_id == "custom":
-            s = AudioEncodeSettings(
-                format=s.format,
-                preset_id="custom",
-                rate_control=s.rate_control,
-                bitrate_kbps=s.bitrate_kbps,
-                vbr_quality=s.vbr_quality,
-                sample_rate=s.sample_rate,
-                channels=s.channels,
-                bit_depth=s.bit_depth,
-                compression_level=s.compression_level,
-                label=f"Custom {label}",
-            )
-        return s
+        label = s.summary_line()
+        return AudioEncodeSettings(
+            format=s.format,
+            preset_id="custom",
+            rate_control=s.rate_control,
+            bitrate_kbps=s.bitrate_kbps,
+            vbr_quality=s.vbr_quality,
+            sample_rate=s.sample_rate,
+            channels=s.channels,
+            bit_depth=s.bit_depth,
+            compression_level=s.compression_level,
+            label=f"Custom {label}",
+        )
 
     def _apply_settings_to_advanced(s: AudioEncodeSettings) -> None:
         _suppress["n"] = True
@@ -657,20 +669,22 @@ def show_config_dialog(
             if s.compression_level is not None:
                 flac_var.set(str(s.compression_level))
                 flac_scale.set(int(s.compression_level))
-            summary_var.set(s.summary_line())
         finally:
             _suppress["n"] = False
 
     def _refresh_summary_from_ui() -> None:
-        if advanced_var.get():
+        if use_advanced["v"]:
             s = _read_advanced()
+            source_var.set("Using: custom advanced")
         else:
             s = _selected_preset_settings() or initial_settings
+            source_var.set("Using: preset")
         summary_var.set(s.summary_line())
 
     def _on_preset_select(_event=None) -> None:
         if _suppress["n"]:
             return
+        use_advanced["v"] = False
         s = _selected_preset_settings()
         if s is None:
             return
@@ -686,53 +700,45 @@ def show_config_dialog(
             )
         )
         _apply_settings_to_advanced(s)
-        summary_var.set(s.summary_line())
+        _refresh_summary_from_ui()
 
     def _on_fmt_change(_event=None) -> None:
+        use_advanced["v"] = False
         _reload_presets()
         s = _selected_preset_settings()
         if s is not None:
             _apply_settings_to_advanced(s)
         _refresh_summary_from_ui()
 
-    def _toggle_advanced(*_args) -> None:
-        if advanced_var.get():
-            if not adv.winfo_ismapped():
-                adv.pack(fill="x", pady=(4, 4), after=adv_check)
-            s = _selected_preset_settings()
-            if s is not None and initial_settings.preset_id != "custom":
-                _apply_settings_to_advanced(s)
-        else:
-            adv.pack_forget()
+    def _on_advanced_edit(*_args) -> None:
+        if _suppress["n"]:
+            return
+        use_advanced["v"] = True
         _refresh_summary_from_ui()
 
     # Wire events
     fmt_combo.bind("<<ComboboxSelected>>", _on_fmt_change)
     preset_list.bind("<<ListboxSelect>>", _on_preset_select)
-    advanced_var.trace_add("write", lambda *_: _toggle_advanced())
     for var in (rc_var, br_var, vbr_var, sr_var, ch_var, depth_var, flac_var):
-        var.trace_add(
-            "write",
-            lambda *_: (_refresh_summary_from_ui() if not _suppress["n"] else None),
-        )
+        var.trace_add("write", _on_advanced_edit)
 
     _reload_presets(select_id=initial_settings.preset_id)
-    # If starting on custom advanced, load advanced values from initial
-    if advanced_var.get():
+    if start_custom:
         _apply_settings_to_advanced(initial_settings)
-        _toggle_advanced()
+        try:
+            nb.select(tab_advanced)
+        except Exception:
+            pass
     else:
         s0 = _selected_preset_settings()
         if s0 is not None:
             _apply_settings_to_advanced(s0)
-        summary_var.set(
-            (s0 or initial_settings).summary_line()
-        )
+    _refresh_summary_from_ui()
 
     result: list[ConfigDialogResult | None] = [None]
 
     def on_save() -> None:
-        if advanced_var.get():
+        if use_advanced["v"]:
             s = _read_advanced()
         else:
             s = _selected_preset_settings()
@@ -741,9 +747,7 @@ def show_config_dialog(
                     send_format=_current_fmt_key(),
                     allowed_formats=allowed_send_formats,
                 )
-        s = resolve_settings(
-            settings=s, allowed_formats=allowed_send_formats
-        )
+        s = resolve_settings(settings=s, allowed_formats=allowed_send_formats)
         raw = s.normalized_format()
         if raw not in VALID_SEND_FORMATS and raw not in allowed_tuple:
             messagebox.showerror("Config", f"Invalid format: {raw}", parent=dlg)
@@ -759,8 +763,8 @@ def show_config_dialog(
         result[0] = None
         dlg.destroy()
 
-    btn_row = Frame(outer)
-    btn_row.pack(fill="x", pady=(4, 0))
+    btn_row = Frame(foot)
+    btn_row.pack(fill="x")
     Button(btn_row, text="Cancel", width=10, command=on_cancel).pack(
         side=RIGHT, padx=(6, 0)
     )
@@ -770,16 +774,19 @@ def show_config_dialog(
     dlg.grab_set()
     try:
         dlg.update_idletasks()
-        w, h = 560, 620
+        # Fixed-ish wide default so preset names / advanced labels aren't clipped;
+        # keep height moderate so it fits shorter displays.
+        sh = int(dlg.winfo_screenheight() or 800)
+        w = 800
+        h = min(440, max(380, int(sh * 0.55)))
+        h = min(h, int(sh * 0.72))
         px = parent.winfo_rootx() + max(0, (parent.winfo_width() - w) // 2)
         py = parent.winfo_rooty() + max(0, (parent.winfo_height() - h) // 3)
         dlg.geometry(f"{w}x{h}+{px}+{py}")
-        dlg.minsize(480, 480)
+        dlg.minsize(800, 360)
     except Exception:
         pass
     parent.wait_window(dlg)
-    return result[0]
-
     return result[0]
 
 
