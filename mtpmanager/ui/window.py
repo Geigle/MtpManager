@@ -108,6 +108,7 @@ MENU_ALWAYS_SHOW_PLAYBACK = "Always show playback controls"
 
 # Config menu
 MENU_STABLE_MODE = "Stable Mode"
+MENU_SYNC_ALBUM_ART = "Sync album art (PyMTP)"
 MENU_ENABLE_EXPERIMENTAL_TOOLS = "Enable Experimental Tools"
 MENU_ARTIST_FOLDERS = "Store tracks in artist folder (experimental)"
 MENU_ALBUM_FOLDERS = "Store tracks in album folder (experimental)"
@@ -487,6 +488,7 @@ class MainWindow:
         )
 
         self.var_stable_mode = BooleanVar(value=False)
+        self.var_sync_album_art = BooleanVar(value=True)
         self.var_enable_experimental_tools = BooleanVar(value=False)
         self.var_artist_folders = BooleanVar(value=False)
         self.var_album_folders = BooleanVar(value=False)
@@ -1709,6 +1711,7 @@ class MainWindow:
         *,
         on_config,
         on_stable_mode_toggle=None,
+        on_sync_album_art_toggle=None,
         on_enable_experimental_tools_toggle=None,
         on_artist_folders_toggle=None,
         on_album_folders_toggle=None,
@@ -1722,6 +1725,7 @@ class MainWindow:
         self._config_menu_commands = {
             "on_config": on_config,
             "on_stable_mode_toggle": on_stable_mode_toggle,
+            "on_sync_album_art_toggle": on_sync_album_art_toggle,
             "on_enable_experimental_tools_toggle": on_enable_experimental_tools_toggle,
             "on_artist_folders_toggle": on_artist_folders_toggle,
             "on_album_folders_toggle": on_album_folders_toggle,
@@ -1743,6 +1747,7 @@ class MainWindow:
             self._menu_entryconfig(self.menu_config, MENU_CONFIG, command=on_config)
         pairs = (
             (MENU_STABLE_MODE, cmds.get("on_stable_mode_toggle")),
+            (MENU_SYNC_ALBUM_ART, cmds.get("on_sync_album_art_toggle")),
             (
                 MENU_ENABLE_EXPERIMENTAL_TOOLS,
                 cmds.get("on_enable_experimental_tools_toggle"),
@@ -2026,6 +2031,12 @@ class MainWindow:
         self.menu_config.add_checkbutton(
             label=MENU_STABLE_MODE,
             variable=self.var_stable_mode,
+            onvalue=True,
+            offvalue=False,
+        )
+        self.menu_config.add_checkbutton(
+            label=MENU_SYNC_ALBUM_ART,
+            variable=self.var_sync_album_art,
             onvalue=True,
             offvalue=False,
         )

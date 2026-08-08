@@ -1366,3 +1366,135 @@ class PymtpDevice:
             return int(trid) if trid is not None else None
         except (TypeError, ValueError):
             return None
+
+    def get_representative_sample_format(self, filetype: int) -> dict | None:
+        """Probe sample (album art) support for a libmtp filetype enum value."""
+        try:
+            return self._mtp.get_representative_sample_format(int(filetype))
+        except pymtp.NotConnected as exc:
+            raise TransportError(
+                "Not connected (sample format probe).",
+                fatal=True,
+            ) from exc
+        except pymtp.CommandFailed as exc:
+            stack = _collect_errorstack(self._mtp)
+            raise TransportError(
+                f"Sample format probe failed for filetype={filetype}. {stack}".strip(),
+                fatal=False,
+                stderr=stack,
+            ) from exc
+
+    def send_representative_sample(
+        self,
+        object_id: int,
+        data: bytes,
+        *,
+        width: int,
+        height: int,
+        filetype: int | None = None,
+    ) -> None:
+        """Attach JPEG (etc.) representative sample to a track or album object."""
+        try:
+            self._mtp.send_representative_sample(
+                int(object_id),
+                data,
+                width=int(width),
+                height=int(height),
+                filetype=filetype,
+            )
+        except pymtp.NotConnected as exc:
+            raise TransportError(
+                "Not connected (send sample).",
+                fatal=True,
+            ) from exc
+        except ValueError as exc:
+            raise TransportError(str(exc), fatal=False) from exc
+        except pymtp.CommandFailed as exc:
+            stack = _collect_errorstack(self._mtp)
+            msg = (
+                f"Send representative sample failed object_id={object_id} "
+                f"bytes={len(data or b'')}. {stack}"
+            ).strip()
+            raise TransportError(msg, fatal=False, stderr=stack) from exc
+
+    def get_representative_sample(self, object_id: int) -> dict | None:
+        """Read back sample info for *object_id* (may be None if unsupported)."""
+        try:
+            return self._mtp.get_representative_sample(int(object_id))
+        except pymtp.NotConnected as exc:
+            raise TransportError(
+                "Not connected (get sample).",
+                fatal=True,
+            ) from exc
+        except ValueError as exc:
+            raise TransportError(str(exc), fatal=False) from exc
+
+    def create_album(
+        self,
+        name: str,
+        track_ids: list[int] | None = None,
+        *,
+        artist: str = "",
+        genre: str = "",
+    ) -> int:
+        """Create a device album abstract object; return album object id."""
+        try:
+            return int(
+                self._mtp.create_new_album(
+                    name,
+                    track_ids=track_ids or [],
+                    artist=artist,
+                    genre=genre,
+                    parent_id=0,
+                    storage_id=int(self.storage_id),
+                )
+            )
+        except pymtp.NotConnected as exc:
+            raise TransportError(
+                "Not connected (create album).",
+                fatal=True,
+            ) from exc
+        except pymtp.CommandFailed as exc:
+            stack = _collect_errorstack(self._mtp)
+            raise TransportError(
+                f"Create album failed name={name!r}. {stack}".strip(),
+                fatal=False,
+                stderr=stack,
+            ) from exc
+
+    def update_album(
+        self,
+        album_id: int,
+        name: str,
+        track_ids: list[int] | None = None,
+        *,
+        artist: str = "",
+        genre: str = "",
+    ) -> int:
+        """Update an existing device album's metadata and track list."""
+        try:
+            return int(
+                self._mtp.update_album(
+                    int(album_id),
+                    name,
+                    track_ids=track_ids or [],
+                    artist=artist,
+                    genre=genre,
+                    parent_id=0,
+                    storage_id=int(self.storage_id),
+                )
+            )
+        except pymtp.NotConnected as exc:
+            raise TransportError(
+                "Not connected (update album).",
+                fatal=True,
+            ) from exc
+        except ValueError as exc:
+            raise TransportError(str(exc), fatal=False) from exc
+        except pymtp.CommandFailed as exc:
+            stack = _collect_errorstack(self._mtp)
+            raise TransportError(
+                f"Update album failed id={album_id} name={name!r}. {stack}".strip(),
+                fatal=False,
+                stderr=stack,
+            ) from exc

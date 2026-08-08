@@ -255,6 +255,51 @@ TOOL_CATALOG: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "device_art_probe",
+        "cli": ["device", "art-probe"],
+        "description": (
+            "Probe libmtp RepresentativeSample support for MP3/ALBUM/etc. "
+            "Experimental; requires device connect. Does not write art."
+        ),
+        "host_only": False,
+        "destructive": False,
+        "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
+        "name": "device_art_experiment",
+        "cli": ["device", "art-experiment"],
+        "description": (
+            "Minimum album-art experiment: JPEG from host cover, optional track "
+            "send, Send_Representative_Sample on track and/or new album object. "
+            "Requires confirm=true. Avoids Get_Album_List."
+        ),
+        "host_only": False,
+        "destructive": True,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Host audio path with cover art",
+                },
+                "object_id": {
+                    "type": "integer",
+                    "description": "Existing object id (skip send)",
+                },
+                "try_album": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "Create album object + sample when useful",
+                },
+                "max_edge": {"type": "integer", "default": 320},
+                "max_bytes": {"type": "integer", "default": 20480},
+                "confirm": {"type": "boolean", "default": False},
+            },
+            "required": ["path"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "sync_tracks",
         "cli": ["sync"],
         "description": (

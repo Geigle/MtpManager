@@ -12,6 +12,7 @@ from mtpmanager.app import device_ops
 from mtpmanager.app import retail_ops
 from mtpmanager.app.artist_folders import ensure_album_folder, ensure_artist_folder
 from mtpmanager.app.cancellation import JobCancelled
+from mtpmanager.app.album_art_device import push_album_art_for_tracks
 from mtpmanager.app.device_io_gate import DEFAULT_USB_QUIET_S, DeviceIoGate
 from mtpmanager.infra.device_session_lock import DeviceSessionLock
 from mtpmanager.app.playlist_device import (
@@ -424,6 +425,7 @@ class AppController:
         w.set_config_menu_commands(
             on_config=self.on_config,
             on_stable_mode_toggle=self.on_stable_mode_toggle,
+            on_sync_album_art_toggle=self.on_sync_album_art_toggle,
             on_enable_experimental_tools_toggle=self.on_enable_experimental_tools_toggle,
             on_artist_folders_toggle=self.on_artist_folders_toggle,
             on_album_folders_toggle=self.on_album_folders_toggle,
@@ -436,6 +438,7 @@ class AppController:
         )
         artist_on = bool(self._config.store_tracks_in_artist_folder)
         album_on = bool(self._config.store_tracks_in_album_folder) and artist_on
+        w.var_sync_album_art.set(bool(self._config.sync_album_art))
         w.var_artist_folders.set(artist_on)
         w.var_album_folders.set(album_on)
         w.var_podcast_folders.set(
@@ -756,6 +759,29 @@ class AppController:
                 reason="incompatible with Stable Mode"
             )
         self._apply_transfer_mode(mode, persist=True, reason="config_menu")
+
+    def on_sync_album_art_toggle(self) -> None:
+        """Config → Sync album art (PyMTP): abstract album + JPEG sample after send."""
+        enabled = bool(self.win.var_sync_album_art.get())
+        if enabled and self._config.stable_mode:
+            messagebox.showinfo(
+                "Album art",
+                "Sync album art needs PyMTP (uncheck Config → Stable Mode).\n\n"
+                "On Creative ZEN, cover art is attached to device album objects "
+                "after music or podcast transfer — not available via mtp-sendtr.\n"
+                "Podcasts use the show’s RSS artwork as the album sample.",
+            )
+            self.win.var_sync_album_art.set(False)
+            return
+        self._config.sync_album_art = enabled
+        try:
+            save_app_config(self._config)
+        except OSError as e:
+            logger.exception("Failed to save sync_album_art")
+            messagebox.showerror("Config", f"Could not save settings:\n{e}")
+            self.win.var_sync_album_art.set(not enabled)
+            return
+        logger.info("Config sync_album_art=%s", enabled)
 
     def on_enable_experimental_tools_toggle(self) -> None:
         """Config → Enable Experimental Tools: show/hide experimental menus."""
@@ -5351,6 +5377,89 @@ class AppController:
             return
         self._start_playback_queue(self._audio_tracks_only(playable))
 
+    def _should_push_album_art(self) -> bool:
+        """True when Experimental + config wants album art after music sync."""
+        if not bool(getattr(self._config, "sync_album_art", True)):
+            return False
+        if self.win.active_mode() != "experimental":
+            return False
+        return True
+
+    def _publish_album_art_after_sync(self, paths: list[str]) -> None:
+        """After successful music transfer: create/update albums + JPEG samples."""
+        if not paths:
+            return
+        if not self._should_push_album_art():
+            return
+        if not self.device.is_connected():
+            logger.info(
+                "Album art: skip (device not connected after transfer)"
+            )
+            return
+        tracks = self._tracks_for_paths(list(paths))
+        if not tracks:
+            return
+        serial = self._device_serial or device_serial_key()
+
+        def work():
+            if not self._device_io.try_acquire("album-art-push"):
+                raise RuntimeError(
+                    f"Device is busy ({self._device_io.holder or 'unknown'})."
+                )
+            try:
+                return push_album_art_for_tracks(
+                    device=self.device,
+                    serial=serial,
+                    tracks=tracks,
+                )
+            finally:
+                self._device_io.release(
+                    reason="album-art-push", quiet_s=_DEVICE_USB_COOLDOWN_S
+                )
+
+        def on_done(result) -> None:
+            try:
+                self.win.set_progress_status("")
+            except Exception:
+                pass
+            if result is None:
+                return
+            sent = int(getattr(result, "art_sent_count", 0) or 0)
+            ok_n = int(getattr(result, "ok_count", 0) or 0)
+            err_n = int(getattr(result, "error_count", 0) or 0)
+            logger.info(
+                "Album art push done sent=%s ok=%s errors=%s",
+                sent,
+                ok_n,
+                err_n,
+            )
+            if sent > 0:
+                try:
+                    self.win.set_progress_status(
+                        f"Album art: {sent} cover(s) on device"
+                    )
+                except Exception:
+                    pass
+
+        def on_error(exc: BaseException) -> None:
+            try:
+                self.win.set_progress_status("")
+            except Exception:
+                pass
+            # Non-fatal for the transfer that already succeeded.
+            logger.warning("Album art push failed: %s", exc, exc_info=True)
+
+        try:
+            self.win.set_progress_status("Syncing album art to device…")
+        except Exception:
+            pass
+        self._bg.submit(
+            work,
+            on_done=on_done,
+            on_error=on_error,
+            name="device-album-art",
+        )
+
     def _publish_pending_device_playlist(self) -> None:
         """After a successful playlist track sync, create/update MTP playlist."""
         pending = self._pending_device_playlist
@@ -9480,6 +9589,12 @@ class AppController:
                 self._pending_device_playlist is not None
             ):
                 self._publish_pending_device_playlist()
+            # Phase 2b: abstract album + cover art (ZEN: not on track objects).
+            # Music and podcasts: podcast show RSS art is used when episode
+            # files lack embedded covers.
+            if self._should_push_album_art():
+                paths = list(job.paths) if job is not None else []
+                self._publish_album_art_after_sync(paths)
             if self._pending_auto_podcast is not None:
                 self._finish_auto_podcast_device_batch(ok=True)
 

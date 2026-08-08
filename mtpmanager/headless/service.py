@@ -16,6 +16,7 @@ from mtpmanager.app.device_ops import connect as device_connect
 from mtpmanager.app.device_ops import delete_object as device_delete_object
 from mtpmanager.app.device_ops import disconnect as device_disconnect
 from mtpmanager.app.device_ops import get_device_info, get_device_identity
+from mtpmanager.app.album_art_device import push_album_art_for_tracks
 from mtpmanager.app.playlist_device import push_playlist_to_device
 from mtpmanager.app.transfer import transfer_tracks
 from mtpmanager.domain.device_profile import match_device_profile
@@ -705,6 +706,347 @@ class HeadlessService:
             logger.exception("device_delete failed")
             return fail("DEVICE_ERROR", str(e), exit_code=ExitCode.ERROR)
 
+    def device_art_probe(self) -> AgentResult:
+        """Probe RepresentativeSample support for common filetypes (Experimental)."""
+        if not self._connected or self._device is None:
+            return fail(
+                "NOT_CONNECTED",
+                "Not connected; run device connect first",
+                exit_code=ExitCode.ERROR,
+            )
+        busy = self._require_session_lock("cli-art-probe")
+        if busy is not None:
+            return busy
+        try:
+            import mtpmanager.infra.pymtp_wrapper as pymtp
+
+            names = ("MP3", "WMA", "ALBUM", "JPEG", "UNDEF_AUDIO", "PLAYLIST")
+            rows: list[dict[str, Any]] = []
+            for name in names:
+                ft = int(pymtp.LIBMTP_Filetype.get(name, -1))
+                if ft < 0:
+                    continue
+                row: dict[str, Any] = {
+                    "object_filetype": name,
+                    "object_filetype_id": ft,
+                    "supported": False,
+                }
+                try:
+                    info = self._device.get_representative_sample_format(ft)
+                    if info:
+                        row["supported"] = True
+                        # Sample props use keys width/height/size/filetype —
+                        # do not clobber object_filetype with sample JPEG id.
+                        row["sample_width"] = info.get("width")
+                        row["sample_height"] = info.get("height")
+                        row["sample_max_bytes"] = info.get("size")
+                        row["sample_duration"] = info.get("duration")
+                        row["sample_filetype"] = info.get("filetype")
+                        row["sample_filetype_name"] = info.get("filetype_name")
+                except TransportError as e:
+                    row["error"] = str(e)
+                except Exception as e:
+                    row["error"] = f"{type(e).__name__}: {e}"
+                rows.append(row)
+            return ok(
+                {
+                    "formats": rows,
+                    "note": (
+                        "supported=true means the device advertises "
+                        "RepresentativeSample* props for that object format. "
+                        "Creative often wants art on ALBUM objects, not tracks."
+                    ),
+                }
+            )
+        except Exception as e:
+            logger.exception("device_art_probe failed")
+            return fail("DEVICE_ERROR", str(e), exit_code=ExitCode.ERROR)
+
+    def device_art_experiment(
+        self,
+        path: str,
+        *,
+        object_id: int | None = None,
+        confirm: bool = False,
+        try_album: bool = True,
+        max_edge: int = 320,
+        max_bytes: int = 20 * 1024,
+    ) -> AgentResult:
+        """Minimum album-art experiment: probe → (optional send track) → sample.
+
+        Steps:
+          1. Prepare JPEG from host cover (embedded/sidecar).
+          2. Probe sample formats (MP3 + ALBUM).
+          3. If *object_id* omitted: send the track via PyMTP (new GUID).
+          4. Send representative sample to the track object id.
+          5. If track sample fails or *try_album*: create album + sample on album.
+          6. Read sample back when possible.
+
+        Does **not** call Get_Album_List (hang class after bad finalize).
+        """
+        if not confirm:
+            return fail(
+                "CONFIRM_REQUIRED",
+                "Pass --confirm to run the album-art experiment (writes to device)",
+                exit_code=ExitCode.CONFIRM_REQUIRED,
+                data={"path": path, "object_id": object_id},
+            )
+        if not path or not os.path.isfile(path):
+            return fail(
+                "NOT_FOUND",
+                f"Track path not found: {path}",
+                exit_code=ExitCode.ERROR,
+            )
+        if not self._connected or self._device is None:
+            return fail(
+                "NOT_CONNECTED",
+                "Not connected; run device connect first",
+                exit_code=ExitCode.ERROR,
+            )
+        busy = self._require_session_lock("cli-art-experiment")
+        if busy is not None:
+            return busy
+
+        from mtpmanager.domain.track_id import new_track_guid
+        from mtpmanager.infra.album_art import prepare_device_cover_jpeg
+        from mtpmanager.infra.mutagen_tags import MutagenTagReader
+        import mtpmanager.infra.pymtp_wrapper as pymtp
+
+        result: dict[str, Any] = {
+            "path": path,
+            "steps": [],
+        }
+
+        def step(name: str, **payload: Any) -> None:
+            row = {"step": name, **payload}
+            result["steps"].append(row)
+            logger.info("art-experiment %s %s", name, payload)
+
+        try:
+            jpeg = prepare_device_cover_jpeg(
+                path, max_edge=int(max_edge), max_bytes=int(max_bytes)
+            )
+            if not jpeg:
+                return fail(
+                    "NO_ART",
+                    "No cover art found (embedded tags or cover.jpg sidecar) "
+                    "or Pillow missing",
+                    exit_code=ExitCode.ERROR,
+                    data=result,
+                )
+            jpeg_bytes, jw, jh = jpeg
+            result["jpeg"] = {
+                "bytes": len(jpeg_bytes),
+                "width": jw,
+                "height": jh,
+            }
+            step("prepare_jpeg", ok=True, **result["jpeg"])
+
+            probe: dict[str, Any] = {}
+            for name in ("MP3", "ALBUM"):
+                ft = int(pymtp.LIBMTP_Filetype[name])
+                try:
+                    info = self._device.get_representative_sample_format(ft)
+                    probe[name] = info or {"supported": False}
+                    if info:
+                        probe[name] = {"supported": True, **info}
+                except Exception as e:
+                    probe[name] = {"supported": False, "error": str(e)}
+            result["probe"] = probe
+            step("probe", **probe)
+
+            track_id = int(object_id) if object_id is not None else None
+            if track_id is None or track_id <= 0:
+                meta = MutagenTagReader().read_metadata(path)
+                # Prefer library GUID when path is indexed.
+                guid = ""
+                try:
+                    for t in self._load_tracks():
+                        if os.path.normpath(t.path) == os.path.normpath(path):
+                            guid = str(t.guid or "")
+                            break
+                except Exception:
+                    logger.debug("library guid lookup failed", exc_info=True)
+                if not guid:
+                    guid = new_track_guid()
+                result["guid"] = guid
+                result["meta"] = {
+                    "title": meta.title,
+                    "artist": meta.artist,
+                    "album": meta.album,
+                }
+                trid = self._device.send_track(path, meta, guid=guid)
+                track_id = int(trid) if trid is not None else None
+                step(
+                    "send_track",
+                    ok=track_id is not None and track_id > 0,
+                    object_id=track_id,
+                    guid=guid,
+                )
+                if track_id is None or track_id <= 0:
+                    return fail(
+                        "SEND_FAILED",
+                        "Track send returned no object id; cannot attach art",
+                        exit_code=ExitCode.ERROR,
+                        data=result,
+                    )
+            else:
+                step("use_existing_object", object_id=track_id)
+
+            result["track_object_id"] = track_id
+
+            # Prefer sample filetype from probe when present.
+            sample_ft = int(pymtp.LIBMTP_Filetype["JPEG"])
+            for key in ("MP3", "ALBUM"):
+                info = probe.get(key) or {}
+                if info.get("supported") and info.get("filetype") is not None:
+                    sample_ft = int(info["filetype"])
+                    break
+
+            # Clamp JPEG to probe max dimensions/size when available.
+            edge_cap = max_edge
+            byte_cap = max_bytes
+            for key in ("MP3", "ALBUM"):
+                info = probe.get(key) or {}
+                if not info.get("supported"):
+                    continue
+                if int(info.get("width") or 0) > 0:
+                    edge_cap = min(edge_cap, int(info["width"]))
+                if int(info.get("height") or 0) > 0:
+                    edge_cap = min(edge_cap, int(info["height"]))
+                if int(info.get("size") or 0) > 0:
+                    byte_cap = min(byte_cap, int(info["size"]))
+            if edge_cap < max_edge or byte_cap < max_bytes:
+                jpeg2 = prepare_device_cover_jpeg(
+                    path, max_edge=edge_cap, max_bytes=byte_cap
+                )
+                if jpeg2:
+                    jpeg_bytes, jw, jh = jpeg2
+                    result["jpeg"] = {
+                        "bytes": len(jpeg_bytes),
+                        "width": jw,
+                        "height": jh,
+                        "clamped_to_probe": True,
+                    }
+                    step("prepare_jpeg_clamped", ok=True, **result["jpeg"])
+
+            track_art: dict[str, Any] = {"object_id": track_id}
+            try:
+                self._device.send_representative_sample(
+                    track_id,
+                    jpeg_bytes,
+                    width=jw,
+                    height=jh,
+                    filetype=sample_ft,
+                )
+                track_art["ok"] = True
+            except TransportError as e:
+                track_art["ok"] = False
+                track_art["error"] = str(e)
+            result["track_art"] = track_art
+            step("send_sample_track", **track_art)
+
+            if track_art.get("ok"):
+                try:
+                    got = self._device.get_representative_sample(track_id)
+                    result["track_art_readback"] = got
+                    step("readback_track", ok=bool(got and got.get("has_data")), **(got or {}))
+                except Exception as e:
+                    step("readback_track", ok=False, error=str(e))
+
+            album_art: dict[str, Any] | None = None
+            need_album = bool(try_album) and (
+                not track_art.get("ok")
+                or bool((probe.get("ALBUM") or {}).get("supported"))
+            )
+            if need_album:
+                album_art = {}
+                meta_album = (result.get("meta") or {}).get("album") or "Album"
+                meta_artist = (result.get("meta") or {}).get("artist") or ""
+                if "meta" not in result:
+                    try:
+                        m = MutagenTagReader().read_metadata(path)
+                        meta_album = m.album or meta_album
+                        meta_artist = m.artist or meta_artist
+                    except Exception:
+                        pass
+                try:
+                    album_id = self._device.create_album(
+                        str(meta_album)[:120] or "Album",
+                        [int(track_id)],
+                        artist=str(meta_artist)[:120],
+                    )
+                    album_art["album_id"] = album_id
+                    step("create_album", ok=True, album_id=album_id)
+                    try:
+                        self._device.send_representative_sample(
+                            album_id,
+                            jpeg_bytes,
+                            width=jw,
+                            height=jh,
+                            filetype=sample_ft,
+                        )
+                        album_art["ok"] = True
+                        step("send_sample_album", ok=True, album_id=album_id)
+                    except TransportError as e:
+                        album_art["ok"] = False
+                        album_art["error"] = str(e)
+                        step("send_sample_album", ok=False, error=str(e))
+                    if album_art.get("ok"):
+                        try:
+                            got = self._device.get_representative_sample(album_id)
+                            album_art["readback"] = got
+                            step(
+                                "readback_album",
+                                ok=bool(got and got.get("has_data")),
+                                **(got or {}),
+                            )
+                        except Exception as e:
+                            step("readback_album", ok=False, error=str(e))
+                except TransportError as e:
+                    album_art["ok"] = False
+                    album_art["error"] = str(e)
+                    step("create_album", ok=False, error=str(e))
+                result["album_art"] = album_art
+
+            any_ok = bool(track_art.get("ok")) or bool(
+                album_art and album_art.get("ok")
+            )
+            result["success"] = any_ok
+            if any_ok:
+                return ok(
+                    result,
+                    message=(
+                        "Album art sample sent — check the ZEN UI for the cover. "
+                        "Track and/or album sample details are in data."
+                    ),
+                )
+            return fail(
+                "ART_FAILED",
+                "Could not attach representative sample to track or album. "
+                "See probe + step errors (device may lack RepresentativeSampleData).",
+                exit_code=ExitCode.ERROR,
+                data=result,
+            )
+        except TransportError as e:
+            logger.exception("art experiment transport error")
+            result["error"] = str(e)
+            return fail(
+                "DEVICE_ERROR",
+                str(e),
+                exit_code=ExitCode.ERROR,
+                data=result,
+            )
+        except Exception as e:
+            logger.exception("device_art_experiment failed")
+            result["error"] = str(e)
+            return fail(
+                "DEVICE_ERROR",
+                str(e),
+                exit_code=ExitCode.ERROR,
+                data=result,
+            )
+
     # --- sync --------------------------------------------------------------
 
     def _resolve_playlist_tracks(
@@ -1235,6 +1577,52 @@ class HeadlessService:
                     }
                     return early
 
+            album_art_result: dict[str, Any] | None = None
+            if (
+                mode_s == "experimental"
+                and bool(getattr(cfg, "sync_album_art", True))
+                and selected
+            ):
+                # Phase 2: abstract albums + JPEG samples (ZEN: not on tracks).
+                try:
+                    if not self._connected or self._device is None:
+                        conn = self.device_connect()
+                        if not conn.ok:
+                            logger.warning(
+                                "album art: connect failed after sync: %s",
+                                conn.message,
+                            )
+                        else:
+                            serial = self._device_serial or serial
+                    if self._connected and self._device is not None and serial:
+                        batch = push_album_art_for_tracks(
+                            device=self._device,
+                            serial=serial,
+                            tracks=selected,
+                            index_path=self._index_path,
+                        )
+                        album_art_result = {
+                            "art_sent": batch.art_sent_count,
+                            "ok": batch.ok_count,
+                            "errors": batch.error_count,
+                            "albums": [
+                                {
+                                    "name": a.name,
+                                    "artist": a.artist,
+                                    "album_id": a.album_id,
+                                    "created": a.created,
+                                    "art_sent": a.art_sent,
+                                    "art_skipped": a.art_skipped,
+                                    "tracks": len(a.track_ids),
+                                    "error": a.error or None,
+                                }
+                                for a in batch.albums
+                            ],
+                        }
+                except Exception as e:
+                    logger.warning("album art push after sync failed: %s", e)
+                    album_art_result = {"error": str(e)}
+
             push_result: dict[str, Any] | None = None
             if push_playlist and playlist_name:
                 # Push needs a live PyMTP session (default transport).
@@ -1293,6 +1681,7 @@ class HeadlessService:
                     "statuses": statuses,
                     "unresolved_paths": unresolved,
                     "playlist_push": push_result,
+                    "album_art": album_art_result,
                     "note": (
                         "Remote names are track GUIDs under Music 100; "
                         "see docs/device-contract.md"
