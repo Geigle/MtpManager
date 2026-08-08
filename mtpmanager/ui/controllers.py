@@ -1691,6 +1691,7 @@ class AppController:
             status_line=status,
             use_podcast_encode_override=cfg.uses_podcast_encode_override(),
             podcast_audio_encode=cfg.podcast_audio_encode,
+            podcast_tracknumber_as_date=bool(cfg.podcast_tracknumber_as_date),
             global_audio_encode=cfg.resolved_audio_encode(),
             allowed_send_formats=self._allowed_send_formats(),
             profile_display_name=profile_name,
@@ -1702,6 +1703,9 @@ class AppController:
         self._config.podcast_schedule_time = result.schedule_time
         self._config.podcast_max_new_per_show = int(result.max_new_per_show)
         self._config.podcast_auto_sync_to_device = bool(result.auto_sync_to_device)
+        self._config.podcast_tracknumber_as_date = bool(
+            result.podcast_tracknumber_as_date
+        )
         if result.use_podcast_encode_override and result.podcast_audio_encode:
             self._config.apply_podcast_audio_encode(result.podcast_audio_encode)
         else:
@@ -1715,7 +1719,7 @@ class AppController:
             return
         logger.info(
             "Podcast settings saved enabled=%s days=%s time=%s max=%s "
-            "podcast_encode=%s",
+            "podcast_encode=%s tracknumber_as_date=%s",
             self._config.podcast_auto_enabled,
             self._config.podcast_schedule_days,
             self._config.podcast_schedule_time,
@@ -1725,6 +1729,7 @@ class AppController:
                 if self._config.podcast_audio_encode is not None
                 else "global"
             ),
+            self._config.podcast_tracknumber_as_date,
         )
         if result.run_full_sync_now:
             self._start_full_podcast_sync(
@@ -1996,6 +2001,9 @@ class AppController:
                 device_guids=stems,
                 target_audio_format=fmt,
                 resolve_audio_format=self._target_format_for_podcast_episode,
+                tracknumber_as_date=bool(
+                    self._config.podcast_tracknumber_as_date
+                ),
                 now_local=datetime.now().astimezone(),
                 since_last_full_sync=since,
                 on_episode_ready=on_episode_ready,
@@ -2236,6 +2244,9 @@ class AppController:
                 audio_as_video=False,
                 target_audio_format=self._target_format(),
                 resolve_audio_format=self._target_format_for_podcast_episode,
+                tracknumber_as_date=bool(
+                    self._config.podcast_tracknumber_as_date
+                ),
             )
 
         def on_done(prep) -> None:
@@ -2854,6 +2865,9 @@ class AppController:
                 allow_video=False,
                 target_audio_format=self._target_format(),
                 resolve_audio_format=self._target_format_for_podcast_episode,
+                tracknumber_as_date=bool(
+                    self._config.podcast_tracknumber_as_date
+                ),
             )
 
         def on_done(prep) -> None:
@@ -2907,6 +2921,9 @@ class AppController:
                 audio_as_video=audio_as_video,
                 target_audio_format=self._target_format(),
                 resolve_audio_format=self._target_format_for_podcast_episode,
+                tracknumber_as_date=bool(
+                    self._config.podcast_tracknumber_as_date
+                ),
             )
 
         def on_done(prep) -> None:
@@ -10262,7 +10279,13 @@ class AppController:
             # Prefer the on-disk path we were given for the send.
             if p and os.path.isfile(p) and (ep.local_path or "") != p:
                 ep = replace(ep, local_path=p)
-            return episode_as_track(ep, show)
+            return episode_as_track(
+                ep,
+                show,
+                tracknumber_as_date=bool(
+                    self._config.podcast_tracknumber_as_date
+                ),
+            )
         except FileNotFoundError:
             return None
         except Exception:

@@ -36,6 +36,7 @@ class AppConfigTests(unittest.TestCase):
             self.assertEqual(cfg.podcast_schedule_time, "06:30")
             self.assertEqual(cfg.podcast_max_new_per_show, 1)
             self.assertTrue(cfg.podcast_auto_sync_to_device)
+            self.assertFalse(cfg.podcast_tracknumber_as_date)
             self.assertEqual(cfg.active_mode(), "experimental")
 
     def test_round_trip(self) -> None:

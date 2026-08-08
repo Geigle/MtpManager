@@ -2338,6 +2338,8 @@ class PodcastSettingsResult:
     # When True, *podcast_audio_encode* overrides Config for podcast episodes.
     use_podcast_encode_override: bool = False
     podcast_audio_encode: AudioEncodeSettings | None = None
+    # Experimental: MTP track # = episode pub date YYYYMMDD (sort by date).
+    podcast_tracknumber_as_date: bool = False
 
 
 @dataclass(frozen=True)
@@ -2649,6 +2651,7 @@ def show_podcast_settings_dialog(
     status_line: str = "",
     use_podcast_encode_override: bool = False,
     podcast_audio_encode: AudioEncodeSettings | None = None,
+    podcast_tracknumber_as_date: bool = False,
     global_audio_encode: AudioEncodeSettings | None = None,
     allowed_send_formats: frozenset[str] | None = None,
     profile_display_name: str | None = None,
@@ -2823,6 +2826,19 @@ def show_podcast_settings_dialog(
         anchor="w",
     ).pack(fill="x", pady=(4, 2))
 
+    track_date_var = BooleanVar(value=bool(podcast_tracknumber_as_date))
+    Checkbutton(
+        body,
+        text=(
+            "Experimental: set track number from episode date (YYYYMMDD) "
+            "for chronological sort on the player"
+        ),
+        variable=track_date_var,
+        anchor="w",
+        wraplength=420,
+        justify=LEFT,
+    ).pack(fill="x", pady=(4, 2))
+
     if status_line:
         Label(
             body,
@@ -2893,6 +2909,7 @@ def show_podcast_settings_dialog(
             run_full_sync_now=run_now,
             use_podcast_encode_override=use_pod,
             podcast_audio_encode=pod_settings,
+            podcast_tracknumber_as_date=bool(track_date_var.get()),
         )
 
     def _cleanup_bindings() -> None:

@@ -175,6 +175,9 @@ class AppConfig:
     # 1–N most recent new episodes per show per full sync.
     podcast_max_new_per_show: int = DEFAULT_PODCAST_MAX_NEW_PER_SHOW
     podcast_auto_sync_to_device: bool = True
+    # Experimental: set MTP track number from episode pub date (YYYYMMDD)
+    # so shows sort chronologically on the player. Default off.
+    podcast_tracknumber_as_date: bool = False
     # Last completed full sync (UTC ISO + local calendar date for catch-up).
     podcast_last_full_sync_at: str = ""
     podcast_last_full_sync_local_date: str = ""
@@ -421,6 +424,9 @@ def load_app_config(*, path: Path | None = None) -> AppConfig:
         podcast_auto_sync_to_device=_as_bool(
             raw.get("podcast_auto_sync_to_device"), True
         ),
+        podcast_tracknumber_as_date=_as_bool(
+            raw.get("podcast_tracknumber_as_date"), False
+        ),
         podcast_last_full_sync_at=str(
             raw.get("podcast_last_full_sync_at") or ""
         ).strip(),
@@ -503,6 +509,7 @@ def save_app_config(config: AppConfig, *, path: Path | None = None) -> Path:
             config.podcast_max_new_per_show
         ),
         "podcast_auto_sync_to_device": bool(config.podcast_auto_sync_to_device),
+        "podcast_tracknumber_as_date": bool(config.podcast_tracknumber_as_date),
         "podcast_last_full_sync_at": str(
             config.podcast_last_full_sync_at or ""
         ).strip(),

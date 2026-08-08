@@ -1279,7 +1279,7 @@ class PymtpDevice:
         mt.genre = _keep_bytes(keep, meta.genre)
         mt.album = _keep_bytes(keep, meta.album)
         mt.date = _keep_bytes(keep, _year_date_field(meta.date))
-        mt.tracknumber = int(meta.tracknumber_int())
+        mt.tracknumber = int(meta.tracknumber_for_mtp())
         mt.duration = int(round(float(meta.length_sec or 0) * 1000))
         if meta.sample_rate:
             mt.samplerate = int(meta.sample_rate)

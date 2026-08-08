@@ -10,8 +10,11 @@ from datetime import datetime
 
 from mtpmanager.app.podcast_ops import (
     pick_new_not_on_device,
+    podcast_episode_tracknumber,
+    pub_date_to_yyyymmdd,
     upsert_scheduled_day_playlist,
 )
+from mtpmanager.domain.models import TrackMetadata
 from mtpmanager.infra.playlists import get_playlist_by_name
 from mtpmanager.domain.audio_encode import get_preset
 from mtpmanager.infra.podcast_index import (
@@ -40,6 +43,35 @@ class PodcastIndexTests(unittest.TestCase):
             normalize_feed_url("HTTPS://Example.COM/feed/"),
             "https://example.com/feed",
         )
+
+    def test_pub_date_tracknumber_yyyymmdd(self) -> None:
+        self.assertEqual(pub_date_to_yyyymmdd("2026-08-08"), "20260808")
+        self.assertEqual(
+            pub_date_to_yyyymmdd("2026-08-08T12:00:00Z"), "20260808"
+        )
+        self.assertEqual(pub_date_to_yyyymmdd(""), "")
+        from mtpmanager.infra.podcast_index import PodcastEpisode
+
+        ep = PodcastEpisode(
+            id=1,
+            podcast_id=1,
+            guid="a" * 32,
+            feed_guid="x",
+            pub_date="2026-08-08",
+            episode_index=3,
+        )
+        self.assertEqual(
+            podcast_episode_tracknumber(ep, use_date=True), "20260808"
+        )
+        self.assertEqual(
+            podcast_episode_tracknumber(ep, use_date=False), "3"
+        )
+        meta = TrackMetadata(tracknumber="20260808")
+        self.assertEqual(meta.tracknumber_int(), 20260808)
+        # MTP c_ushort packing must stay sortable and in range.
+        packed = meta.tracknumber_for_mtp()
+        self.assertLessEqual(packed, 0xFFFF)
+        self.assertEqual(packed, (2026 - 2000) * 512 + 8 * 32 + 8)
 
     def test_crud_and_episodes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
