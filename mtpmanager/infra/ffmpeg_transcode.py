@@ -24,18 +24,39 @@ _TEMP_NAME_RE = re.compile(r"^TRANSCODE(?:_[01])?\.[A-Za-z0-9]+$")
 NUM_SLOTS = 2
 
 
+def _audio_only_map_options() -> dict[str, Any]:
+    """Never carry FLAC/MP4 cover-art video streams into temp audio files.
+
+    Default ffmpeg stream mapping copies attached pictures (often a large
+    MJPEG/PNG "video" stream). That makes low-bitrate MP3s look huge while
+    the audio is actually compressed — and confuses device bitrate metadata.
+    """
+    return {
+        # First audio stream only (? = optional on newer ffmpeg; omit if
+        # the host ffmpeg is ancient and rejects it — see convert fallback).
+        "map": "0:a:0",
+        "vn": None,
+        "sn": None,
+        "dn": None,
+        # Drop global metadata/chapters that can re-embed huge APIC frames.
+        "map_metadata": "-1",
+        "map_chapters": "-1",
+    }
+
+
 def build_ffmpeg_audio_options(settings: AudioEncodeSettings) -> dict[str, Any]:
-    """Map *settings* to python-ffmpeg output kwargs (no video)."""
+    """Map *settings* to python-ffmpeg output kwargs (audio only)."""
     s = clamp_settings_for_format(settings)
     fmt = s.normalized_format()
-    opts: dict[str, Any] = {}
+    opts: dict[str, Any] = dict(_audio_only_map_options())
 
     if fmt == "mp3":
         opts["codec:a"] = "libmp3lame"
         if s.rate_control == "vbr" and s.vbr_quality is not None:
-            # LAME VBR quality 0 (best) … 9 (worst).
+            # LAME VBR quality 0 (best) … 9 (worst). Prefer qscale:a — the
+            # name python-ffmpeg / ffmpeg docs use for libmp3lame VBR.
             q = max(0, min(9, int(round(float(s.vbr_quality)))))
-            opts["q:a"] = str(q)
+            opts["qscale:a"] = str(q)
         else:
             br = int(s.bitrate_kbps or 192)
             opts["b:a"] = f"{br}k"
@@ -99,7 +120,7 @@ def build_ffmpeg_audio_options(settings: AudioEncodeSettings) -> dict[str, Any]:
 
     else:
         # Fallback: extension-driven mux + high quality MP3-ish.
-        opts["q:a"] = "0"
+        opts["qscale:a"] = "0"
 
     if s.sample_rate and s.sample_rate > 0:
         opts["ar"] = str(int(s.sample_rate))
@@ -156,18 +177,35 @@ class FFmpegTranscoder:
             output_details = _legacy_format_options(target_format)
 
         logger.info(
-            "Converting %s → %s (slot=%d, %s)",
+            "Converting %s → %s (slot=%d, %s) opts=%s",
             src_path,
             output_file,
             int(slot) % NUM_SLOTS,
             (s.summary_line() if s is not None else target_format),
+            {k: v for k, v in output_details.items() if k not in ()},
         )
-        ffmpeg = FFmpeg().input(src_path).output(output_file, output_details)
         try:
-            ffmpeg.execute()
+            FFmpeg().input(src_path).output(output_file, output_details).execute()
         except Exception as e:
-            logger.error("FFMPEG FAILED: %s", e)
-            raise
+            # Older ffmpeg builds may reject map_chapters / optional map syntax.
+            logger.warning(
+                "FFMPEG convert failed (%s); retrying with minimal audio-only map",
+                e,
+            )
+            retry = {
+                k: v
+                for k, v in output_details.items()
+                if k not in ("map_chapters", "map_metadata")
+            }
+            retry["map"] = "0:a:0"
+            retry["vn"] = None
+            try:
+                if os.path.exists(output_file):
+                    self.cleanup(output_file)
+                FFmpeg().input(src_path).output(output_file, retry).execute()
+            except Exception as e2:
+                logger.error("FFMPEG FAILED: %s", e2)
+                raise
         logger.info("Done converting %s", src_path)
         return output_file
 
@@ -193,9 +231,6 @@ class FFmpegTranscoder:
             s = None
             output_details = _legacy_format_options(target_format)
 
-        # Strip video for extract path.
-        output_details = {"vn": None, **output_details}
-
         parent = os.path.dirname(dest_path)
         if parent:
             os.makedirs(parent, exist_ok=True)
@@ -211,9 +246,8 @@ class FFmpegTranscoder:
             dest_path,
             s.summary_line() if s is not None else target_format,
         )
-        ffmpeg = FFmpeg().input(src_path).output(dest_path, output_details)
         try:
-            ffmpeg.execute()
+            FFmpeg().input(src_path).output(dest_path, output_details).execute()
         except Exception as e:
             logger.error("FFMPEG audio extract failed: %s", e)
             raise
@@ -243,17 +277,24 @@ class FFmpegTranscoder:
 
 def _legacy_format_options(target_format: str) -> dict[str, Any]:
     """Pre-preset defaults (match historical MtpManager behavior)."""
+    opts = dict(_audio_only_map_options())
     if target_format == "wma":
-        return {"codec:a": "wmav2"}
-    if target_format == "wav":
-        return {"codec:a": "pcm_s16le"}
-    if target_format == "flac":
-        return {"codec:a": "flac"}
-    if target_format in ("aac", "m4a"):
-        return {"codec:a": "aac", "b:a": "192k"}
-    if target_format == "ogg":
-        return {"codec:a": "libvorbis", "q:a": "4"}
-    if target_format == "opus":
-        return {"codec:a": "libopus", "b:a": "128k"}
-    # Default: MP3 via high-quality VBR (legacy qscale:a 0).
-    return {"qscale:a": "0"}
+        opts["codec:a"] = "wmav2"
+    elif target_format == "wav":
+        opts["codec:a"] = "pcm_s16le"
+    elif target_format == "flac":
+        opts["codec:a"] = "flac"
+    elif target_format in ("aac", "m4a"):
+        opts["codec:a"] = "aac"
+        opts["b:a"] = "192k"
+    elif target_format == "ogg":
+        opts["codec:a"] = "libvorbis"
+        opts["q:a"] = "4"
+    elif target_format == "opus":
+        opts["codec:a"] = "libopus"
+        opts["b:a"] = "128k"
+    else:
+        # Default: MP3 via high-quality VBR (legacy qscale:a 0).
+        opts["codec:a"] = "libmp3lame"
+        opts["qscale:a"] = "0"
+    return opts

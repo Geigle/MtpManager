@@ -250,6 +250,14 @@ def track_metadata_summary(
     br_type = int(info.bitrate_type or 0)
     br_type_s = {0: "(none)", 1: "CBR", 2: "VBR"}.get(br_type, str(br_type))
 
+    # Device bitrate fields are often wrong for VBR/cover-bloated objects.
+    # Always show size/duration average when both are known.
+    size = int(info.filesize or 0)
+    avg_br_s = "(n/a)"
+    if size > 0 and dur_ms > 0:
+        avg_bps = int(size * 8 * 1000 / dur_ms)
+        avg_br_s = _format_bitrate(avg_bps)
+
     lines = [
         f"Object id: {info.item_id}",
         f"Filename: {name}",
@@ -269,7 +277,8 @@ def track_metadata_summary(
         f"Duration: {duration_s}",
         f"Sample rate: {sr_s}",
         f"Channels: {ch_s}",
-        f"Bitrate: {_format_bitrate(info.bitrate)}",
+        f"Bitrate (device tag): {_format_bitrate(info.bitrate)}",
+        f"Bitrate (size÷duration): {avg_br_s}",
         f"Bitrate type: {br_type_s}",
         f"Rating: {info.rating}",
         f"Use count: {info.usecount}",

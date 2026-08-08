@@ -77,7 +77,11 @@ class FFmpegOptionsTests(unittest.TestCase):
         assert p is not None
         opts = build_ffmpeg_audio_options(p.settings)
         self.assertEqual(opts["codec:a"], "libmp3lame")
-        self.assertEqual(opts["q:a"], "0")
+        self.assertEqual(opts["qscale:a"], "0")
+        # Cover-art / attached-pic streams must not be mapped into temps.
+        self.assertEqual(opts.get("map"), "0:a:0")
+        self.assertIn("vn", opts)
+        self.assertEqual(opts.get("map_metadata"), "-1")
 
     def test_mp3_cbr(self) -> None:
         p = get_preset("mp3_cbr_128")
@@ -85,6 +89,7 @@ class FFmpegOptionsTests(unittest.TestCase):
         opts = build_ffmpeg_audio_options(p.settings)
         self.assertEqual(opts["b:a"], "128k")
         self.assertEqual(opts.get("ac"), "2")
+        self.assertEqual(opts.get("map"), "0:a:0")
 
     def test_wma(self) -> None:
         p = get_preset("wma_cbr_128")
