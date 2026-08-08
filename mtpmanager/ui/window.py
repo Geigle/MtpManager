@@ -237,6 +237,7 @@ CTX_DEVICE_DELETE = "Delete from device…"
 CTX_DEVICE_PULL = "Pull to library…"
 CTX_DEVICE_PULL_FOLDER = "Pull to folder…"
 CTX_DEVICE_FETCH_TAGS = "Fetch track tags…"
+CTX_DEVICE_TRACK_INFO = "Track Info…"
 CTX_DEVICE_ADD_TO_PLAYLIST = "Add to Device Playlist…"
 CTX_DEVICE_DELETE_ARTIST = "Delete all from Artist…"
 CTX_DEVICE_DELETE_ALBUM = "Delete album from device…"
@@ -595,6 +596,7 @@ class MainWindow:
         self.menu_device_track_ctx.add_command(label=CTX_DEVICE_PULL)
         self.menu_device_track_ctx.add_command(label=CTX_DEVICE_PULL_FOLDER)
         self.menu_device_track_ctx.add_command(label=CTX_DEVICE_FETCH_TAGS)
+        self.menu_device_track_ctx.add_command(label=CTX_DEVICE_TRACK_INFO)
         self.menu_device_track_ctx.add_separator()
         self.menu_device_track_ctx.add_command(label=CTX_DEVICE_ADD_TO_PLAYLIST)
         self.menu_device_track_ctx.add_separator()
@@ -3178,6 +3180,7 @@ class MainWindow:
         on_pull=None,
         on_pull_folder=None,
         on_fetch_tags=None,
+        on_track_info=None,
         on_add_to_playlist=None,
         on_delete_artist=None,
         on_delete_album=None,
@@ -3200,6 +3203,10 @@ class MainWindow:
         if on_fetch_tags is not None:
             self.menu_device_track_ctx.entryconfig(
                 CTX_DEVICE_FETCH_TAGS, command=on_fetch_tags
+            )
+        if on_track_info is not None:
+            self.menu_device_track_ctx.entryconfig(
+                CTX_DEVICE_TRACK_INFO, command=on_track_info
             )
         if on_add_to_playlist is not None:
             self.menu_device_track_ctx.entryconfig(

@@ -104,6 +104,7 @@ from mtpmanager.domain.device_media import (
 from mtpmanager.domain.models import (
     DeviceInfo,
     DevicePlaylist,
+    DeviceTrackInfo,
     DeviceTrackRef,
     Track,
     TrackMetadata,
@@ -124,6 +125,7 @@ from mtpmanager.infra.device_assets import device_graphic_path
 from mtpmanager.infra.device_index import (
     device_list_is_complete,
     device_serial_key,
+    files_by_item_ids,
     guid_stems_on_device,
     list_cached_files,
     list_cached_music_refs,
@@ -594,6 +596,7 @@ class AppController:
             on_pull=self.action_device_pull_selected,
             on_pull_folder=self.action_device_pull_to_folder,
             on_fetch_tags=self.action_device_fetch_tags_selected,
+            on_track_info=self.action_device_track_info_selected,
             on_add_to_playlist=self.action_device_add_selected_to_playlist,
             on_delete_artist=self.action_device_delete_artist_group,
             on_delete_album=self.action_device_delete_album_group,
@@ -3243,18 +3246,22 @@ class AppController:
                         else "Fetch track tags…"
                     ),
                 )
-                # Index 4: Add to Device Playlist (after first separator).
+                # Index 3: Track Info (single-track detail).
                 self.win.menu_device_track_ctx.entryconfig(
-                    4,
+                    3, label="Track Info…"
+                )
+                # Index 5: Add to Device Playlist (after first separator).
+                self.win.menu_device_track_ctx.entryconfig(
+                    5,
                     label=(
                         f"Add {n} {noun} to Device Playlist…"
                         if n > 1
                         else "Add to Device Playlist…"
                     ),
                 )
-                # Index 6: Delete (after second separator).
+                # Index 7: Delete (after second separator).
                 self.win.menu_device_track_ctx.entryconfig(
-                    6,
+                    7,
                     label=f"Delete {n} {noun} from device…",
                 )
             else:
@@ -3268,10 +3275,13 @@ class AppController:
                     2, label="Fetch track tags…"
                 )
                 self.win.menu_device_track_ctx.entryconfig(
-                    4, label="Add to Device Playlist…"
+                    3, label="Track Info…"
                 )
                 self.win.menu_device_track_ctx.entryconfig(
-                    6, label="Delete from device…"
+                    5, label="Add to Device Playlist…"
+                )
+                self.win.menu_device_track_ctx.entryconfig(
+                    7, label="Delete from device…"
                 )
         except Exception:
             pass
@@ -7298,6 +7308,359 @@ class AppController:
         ):
             return
         self._start_device_tag_enrich(batch, interactive=True)
+
+    def action_device_track_info_selected(self) -> None:
+        """Context menu: show metadata / codec / size for the selected track."""
+        tree = self._device_context_tree or self.win.active_device_tree()
+        tracks = self._device_tracks_from_tree_selection(tree)
+        refs = self._device_refs_for_tracks(tracks)
+        if not refs:
+            messagebox.showinfo("Track Info", "No track selected.")
+            return
+        # Prefer the right-clicked row's object when multi-select.
+        ref = refs[0]
+        track = tracks[0] if tracks else None
+        if self._device_context_row:
+            by_iid = self._device_track_map_for_tree(tree)
+            focused = by_iid.get(self._device_context_row)
+            if focused is not None:
+                track = focused
+                oid = self._item_id_from_device_track(focused)
+                if oid is not None:
+                    by_id = self._device_refs_by_item_id()
+                    if oid in by_id:
+                        ref = by_id[oid]
+        oid = int(ref.item_id or 0)
+        if oid <= 0:
+            messagebox.showinfo("Track Info", "No device object id for selection.")
+            return
+
+        multi_note = ""
+        if len(refs) > 1:
+            multi_note = f"Showing 1 of {len(refs)} selected items."
+
+        serial = self._device_serial or ""
+        cached_files = (
+            files_by_item_ids(serial, [oid]) if serial else {}
+        )
+        cached = cached_files.get(oid)
+
+        # Build a best-effort snapshot without USB first.
+        info = self._compose_device_track_info(
+            ref, track=track, file_entry=cached, live=None
+        )
+        extra = self._track_info_extra_lines(
+            ref, track=track, file_entry=cached, source_note=multi_note
+        )
+
+        # If device is free, refresh live metadata then show dialog.
+        can_query = (
+            self.device.is_connected()
+            and not self._transfer_busy
+            and not self._device_tag_enrich_inflight
+            and self._device_io.try_acquire("track-info")
+        )
+        if not can_query:
+            note = "Cached listing / host join only (device busy or offline)."
+            extra = self._track_info_extra_lines(
+                ref,
+                track=track,
+                file_entry=cached,
+                source_note=multi_note,
+                live_note=note,
+            )
+            show_track_info_dialog(
+                self.win.root, info, title="Track Info", extra_lines=extra
+            )
+            return
+
+        device = self.device
+        gate_reason = "track-info"
+
+        def work():
+            live_info = None
+            live_file = None
+            live_err = ""
+            try:
+                live_info = device_ops.get_track_metadata(device, oid)
+            except Exception as e:
+                live_err = f"Get_Trackmetadata: {e}"
+                logger.info(
+                    "Track Info live metadata failed id=%s: %s", oid, e
+                )
+            try:
+                live_file = device_ops.get_file_metadata(device, oid)
+            except Exception as e:
+                if not live_err:
+                    live_err = f"Get_Filemetadata: {e}"
+                logger.info(
+                    "Track Info live file metadata failed id=%s: %s", oid, e
+                )
+            return live_info, live_file, live_err
+
+        def on_done(result) -> None:
+            self._device_io.release(
+                reason=gate_reason, quiet_s=_DEVICE_USB_COOLDOWN_S
+            )
+            try:
+                self.win.set_progress_status("")
+            except Exception:
+                pass
+            live_info, live_file, live_err = result
+            merged = self._compose_device_track_info(
+                ref,
+                track=track,
+                file_entry=live_file or cached,
+                live=live_info,
+            )
+            live_note = "Live MTP metadata."
+            if live_err and live_info is None and live_file is None:
+                live_note = f"Live query failed ({live_err}); showing cache."
+            elif live_err:
+                live_note = f"Partial live data ({live_err})."
+            extras = self._track_info_extra_lines(
+                ref,
+                track=track,
+                file_entry=live_file or cached,
+                source_note=multi_note,
+                live_note=live_note,
+            )
+            logger.info(
+                "Track Info id=%s name=%r title=%r size=%s ft=%s",
+                merged.item_id,
+                merged.name,
+                merged.title,
+                merged.filesize,
+                merged.filetype,
+            )
+            show_track_info_dialog(
+                self.win.root, merged, title="Track Info", extra_lines=extras
+            )
+
+        def on_error(exc: BaseException) -> None:
+            self._device_io.release(
+                reason=gate_reason, quiet_s=_DEVICE_USB_COOLDOWN_S
+            )
+            try:
+                self.win.set_progress_status("")
+            except Exception:
+                pass
+            logger.warning("Track Info job failed: %s", exc)
+            extras = self._track_info_extra_lines(
+                ref,
+                track=track,
+                file_entry=cached,
+                source_note=multi_note,
+                live_note=f"Live query failed: {exc}",
+            )
+            show_track_info_dialog(
+                self.win.root, info, title="Track Info", extra_lines=extras
+            )
+
+        try:
+            self.win.set_progress_status("Reading track info…")
+        except Exception:
+            pass
+        self._bg.submit(
+            work,
+            on_done=on_done,
+            on_error=on_error,
+            name="device-track-info",
+        )
+
+    def _compose_device_track_info(
+        self,
+        ref: DeviceTrackRef,
+        *,
+        track: Track | None,
+        file_entry,
+        live: DeviceTrackInfo | None,
+    ) -> DeviceTrackInfo:
+        """Merge live MTP, cache, and host tags into one DeviceTrackInfo."""
+        meta = track.meta if track is not None else None
+        name = (
+            (live.name if live and live.name else "")
+            or (file_entry.name if file_entry is not None else "")
+            or (ref.name or "")
+            or ""
+        ).strip()
+        parent_id = (
+            int(live.parent_id)
+            if live and live.parent_id
+            else int(file_entry.parent_id)
+            if file_entry is not None and file_entry.parent_id
+            else int(ref.parent_id or 0)
+        )
+        storage_id = (
+            int(live.storage_id)
+            if live and live.storage_id
+            else int(file_entry.storage_id)
+            if file_entry is not None and file_entry.storage_id
+            else int(ref.storage_id or 0)
+        )
+        filesize = (
+            int(live.filesize)
+            if live and live.filesize
+            else int(file_entry.filesize)
+            if file_entry is not None
+            else 0
+        )
+        filetype = (
+            int(live.filetype)
+            if live and live.filetype
+            else int(file_entry.filetype)
+            if file_entry is not None and file_entry.filetype
+            else int(ref.filetype or 0)
+        )
+        mtime = int(live.modificationdate) if live else 0
+        if not mtime and file_entry is not None:
+            mtime = int(getattr(file_entry, "modificationdate", 0) or 0)
+
+        def _pick_str(*vals: str) -> str:
+            for v in vals:
+                s = (v or "").strip()
+                if s and s.lower() not in {
+                    "unknown title",
+                    "unknown artist",
+                    "unknown album",
+                    "unknown genre",
+                    "unknown composer",
+                    "(none)",
+                }:
+                    return s
+            for v in vals:
+                s = (v or "").strip()
+                if s:
+                    return s
+            return ""
+
+        title = _pick_str(
+            live.title if live else "",
+            ref.title,
+            meta.title if meta else "",
+        )
+        artist = _pick_str(
+            live.artist if live else "",
+            ref.artist,
+            meta.artist if meta else "",
+        )
+        album = _pick_str(
+            live.album if live else "",
+            ref.album,
+            meta.album if meta else "",
+        )
+        genre = _pick_str(
+            live.genre if live else "",
+            ref.genre,
+            meta.genre if meta else "",
+        )
+        composer = _pick_str(
+            live.composer if live else "",
+            meta.composer if meta else "",
+        )
+        date = _pick_str(
+            live.date if live else "",
+            ref.date,
+            meta.date if meta else "",
+        )
+        tn = 0
+        if live and live.tracknumber:
+            tn = int(live.tracknumber)
+        elif ref.tracknumber:
+            try:
+                tn = int(str(ref.tracknumber).split("/")[0].strip())
+            except (TypeError, ValueError):
+                tn = 0
+        elif meta and meta.tracknumber:
+            try:
+                tn = int(str(meta.tracknumber).split("/")[0].strip())
+            except (TypeError, ValueError):
+                tn = 0
+
+        duration_ms = int(live.duration_ms) if live and live.duration_ms else 0
+        if not duration_ms and meta and meta.length_sec:
+            try:
+                duration_ms = int(float(meta.length_sec) * 1000)
+            except (TypeError, ValueError):
+                duration_ms = 0
+
+        sample_rate = (
+            int(live.sample_rate)
+            if live and live.sample_rate
+            else int(meta.sample_rate)
+            if meta
+            else 0
+        )
+        channels = (
+            int(live.channels)
+            if live and live.channels
+            else int(meta.channels)
+            if meta
+            else 0
+        )
+        bitrate = (
+            int(live.bitrate)
+            if live and live.bitrate
+            else int(meta.bitrate)
+            if meta
+            else 0
+        )
+        bitrate_type = (
+            int(live.bitrate_type)
+            if live and live.bitrate_type
+            else int(meta.bitrate_mode)
+            if meta
+            else 0
+        )
+
+        return DeviceTrackInfo(
+            item_id=int(ref.item_id or 0),
+            name=name,
+            parent_id=parent_id,
+            storage_id=storage_id,
+            filesize=filesize,
+            filetype=filetype,
+            modificationdate=mtime,
+            title=title,
+            artist=artist,
+            album=album,
+            genre=genre,
+            composer=composer,
+            date=date,
+            tracknumber=tn,
+            duration_ms=duration_ms,
+            sample_rate=sample_rate,
+            channels=channels,
+            bitrate=bitrate,
+            bitrate_type=bitrate_type,
+            rating=int(live.rating) if live else 0,
+            usecount=int(live.usecount) if live else 0,
+        )
+
+    def _track_info_extra_lines(
+        self,
+        ref: DeviceTrackRef,
+        *,
+        track: Track | None,
+        file_entry,
+        source_note: str = "",
+        live_note: str = "",
+    ) -> list[str]:
+        lines: list[str] = []
+        guid = guid_from_remote_name(ref.name) or (
+            track.guid if track and is_track_guid(track.guid) else ""
+        )
+        if guid:
+            lines.append(f"Track GUID: {guid}")
+        if track is not None:
+            host = self._host_path_for_device_track(track)
+            if host:
+                lines.append(f"Host library path: {host}")
+        if source_note:
+            lines.append(source_note)
+        if live_note:
+            lines.append(live_note)
+        return lines
 
     def _start_device_tag_enrich(
         self,

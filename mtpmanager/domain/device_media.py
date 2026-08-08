@@ -82,6 +82,67 @@ TRACK_EXTS = (
     ".mpeg",
 )
 
+# Human labels for libmtp filetype ints (aligned with pymtp_wrapper LIBMTP map).
+FILETYPE_LABELS: dict[int, str] = {
+    0: "FOLDER",
+    1: "WAV",
+    2: "MP3",
+    3: "WMA",
+    4: "OGG",
+    5: "AUDIBLE",
+    6: "MP4",
+    7: "UNDEF_AUDIO",
+    8: "WMV",
+    9: "AVI",
+    10: "MPEG",
+    11: "ASF",
+    12: "QT",
+    13: "UNDEF_VIDEO",
+    14: "JPEG",
+    15: "JFIF",
+    16: "TIFF",
+    17: "BMP",
+    18: "GIF",
+    19: "PICT",
+    20: "PNG",
+    21: "VCALENDAR1",
+    22: "VCALENDAR2",
+    23: "VCARD2",
+    24: "VCARD3",
+    25: "WINDOWSEXECUTABLE",
+    26: "WINCEEXECUTABLE",
+    27: "TEXT",
+    28: "HTML",
+    29: "FIRMWARE",
+    30: "AAC",
+    31: "MEDIACARD",
+    32: "FLAC",
+    33: "MP2",
+    34: "M4A",
+    35: "DOC",
+    36: "XML",
+    37: "XLS",
+    38: "PPT",
+    39: "MHT",
+    40: "JP2",
+    41: "JPX",
+    42: "ALBUM",
+    43: "PLAYLIST",
+    44: "UNKNOWN",
+}
+
+
+def filetype_label(filetype: int | None) -> str:
+    """Return a short codec/container label for a libmtp filetype code."""
+    try:
+        ft = int(filetype or 0)
+    except (TypeError, ValueError):
+        return "UNKNOWN"
+    name = FILETYPE_LABELS.get(ft)
+    if name:
+        return f"{name} ({ft})"
+    return f"UNKNOWN ({ft})"
+
 MUSIC_EXTS = (
     ".mp3",
     ".wma",

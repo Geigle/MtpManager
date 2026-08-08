@@ -2022,32 +2022,65 @@ def show_file_info_dialog(parent, entry, *, note: str | None = None) -> None:
     parent.wait_window(dlg)
 
 
-def show_track_info_dialog(parent, info) -> None:
-    """Modal display of on-device track tags (Get Track Info)."""
+def show_track_info_dialog(
+    parent,
+    info,
+    *,
+    title: str = "Track Info",
+    extra_lines: list[str] | None = None,
+    text: str | None = None,
+) -> None:
+    """Modal display of on-device track tags / codec / size details.
+
+    *info* is a :class:`~mtpmanager.domain.models.DeviceTrackInfo` (or compatible).
+    Pass *text* to show a fully preformatted body instead of building from *info*.
+    """
+    from tkinter import Text
+
     from mtpmanager.ui.formatting import track_metadata_summary
 
     dlg = Toplevel(parent)
-    dlg.title("Track Info (experimental)")
+    dlg.title(title)
     dlg.transient(parent)
-    dlg.resizable(False, False)
+    dlg.resizable(True, True)
 
     body = Frame(dlg, padx=14, pady=12)
     body.pack(fill=BOTH, expand=True)
-    Label(
-        body,
-        text=track_metadata_summary(info),
-        justify=LEFT,
-        anchor="w",
+
+    body_text = text if text is not None else track_metadata_summary(
+        info, extra_lines=extra_lines
+    )
+
+    text_frame = Frame(body)
+    text_frame.pack(fill=BOTH, expand=True)
+    yscroll = Scrollbar(text_frame)
+    yscroll.pack(side=RIGHT, fill=Y)
+    txt = Text(
+        text_frame,
+        width=56,
+        height=24,
+        wrap="word",
         font=("Menlo", 11),
-    ).pack(anchor="w")
+        yscrollcommand=yscroll.set,
+        relief="flat",
+        borderwidth=0,
+        highlightthickness=0,
+    )
+    txt.pack(side=LEFT, fill=BOTH, expand=True)
+    yscroll.config(command=txt.yview)
+    txt.insert("1.0", body_text)
+    txt.configure(state=DISABLED)
+
     Button(body, text="Close", width=10, command=dlg.destroy).pack(
         anchor="e", pady=(12, 0)
     )
     dlg.grab_set()
     try:
-        px = parent.winfo_rootx() + max(0, (parent.winfo_width() - 460) // 2)
-        py = parent.winfo_rooty() + max(0, (parent.winfo_height() - 420) // 3)
-        dlg.geometry(f"+{px}+{py}")
+        w, h = 520, 520
+        px = parent.winfo_rootx() + max(0, (parent.winfo_width() - w) // 2)
+        py = parent.winfo_rooty() + max(0, (parent.winfo_height() - h) // 3)
+        dlg.geometry(f"{w}x{h}+{px}+{py}")
+        dlg.minsize(400, 320)
     except Exception:
         pass
     parent.wait_window(dlg)
