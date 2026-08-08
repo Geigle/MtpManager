@@ -23,6 +23,7 @@
 - Opening **any new stock pymtp API** or Device menu path → [docs/pymtp-binding-hazards.md](docs/pymtp-binding-hazards.md) (failure classes + predicted breaks)  
 - “Does libmtp/pymtp support X?” / coverage gaps → [docs/libmtp-api-coverage.md](docs/libmtp-api-coverage.md)  
 - Long Experimental bulk / PTP 2002 session poison → [docs/debrief-zen-experimental-bulk-session-poison.md](docs/debrief-zen-experimental-bulk-session-poison.md)  
+- Huge “low bitrate” convert / slow ZEN play start after sync → [docs/debrief-ffmpeg-cover-art-bloat.md](docs/debrief-ffmpeg-cover-art-bloat.md) (ffmpeg must map audio-only; never remux FLAC covers into temps)
 
 Run/setup: [README.md](README.md), [PLATFORMS.md](PLATFORMS.md).
 
@@ -39,6 +40,7 @@ Do **not**:
 5. **Put full titles with `&` / 64-char basenames** on the wire object name. Tags may be full; ObjectFileName is the track GUID (+ ext), not a title string.
 6. **Import stock pymtp without** `mtpmanager.infra.pymtp_wrapper` (macOS lib path + filetype + ctypes fixes).
 7. **Embed `mtp-sendtr` construction in `ui/`** — use ports/app + `AppController._transport()`.
+8. **Drop audio-only ffmpeg mapping** on convert/extract (`-map 0:a:0`, `-vn`, strip metadata). Default ffmpeg maps remux FLAC cover art into “MP3” temps → multi‑MB low-bitrate objects and slow DAP open. See [docs/debrief-ffmpeg-cover-art-bloat.md](docs/debrief-ffmpeg-cover-art-bloat.md) / decisions D16.
 
 ---
 

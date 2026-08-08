@@ -29,7 +29,10 @@ def _audio_only_map_options() -> dict[str, Any]:
 
     Default ffmpeg stream mapping copies attached pictures (often a large
     MJPEG/PNG "video" stream). That makes low-bitrate MP3s look huge while
-    the audio is actually compressed — and confuses device bitrate metadata.
+    the audio is actually compressed, confuses device bitrate metadata, and
+    can delay playback start on picky DAPs (e.g. ~1 min open on ZEN Vision:M).
+
+    Invariant — do not remove: docs/debrief-ffmpeg-cover-art-bloat.md (D16).
     """
     return {
         # First audio stream only (? = optional on newer ffmpeg; omit if

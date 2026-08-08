@@ -49,6 +49,7 @@ This folder is the **design and incident** map. For run instructions, logs, and 
 | [debrief-zen-track-send-failure.md](./debrief-zen-track-send-failure.md) | Incident: CMD 99% finalize, hang, batch abort (forensic detail) |
 | [debrief-pymtp-transfer-failure.md](./debrief-pymtp-transfer-failure.md) | Incident: layered PyMTP binding failures; no silent CMD fallback |
 | [debrief-zen-experimental-bulk-session-poison.md](./debrief-zen-experimental-bulk-session-poison.md) | Bulk Experimental Rock sync: shared PTP 2002/0x02ff stack, variable session life |
+| [debrief-ffmpeg-cover-art-bloat.md](./debrief-ffmpeg-cover-art-bloat.md) | ffmpeg remuxed FLAC covers into convert temps: huge “low bitrate” files, slow ZEN play start |
 
 ---
 
@@ -56,6 +57,7 @@ This folder is the **design and incident** map. For run instructions, logs, and 
 
 | Question | Answer lives in |
 |----------|-----------------|
+| Low-bitrate preset but multi‑MB file / slow ZEN play start? | [debrief-ffmpeg-cover-art-bloat.md](./debrief-ffmpeg-cover-art-bloat.md); [decisions.md](./decisions.md) D16 |
 | Why 56-char basenames if the device has longer names? | [basename-limit-evidence.md](./basename-limit-evidence.md) |
 | Where do I change remote filenames? | `mtpmanager/infra/remote_naming.py` — [device-contract.md](./device-contract.md) |
 | Why doesn’t Experimental fall back to mtp-sendtr? | [decisions.md](./decisions.md) D3 |
