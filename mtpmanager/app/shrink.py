@@ -3,6 +3,10 @@
 Identify host library/podcast tracks already on the device (by GUID), delete
 the MTP objects, re-send with a forced convert, and rewrite any device
 playlists that referenced the old object ids.
+
+Playlist membership is snapshotted *before* deletes: after a track is removed,
+many players drop the dead id from playlist associations, so a re-list would
+never see the old object id and the rewrite would no-op.
 """
 
 from __future__ import annotations
@@ -135,17 +139,65 @@ def collect_shrink_items(
     return items, missing
 
 
-def rewrite_playlists_item_id(
+@dataclass
+class PlaylistRewriteWorkspace:
+    """Mutable playlist memberships snapshotted *before* shrink deletes.
+
+    After a track is deleted, many devices (incl. Creative ZEN) drop the dead
+    object id from playlist associations. Re-listing then never sees *old_id*,
+    so a naive rewrite no-ops. Keep pre-delete memberships and remap in place.
+    """
+
+    playlist_id: int
+    name: str
+    parent_id: int
+    track_ids: list[int]
+
+
+def snapshot_playlists_for_rewrite(
     device,
     *,
     serial: str,
+    parent_id: int | None = None,
+) -> list[PlaylistRewriteWorkspace]:
+    """Load device playlists once (full track lists) for id remapping."""
+    try:
+        listed = load_device_playlists_for_lookup(
+            device, serial=serial, parent_id=parent_id
+        )
+    except Exception:
+        logger.warning("snapshot playlists for rewrite failed", exc_info=True)
+        return []
+    out: list[PlaylistRewriteWorkspace] = []
+    for pl in listed:
+        ids = [int(x) for x in (pl.track_ids or ()) if int(x) > 0]
+        out.append(
+            PlaylistRewriteWorkspace(
+                playlist_id=int(pl.playlist_id),
+                name=(pl.name or "").strip()
+                or f"Playlist {pl.playlist_id}",
+                parent_id=int(getattr(pl, "parent_id", 0) or 0),
+                track_ids=ids,
+            )
+        )
+    logger.info(
+        "Shrink: snapshotted %d playlist(s) for item-id rewrite",
+        len(out),
+    )
+    return out
+
+
+def rewrite_playlists_item_id(
+    device,
+    *,
     old_id: int,
     new_id: int,
-    parent_id: int | None = None,
+    workspace: Sequence[PlaylistRewriteWorkspace],
 ) -> int:
-    """Replace *old_id* with *new_id* in every device playlist that contains it.
+    """Replace *old_id* with *new_id* in *workspace* playlists and push updates.
 
-    Returns number of playlists updated.
+    Mutates each matching workspace entry's ``track_ids``. Returns the number
+    of playlists successfully written to the device.
     """
     old_id = int(old_id)
     new_id = int(new_id)
@@ -153,35 +205,31 @@ def rewrite_playlists_item_id(
         return 0
     if not hasattr(device, "update_playlist"):
         return 0
-    try:
-        listed = load_device_playlists_for_lookup(
-            device, serial=serial, parent_id=parent_id
-        )
-    except Exception:
-        logger.warning("rewrite playlists: list failed", exc_info=True)
-        return 0
     updated = 0
-    for pl in listed:
-        ids = [int(x) for x in (pl.track_ids or ()) if int(x) > 0]
+    for pl in workspace:
+        ids = list(pl.track_ids)
         if old_id not in ids:
             continue
-        new_ids = [new_id if x == old_id else x for x in ids]
-        # Dedupe while preserving order.
+        remapped = [new_id if x == old_id else x for x in ids]
+        # Dedupe while preserving order (same track twice after remap).
         seen: set[int] = set()
         ordered: list[int] = []
-        for x in new_ids:
+        for x in remapped:
             if x in seen:
                 continue
             seen.add(x)
             ordered.append(x)
         name = (pl.name or "").strip() or f"Playlist {pl.playlist_id}"
+        parent = int(pl.parent_id or 0) or None
         try:
             device.update_playlist(
                 int(pl.playlist_id),
                 name,
                 ordered,
-                parent_id=int(getattr(pl, "parent_id", 0) or 0) or None,
+                parent_id=parent,
             )
+            pl.track_ids = ordered
+            pl.name = name
             updated += 1
             logger.info(
                 "Shrink: rewrote playlist id=%s name=%r %s→%s",
@@ -209,10 +257,15 @@ def shrink_items(
     should_cancel: Callable[[], bool] | None = None,
     on_progress: Callable[[int, int, str], None] | None = None,
     on_after_send=None,
+    playlist_parent_id: int | None = None,
 ) -> ShrinkResult:
     """Delete each item on-device, re-send with forced encode, fix playlists."""
     result = ShrinkResult()
     total = len(items)
+    # Snapshot memberships BEFORE deletes — device may prune dead track ids.
+    workspace = snapshot_playlists_for_rewrite(
+        device, serial=serial, parent_id=playlist_parent_id
+    )
     for i, item in enumerate(items):
         if should_cancel is not None and should_cancel():
             break
@@ -276,9 +329,9 @@ def shrink_items(
             try:
                 n = rewrite_playlists_item_id(
                     device,
-                    serial=serial,
                     old_id=old_id,
                     new_id=new_id,
+                    workspace=workspace,
                 )
                 result.playlists_updated += n
             except Exception as e:
