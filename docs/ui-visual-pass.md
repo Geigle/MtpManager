@@ -2,7 +2,7 @@
 
 **Purpose:** Capture the visual-element survey outcomes so a later implementation pass does not rediscover layout, control grammar, or Linux desktop blend work. **No send-path or MTP invariants change here** — UI chrome only (`mtpmanager/ui/`).
 
-**Status:** Phase **1 done** (flat main chrome + ttk interactive stack). Phases 2–4 still backlog.
+**Status:** Phases **1–2 done**. Phases 3–4 still backlog.
 
 **Related code:** `mtpmanager/ui/window.py`, `dialogs.py`, light styling via Treeview tags and `_HoverTip`. No design-token module yet.
 
@@ -79,28 +79,31 @@ Full classification lives in the conversation survey; this doc only tracks work 
 
 ---
 
-## Phase 2 — §7.2 Information architecture / lists (O2 + O3 + P3/P4)
+## Phase 2 — §7.2 Information architecture / lists (O2 + O3 + P3/P4) — **DONE**
 
 **Goal:** One list/browse language for “media in a tab,” and shallower Device navigation.
 
-**O2 — Host Podcasts:**
+**O2 — Host Podcasts (shipped):**
 
-- Today: Subscriptions `Listbox` + vertical `+`/`−`/`↻` + Episodes Treeview + “More Episodes” + “Sync Latest”.
-- Align toward **P3** (tree) and/or a single **P4-like** toolbar, *or* document and reuse one intentional master–detail pattern only here (not a third one-off).
+- **P4-like toolbar:** `Show:` + `+` `−` `↻` · Sync Latest · More Episodes · status (same grammar as Playlists).
+- **Master–detail (documented exception):** subscriptions `Treeview` + episodes `Treeview` (not a pure artist/album hierarchy like Music). This is the **only** intentional master–detail media tab.
+- Subscriptions no longer use classic `Listbox`; iid `ps:{id}` selection in the controller.
 
-**O3 — Nested Device notebook:**
+**O3 — Device category strip (shipped):**
 
-- Device tab currently re-opens Music/Video/Audiobooks/Podcasts/Playlists.
-- Options for a later design choice: flatten (segmented control / sidebar), or keep nested tabs but de-emphasize chrome so they do not compete with the outer notebook.
+- Nested `ttk.Notebook` under Device **removed**.
+- **On device:** readonly combobox (Music / Video / Audiobooks / Podcasts / Playlists) + one packed content frame.
+- `device_notebook` remains a thin shim (`_DeviceSubviewNotebook`) so `.select()` / `.select(frame)` call sites keep working.
 
-**P3 / P4:**
+**P3 / P4:** Host and device Playlists toolbars stay twins. No fourth list widget style on the main window.
 
-- Keep host/device Playlists as twins unless deliberately diverging.
-- Prefer not introducing a fourth list widget style without updating this doc.
+**O11 (shipped with phase 2):**
 
-**Also related (may ride along if cheap):** **O11** — named Treeview styles (thumb rows vs compact playlist/episode rows) so album art does not force tall empty rows everywhere.
+- `Thumb.Treeview` — album-art media trees (library Music/Video/Audiobooks, device Music/Video/Audiobooks).
+- `Compact.Treeview` — playlists, podcast shows/episodes, device podcasts/playlists.
+- Helpers in `mtpmanager/ui/chrome.py` (`STYLE_TREE_*`, `apply_chrome_baseline`).
 
-**Done when:** Host Podcasts and Device browsing are either consistent with P3/P4 or explicitly documented as the single exception pattern.
+**Done when:** Host Podcasts and Device browsing are either consistent with P3/P4 or explicitly documented as the single exception pattern. ✅
 
 ---
 
@@ -308,3 +311,4 @@ Do **not** fold visual chrome into `domain/` or transport paths. Prefer durable 
 |------|------|
 | 2026-08-08 | Inventory captured; phases 1→2→3→4a (macOS)→4b/4c (KDE/GNOME later) agreed. KDE/GNOME recommendations documented for deferred Linux testing. |
 | 2026-08-08 | **Phase 1 shipped:** flat main frames + separators; ttk main interactive stack; D17; `ui/chrome.py`. Dialogs deferred. |
+| 2026-08-08 | **Phase 2 shipped:** Podcasts P4 toolbar + show Treeview master–detail; Device combobox strip (no nested notebook); O11 Thumb/Compact Treeview styles. |

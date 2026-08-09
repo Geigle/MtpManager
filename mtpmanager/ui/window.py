@@ -28,7 +28,6 @@ from tkinter import (
     Y,
     Frame,
     Label,
-    Listbox,
     Menu,
     PhotoImage,
     StringVar,
@@ -39,10 +38,21 @@ from tkinter import (
 )
 
 from mtpmanager.ui.chrome import (
+    STYLE_TREE_COMPACT,
+    STYLE_TREE_THUMB,
     apply_chrome_baseline,
     flat_frame,
     h_separator,
     v_separator,
+)
+
+# Device tab category labels (phase 2: combobox strip, not nested Notebook).
+_DEVICE_CATEGORY_LABELS = (
+    "Music",
+    "Video",
+    "Audiobooks",
+    "Podcasts",
+    "Playlists",
 )
 
 Mode = Literal["stable", "experimental"]
@@ -460,6 +470,24 @@ class _HoverTip:
                 tip.destroy()
             except Exception:
                 pass
+
+
+class _DeviceSubviewNotebook:
+    """Notebook-like API over a single visible Device category frame (phase 2).
+
+    Call sites use ``device_notebook.select()`` / ``select(frame)`` the same way
+    as ``ttk.Notebook``. The UI is a combobox strip, not nested tabs.
+    """
+
+    def __init__(self, window: "MainWindow") -> None:
+        self._win = window
+
+    def select(self, tab_id=None):
+        if tab_id is None:
+            frame = getattr(self._win, "_device_subview_frame", None)
+            return str(frame) if frame is not None else ""
+        self._win.show_device_subview(tab_id)
+        return None
 
 
 class MainWindow:
@@ -961,71 +989,91 @@ class MainWindow:
         ab_tree_frame = Frame(self.audiobooksLibrary_tab)
         ab_tree_frame.pack(fill=BOTH, expand=True)
 
-        # Podcasts tab: subscriptions + episodes + Sync Latest.
+        # Podcasts tab (phase 2 / O2): P4-like toolbar + master–detail
+        # (shows Treeview + episodes Treeview). Intentional exception to pure
+        # P3 hierarchy — see docs/ui-visual-pass.md.
         # Full-sync schedule: Config → Podcast Settings…
         # TODO(follow-up): OPML import/export
-        pod_outer = Frame(self.podcastsLibrary_tab)
+        pod_outer = flat_frame(self.podcastsLibrary_tab)
         pod_outer.pack(fill=BOTH, expand=True, padx=4, pady=4)
 
-        pod_top = Frame(pod_outer)
-        pod_top.pack(side=TOP, fill=BOTH, expand=True)
-        Label(pod_top, text="Subscriptions", font=("", 11, "bold")).pack(
-            anchor="w", pady=(0, 2)
-        )
-        pod_sub_row = Frame(pod_top)
-        pod_sub_row.pack(side=TOP, fill=BOTH, expand=True)
-        pod_sub_list_frame = Frame(pod_sub_row)
-        pod_sub_list_frame.pack(side=LEFT, fill=BOTH, expand=True)
-        pod_sub_scroll = ttk.Scrollbar(pod_sub_list_frame)
-        pod_sub_scroll.pack(side=RIGHT, fill=Y)
-        self.podcast_show_list = Listbox(
-            pod_sub_list_frame,
-            height=8,
-            selectmode="extended",
-            exportselection=False,
-            yscrollcommand=pod_sub_scroll.set,
-        )
-        self.podcast_show_list.pack(side=LEFT, fill=BOTH, expand=True)
-        pod_sub_scroll.config(command=self.podcast_show_list.yview)
-        pod_sub_btns = Frame(pod_sub_row)
-        pod_sub_btns.pack(side=LEFT, fill=Y, padx=(6, 0))
+        # Toolbar mirrors Playlists (P4): compact actions + status.
+        pod_toolbar = flat_frame(pod_outer)
+        pod_toolbar.pack(side=TOP, fill=X, pady=(0, 2))
+        Label(pod_toolbar, text="Show:").pack(side=LEFT, padx=(2, 4))
         self.btn_podcast_add = ttk.Button(
-            pod_sub_btns, text="+", width=3, style="Compact.TButton"
+            pod_toolbar, text="+", width=3, style="Compact.TButton"
         )
-        self.btn_podcast_add.pack(side=TOP, pady=(0, 4))
+        self.btn_podcast_add.pack(side=LEFT, padx=2)
         self.btn_podcast_remove = ttk.Button(
-            pod_sub_btns,
+            pod_toolbar,
             text="−",
             width=3,
             style="Compact.TButton",
             state=DISABLED,
         )
-        self.btn_podcast_remove.pack(side=TOP, pady=(0, 4))
+        self.btn_podcast_remove.pack(side=LEFT, padx=2)
         # Manual re-fetch of selected show feed(s) for new episodes.
         self.btn_podcast_refresh = ttk.Button(
-            pod_sub_btns,
+            pod_toolbar,
             text="↻",
             width=3,
             style="Compact.TButton",
             state=DISABLED,
         )
-        self.btn_podcast_refresh.pack(side=TOP)
+        self.btn_podcast_refresh.pack(side=LEFT, padx=2)
+        self.btn_podcast_sync_latest = ttk.Button(
+            pod_toolbar,
+            text="Sync Latest",
+            style="Tool.TButton",
+            state=DISABLED,
+        )
+        self.btn_podcast_sync_latest.pack(side=LEFT, padx=(8, 2))
+        self.btn_podcast_more = ttk.Button(
+            pod_toolbar,
+            text="More Episodes",
+            style="Tool.TButton",
+            state=DISABLED,
+        )
+        self.btn_podcast_more.pack(side=LEFT, padx=2)
+        self.lbl_podcast_status = Label(pod_toolbar, text="", anchor="w")
+        self.lbl_podcast_status.pack(side=LEFT, fill=X, expand=True, padx=6)
 
-        pod_ep_header = Frame(pod_outer)
+        # Master: subscriptions (compact Treeview — not Listbox).
+        pod_sub_header = flat_frame(pod_outer)
+        pod_sub_header.pack(side=TOP, fill=X, pady=(4, 2))
+        Label(
+            pod_sub_header, text="Subscriptions", font=("", 11, "bold"), anchor="w"
+        ).pack(side=LEFT)
+        pod_sub_frame = flat_frame(pod_outer)
+        pod_sub_frame.pack(side=TOP, fill=BOTH, expand=False)
+        pod_sub_scroll = ttk.Scrollbar(pod_sub_frame)
+        pod_sub_scroll.pack(side=RIGHT, fill=Y)
+        self.podcast_show_tree = ttk.Treeview(
+            pod_sub_frame,
+            columns=("show",),
+            show="headings",
+            selectmode="extended",
+            height=8,
+            style=STYLE_TREE_COMPACT,
+            yscrollcommand=pod_sub_scroll.set,
+        )
+        self.podcast_show_tree.pack(side=LEFT, fill=BOTH, expand=True)
+        pod_sub_scroll.config(command=self.podcast_show_tree.yview)
+        self.podcast_show_tree.heading("show", text="Show", anchor="w")
+        self.podcast_show_tree.column("show", width=400, minwidth=120, stretch=True)
+        # Back-compat alias (older call sites / mental model: "list").
+        self.podcast_show_list = self.podcast_show_tree
+
+        # Detail: episodes for the selected show(s).
+        pod_ep_header = flat_frame(pod_outer)
         pod_ep_header.pack(side=TOP, fill=X, pady=(8, 2))
         self.lbl_podcast_episodes = Label(
             pod_ep_header, text="Episodes", font=("", 11, "bold"), anchor="w"
         )
         self.lbl_podcast_episodes.pack(side=LEFT, fill=X, expand=True)
-        self.btn_podcast_more = ttk.Button(
-            pod_ep_header,
-            text="More Episodes",
-            style="Tool.TButton",
-            state=DISABLED,
-        )
-        self.btn_podcast_more.pack(side=RIGHT)
 
-        pod_ep_frame = Frame(pod_outer)
+        pod_ep_frame = flat_frame(pod_outer)
         pod_ep_frame.pack(side=TOP, fill=BOTH, expand=True)
         pod_ep_yscroll = ttk.Scrollbar(pod_ep_frame)
         pod_ep_yscroll.pack(side=RIGHT, fill=Y)
@@ -1036,6 +1084,7 @@ class MainWindow:
             columns=("date", "title", "duration", "status"),
             show="headings",
             selectmode="extended",
+            style=STYLE_TREE_COMPACT,
             yscrollcommand=pod_ep_yscroll.set,
             xscrollcommand=pod_ep_xscroll.set,
         )
@@ -1058,18 +1107,6 @@ class MainWindow:
         self.podcast_episode_tree.column(
             "status", width=90, minwidth=70, stretch=False
         )
-
-        pod_bottom = Frame(pod_outer)
-        pod_bottom.pack(side=TOP, fill=X, pady=(8, 0))
-        self.btn_podcast_sync_latest = ttk.Button(
-            pod_bottom,
-            text="Sync Latest",
-            style="Tool.TButton",
-            state=DISABLED,
-        )
-        self.btn_podcast_sync_latest.pack(side=LEFT)
-        self.lbl_podcast_status = Label(pod_bottom, text="", anchor="w")
-        self.lbl_podcast_status.pack(side=LEFT, fill=X, expand=True, padx=8)
 
         # Playlists tab: combobox + toolbar + flat track list.
         pl_toolbar = Frame(self.playlists_tab)
@@ -1132,20 +1169,43 @@ class MainWindow:
         pl_tree_frame = Frame(self.playlists_tab)
         pl_tree_frame.pack(side=TOP, fill=BOTH, expand=True)
 
-        # Device tab: nested notebook by media category.
-        self.device_notebook = ttk.Notebook(self.device_tab)
-        self.device_notebook.pack(side=TOP, fill=BOTH, expand=True)
+        # Device tab (phase 2 / O3): category combobox strip + one content frame
+        # (no nested Notebook competing with the outer media tabs).
+        dev_cat_bar = flat_frame(self.device_tab)
+        dev_cat_bar.pack(side=TOP, fill=X, padx=4, pady=(4, 2))
+        Label(dev_cat_bar, text="On device:").pack(side=LEFT, padx=(2, 4))
+        self.var_device_category = StringVar(value=_DEVICE_CATEGORY_LABELS[0])
+        self.device_category_combo = ttk.Combobox(
+            dev_cat_bar,
+            textvariable=self.var_device_category,
+            values=list(_DEVICE_CATEGORY_LABELS),
+            state="readonly",
+            width=14,
+        )
+        self.device_category_combo.pack(side=LEFT, padx=2)
+        self.device_category_combo.bind(
+            "<<ComboboxSelected>>", self._on_device_category_combo, add="+"
+        )
 
-        self.device_music_tab = Frame(self.device_notebook)
-        self.device_video_tab = Frame(self.device_notebook)
-        self.device_audiobooks_tab = Frame(self.device_notebook)
-        self.device_podcasts_tab = Frame(self.device_notebook)
-        self.device_playlists_tab = Frame(self.device_notebook)
-        self.device_notebook.add(self.device_music_tab, text="Music")
-        self.device_notebook.add(self.device_video_tab, text="Video")
-        self.device_notebook.add(self.device_audiobooks_tab, text="Audiobooks")
-        self.device_notebook.add(self.device_podcasts_tab, text="Podcasts")
-        self.device_notebook.add(self.device_playlists_tab, text="Playlists")
+        self.device_content = flat_frame(self.device_tab)
+        self.device_content.pack(side=TOP, fill=BOTH, expand=True)
+
+        self.device_music_tab = flat_frame(self.device_content)
+        self.device_video_tab = flat_frame(self.device_content)
+        self.device_audiobooks_tab = flat_frame(self.device_content)
+        self.device_podcasts_tab = flat_frame(self.device_content)
+        self.device_playlists_tab = flat_frame(self.device_content)
+        self._device_subview_by_label = {
+            "Music": self.device_music_tab,
+            "Video": self.device_video_tab,
+            "Audiobooks": self.device_audiobooks_tab,
+            "Podcasts": self.device_podcasts_tab,
+            "Playlists": self.device_playlists_tab,
+        }
+        self._device_subview_frame = self.device_music_tab
+        # Notebook-compatible shim: .select() / .select(frame) for call sites.
+        self.device_notebook = _DeviceSubviewNotebook(self)
+        self.device_music_tab.pack(fill=BOTH, expand=True)
 
         d_tree_frame = Frame(self.device_music_tab)
         d_tree_frame.pack(fill=BOTH, expand=True)
@@ -1246,6 +1306,7 @@ class MainWindow:
             show="tree headings",
             # extended: Shift+click range, Ctrl/Cmd+click toggle multi-select.
             selectmode="extended",
+            style=STYLE_TREE_THUMB,
             yscrollcommand=yscroll.set,
             xscrollcommand=xscroll.set,
         )
@@ -1266,10 +1327,17 @@ class MainWindow:
 
         self._thumb_size = DEFAULT_THUMB_SIZE
         self._tree_rowheight = max(DEFAULT_THUMB_SIZE + 8, 52)
-        # Re-apply baseline with album-art row height (per-tree styles → O11).
+        self._compact_tree_rowheight = 28
+        # O11: Thumb.Treeview for art rows; Compact for flat lists.
         self._style = apply_chrome_baseline(
-            self.root, tree_rowheight=self._tree_rowheight
+            self.root,
+            compact_tree_rowheight=self._compact_tree_rowheight,
+            thumb_tree_rowheight=self._tree_rowheight,
         )
+        try:
+            self.tree.configure(style=STYLE_TREE_THUMB)
+        except Exception:
+            pass
 
         # Expander + thumbnail padding; pushes Title column to the right.
         self.tree.column(
@@ -1295,6 +1363,7 @@ class MainWindow:
             columns=TREE_COLS,
             show="tree headings",
             selectmode="extended",
+            style=STYLE_TREE_THUMB,
             yscrollcommand=d_yscroll.set,
             xscrollcommand=d_xscroll.set,
         )
@@ -1329,6 +1398,7 @@ class MainWindow:
             columns=TREE_COLS,
             show="tree headings",
             selectmode="extended",
+            style=STYLE_TREE_THUMB,
             yscrollcommand=dv_yscroll.set,
             xscrollcommand=dv_xscroll.set,
         )
@@ -1363,6 +1433,7 @@ class MainWindow:
             columns=("title",),
             show="tree headings",
             selectmode="extended",
+            style=STYLE_TREE_THUMB,
             yscrollcommand=vl_yscroll.set,
             xscrollcommand=vl_xscroll.set,
         )
@@ -1391,6 +1462,7 @@ class MainWindow:
             columns=TREE_COLS,
             show="tree headings",
             selectmode="extended",
+            style=STYLE_TREE_THUMB,
             yscrollcommand=ab_yscroll.set,
             xscrollcommand=ab_xscroll.set,
         )
@@ -1425,6 +1497,7 @@ class MainWindow:
             columns=TREE_COLS,
             show="tree headings",
             selectmode="extended",
+            style=STYLE_TREE_COMPACT,
             yscrollcommand=pl_yscroll.set,
             xscrollcommand=pl_xscroll.set,
         )
@@ -1467,6 +1540,7 @@ class MainWindow:
             columns=TREE_COLS,
             show="tree headings",
             selectmode="extended",
+            style=STYLE_TREE_THUMB,
             yscrollcommand=dab_yscroll.set,
             xscrollcommand=dab_xscroll.set,
         )
@@ -1505,6 +1579,7 @@ class MainWindow:
             columns=TREE_COLS,
             show="tree headings",
             selectmode="extended",
+            style=STYLE_TREE_COMPACT,
             yscrollcommand=dp_yscroll.set,
             xscrollcommand=dp_xscroll.set,
         )
@@ -1543,6 +1618,7 @@ class MainWindow:
             columns=TREE_COLS,
             show="tree headings",
             selectmode="extended",
+            style=STYLE_TREE_COMPACT,
             yscrollcommand=dpl_yscroll.set,
             xscrollcommand=dpl_xscroll.set,
         )
@@ -1978,8 +2054,8 @@ class MainWindow:
         if on_sync_latest is not None:
             self.btn_podcast_sync_latest.configure(command=on_sync_latest)
         if on_show_select is not None:
-            self.podcast_show_list.bind(
-                "<<ListboxSelect>>", lambda _e: on_show_select()
+            self.podcast_show_tree.bind(
+                "<<TreeviewSelect>>", lambda _e: on_show_select()
             )
         if on_episode_select is not None:
             self.podcast_episode_tree.bind(
@@ -2041,11 +2117,14 @@ class MainWindow:
 
     def popup_podcast_show_context(self, event) -> str | None:
         try:
-            idx = self.podcast_show_list.nearest(event.y)
-            if idx >= 0:
-                if idx not in self.podcast_show_list.curselection():
-                    self.podcast_show_list.selection_clear(0, END)
-                    self.podcast_show_list.selection_set(idx)
+            row = self.podcast_show_tree.identify_row(event.y)
+            if row:
+                if row not in self.podcast_show_tree.selection():
+                    self.podcast_show_tree.selection_set(row)
+                try:
+                    self.podcast_show_tree.event_generate("<<TreeviewSelect>>")
+                except Exception:
+                    pass
             self.menu_podcast_show_ctx.tk_popup(event.x_root, event.y_root)
         finally:
             try:
@@ -2569,12 +2648,64 @@ class MainWindow:
             )
 
     def show_device_playlists_tab(self) -> None:
-        """Select Device → Playlists nested notebook tab."""
+        """Select Device tab and the Playlists category subview."""
         try:
             self.media_notebook.select(self.device_tab)
-            self.device_notebook.select(self.device_playlists_tab)
+            self.show_device_subview(self.device_playlists_tab)
         except Exception:
             pass
+
+    def _on_device_category_combo(self, _event=None) -> None:
+        label = (self.var_device_category.get() or "").strip()
+        frame = self._device_subview_by_label.get(label)
+        if frame is not None:
+            self.show_device_subview(frame)
+
+    def show_device_subview(self, tab_id) -> None:
+        """Show one Device category frame (Music / Video / … / Playlists).
+
+        *tab_id* may be a frame widget or ``str(frame)`` (Notebook-compatible).
+        """
+        frames = list(self._device_subview_by_label.values())
+        target = None
+        if tab_id is None:
+            return
+        if not isinstance(tab_id, str):
+            target = tab_id
+        else:
+            for f in frames:
+                if str(f) == tab_id:
+                    target = f
+                    break
+            if target is None:
+                # Label form ("Playlists") from combobox or tests.
+                target = self._device_subview_by_label.get(tab_id)
+        if target is None or target not in frames:
+            return
+        for f in frames:
+            try:
+                if f is not target and f.winfo_ismapped():
+                    f.pack_forget()
+            except Exception:
+                pass
+        try:
+            if not target.winfo_ismapped():
+                target.pack(fill=BOTH, expand=True)
+        except Exception:
+            try:
+                target.pack(fill=BOTH, expand=True)
+            except Exception:
+                pass
+        self._device_subview_frame = target
+        # Keep combobox label in sync.
+        for label, frame in self._device_subview_by_label.items():
+            if frame is target:
+                try:
+                    if self.var_device_category.get() != label:
+                        self.var_device_category.set(label)
+                except Exception:
+                    pass
+                break
 
     def set_device_playlist_combo_values(
         self,
@@ -3250,18 +3381,20 @@ class MainWindow:
         )
 
     def active_device_tree(self):
-        """Treeview for the selected device media tab."""
+        """Treeview for the selected device media category."""
         try:
-            current = self.device_notebook.select()
+            current = self._device_subview_frame
         except Exception:
             return self.device_tree
         try:
-            if current == str(self.device_video_tab):
+            if current is self.device_video_tab:
                 return self.device_video_tree
-            if current == str(self.device_audiobooks_tab):
+            if current is self.device_audiobooks_tab:
                 return self.device_audiobooks_tree
-            if current == str(self.device_podcasts_tab):
+            if current is self.device_podcasts_tab:
                 return self.device_podcasts_tree
+            if current is self.device_playlists_tab:
+                return self.device_playlist_tree
         except Exception:
             pass
         return self.device_tree

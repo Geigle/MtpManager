@@ -489,10 +489,10 @@ class AppController:
             ),
         )
         try:
-            w.podcast_show_list.bind(
+            w.podcast_show_tree.bind(
                 "<Button-3>", w.popup_podcast_show_context
             )
-            w.podcast_show_list.bind(
+            w.podcast_show_tree.bind(
                 "<Button-2>", w.popup_podcast_show_context
             )
             w.podcast_episode_tree.bind(
@@ -1190,9 +1190,10 @@ class AppController:
     def _refresh_podcast_tab(self) -> None:
         shows = list_podcasts()
         self._podcast_ids = [p.id for p in shows]
-        lb = self.win.podcast_show_list
+        tree = self.win.podcast_show_tree
         try:
-            lb.delete(0, "end")
+            for iid in tree.get_children(""):
+                tree.delete(iid)
             for p in shows:
                 label = (p.title or p.feed_url or f"Podcast {p.id}").strip()
                 # Mark shows that have any video episode in the index.
@@ -1214,7 +1215,12 @@ class AppController:
                     sp = 1.0
                 if abs(sp - 1.0) >= 0.01:
                     label = f"{label} {sp:g}×"
-                lb.insert("end", label)
+                tree.insert(
+                    "",
+                    "end",
+                    iid=f"ps:{p.id}",
+                    values=(label,),
+                )
         except Exception:
             logger.debug("refresh podcast list failed", exc_info=True)
         has = bool(shows)
@@ -1236,10 +1242,10 @@ class AppController:
             )
         if self._selected_podcast_id is not None:
             try:
-                idx = self._podcast_ids.index(self._selected_podcast_id)
-                lb.selection_clear(0, "end")
-                lb.selection_set(idx)
-                lb.see(idx)
+                iid = f"ps:{self._selected_podcast_id}"
+                if tree.exists(iid):
+                    tree.selection_set(iid)
+                    tree.see(iid)
             except Exception:
                 pass
             self._load_podcast_episodes(self._selected_podcast_id)
@@ -1310,16 +1316,10 @@ class AppController:
             pass
 
     def on_podcast_show_select(self) -> None:
-        try:
-            sel = self.win.podcast_show_list.curselection()
-        except Exception:
-            sel = ()
-        if not sel:
+        ids = self._selected_podcast_ids()
+        if not ids:
             return
-        idx = int(sel[0])
-        if idx < 0 or idx >= len(self._podcast_ids):
-            return
-        self._selected_podcast_id = self._podcast_ids[idx]
+        self._selected_podcast_id = ids[0]
         self._load_podcast_episodes(self._selected_podcast_id)
         self._refresh_podcast_context_detail()
 
@@ -1491,15 +1491,19 @@ class AppController:
         return out
 
     def _selected_podcast_ids(self) -> list[int]:
+        """Podcast DB ids for the current show Treeview selection."""
+        out: list[int] = []
         try:
-            sel = self.win.podcast_show_list.curselection()
+            sel = self.win.podcast_show_tree.selection()
         except Exception:
             sel = ()
-        out: list[int] = []
-        for idx in sel:
-            i = int(idx)
-            if 0 <= i < len(self._podcast_ids):
-                out.append(self._podcast_ids[i])
+        for iid in sel:
+            s = str(iid)
+            if s.startswith("ps:"):
+                try:
+                    out.append(int(s.split(":", 1)[1]))
+                except ValueError:
+                    continue
         return out
 
     def on_podcast_add(self) -> None:

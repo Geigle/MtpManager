@@ -245,3 +245,21 @@ Debriefs remain the forensic narrative; this file is what we keep doing.
 **Consequences:** Controllers keep using `configure(state=DISABLED|NORMAL)` (works on ttk). Dialogs still look classic until a later phase. Glyph vs text button grammar is phase 3 (`docs/ui-visual-pass.md`).
 
 **Source:** [ui-visual-pass.md](./ui-visual-pass.md); `mtpmanager/ui/chrome.py`, `mtpmanager/ui/window.py`.
+
+---
+
+## D18 — Podcasts master–detail + Device category strip (not nested tabs)
+
+**Context:** Host Podcasts used a classic `Listbox` + vertical glyph column + episode table (O2), while Device nested a second `ttk.Notebook` of Music/Video/… under the outer media notebook (O3). Global Treeview rowheight for album art made playlist/episode rows needlessly tall (O11).
+
+**Decision (UI visual pass phase 2):**
+
+1. **Podcasts:** One **P4-like** horizontal toolbar; subscriptions and episodes are both **`ttk.Treeview`** (compact style). Layout stays **master–detail** (show list above episode table) as the **only** intentional exception to pure hierarchical media trees (P3).
+2. **Device:** Replace the nested notebook with an **“On device:”** combobox + single content frame. Keep a Notebook-compatible shim (`device_notebook.select`) for existing call sites.
+3. **Tree density:** `Thumb.Treeview` vs `Compact.Treeview` named styles in `ui/chrome.py`.
+
+**Rationale:** Shallower Device navigation and one list widget language on Podcasts without forcing podcasts into artist/album hierarchy they do not have. Dense lists where art is absent.
+
+**Consequences:** Controller podcast selection uses Treeview iids `ps:{id}` (not Listbox indices). Device UI tests should use `show_device_subview` / combobox, not nested tab geometry.
+
+**Source:** [ui-visual-pass.md](./ui-visual-pass.md); `ui/window.py`, `ui/controllers.py`, `ui/chrome.py`.
