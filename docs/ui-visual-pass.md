@@ -2,7 +2,7 @@
 
 **Purpose:** Capture the visual-element survey outcomes so a later implementation pass does not rediscover layout, control grammar, or Linux desktop blend work. **No send-path or MTP invariants change here** — UI chrome only (`mtpmanager/ui/`).
 
-**Status:** Planning / backlog. Implementation order is fixed below.
+**Status:** Phase **1 done** (flat main chrome + ttk interactive stack). Phases 2–4 still backlog.
 
 **Related code:** `mtpmanager/ui/window.py`, `dialogs.py`, light styling via Treeview tags and `_HoverTip`. No design-token module yet.
 
@@ -56,24 +56,26 @@ Full classification lives in the conversation survey; this doc only tracks work 
 
 ---
 
-## Phase 1 — §7.1 Chrome baseline (O1 + O4)
+## Phase 1 — §7.1 Chrome baseline (O1 + O4) — **DONE**
 
 **Goal:** One coherent window chrome language so later OS polish is palette/theme, not fighting Motif wells + mixed skins.
 
-**Decide first (product/design):**
+**Decision (shipped as [D17](./decisions.md)):**
 
-1. **Control stack:** Prefer one interactive set for buttons/entries/checkbuttons/scrollbars — either move toward **themed `ttk`** for interactive chrome, or deliberately keep classic `tk` but stop mixing ad hoc (pick a default and document it in a short ADR if behavior changes).
-2. **Frame language:** Reduce nested sunken frames. Target: one content surface + optional sidebar separation (flat or hairline), not five simultaneous wells.
+1. **Control stack:** Main-window interactive chrome → **ttk** (`Button`, `Entry`, `Scrollbar` + existing Notebook/Treeview/Combobox/Progressbar/Scale). Styles `Compact.TButton` / `Tool.TButton` in `ui/chrome.py`.
+2. **Frame language:** Flat layout frames + `ttk.Separator` hairlines (toolbar, sidebar split, bottom). No stacked sunken wells on the main window.
 
-**Likely touch surfaces:**
+**Shipped surfaces:**
 
-- `MainWindow.__init__` packing: root / library toolbar / leftframe / rightframe / bottomframe relief
-- Any global `ttk.Style` setup (today only Treeview `rowheight`)
-- Dialog shells that copy sunken/pad patterns only if they inherit the new baseline
+- `mtpmanager/ui/chrome.py` — baseline helper
+- `mtpmanager/ui/window.py` — packing + interactive widgets
+- ADR: [decisions.md](./decisions.md) D17
 
-**Out of scope for phase 1:** Rewriting Podcasts layout (phase 2), button glyphs (phase 3), platform themes (phase 4).
+**Documented exceptions (still classic tk):** `Menu`; `Text` / `Listbox`; `Label` (incl. device `PhotoImage`); `_HoverTip`; **all of `dialogs.py`**.
 
-**Done when:** Main window no longer reads as stacked MDI boxes; interactive controls no longer visibly flip between two toolkits in the same strip (or remaining exceptions are listed).
+**Out of scope for phase 1 (unchanged):** Podcasts IA (phase 2), button glyphs (phase 3), platform themes (phase 4).
+
+**Done when:** Main window no longer reads as stacked MDI boxes; interactive controls no longer visibly flip between two toolkits in the same strip (or remaining exceptions are listed). ✅
 
 ---
 
@@ -305,3 +307,4 @@ Do **not** fold visual chrome into `domain/` or transport paths. Prefer durable 
 | Date | Note |
 |------|------|
 | 2026-08-08 | Inventory captured; phases 1→2→3→4a (macOS)→4b/4c (KDE/GNOME later) agreed. KDE/GNOME recommendations documented for deferred Linux testing. |
+| 2026-08-08 | **Phase 1 shipped:** flat main frames + separators; ttk main interactive stack; D17; `ui/chrome.py`. Dialogs deferred. |

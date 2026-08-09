@@ -227,3 +227,21 @@ Debriefs remain the forensic narrative; this file is what we keep doing.
 **Consequences:** Objects sent before the fix keep bloat until deleted and re-synced. Convert temps will not carry ID3 APIC from the source (MTP tags still come from host `TrackMetadata`). Changing ffmpeg option maps without preserving audio-only is a regression class — see the debrief.
 
 **Source:** [debrief-ffmpeg-cover-art-bloat.md](./debrief-ffmpeg-cover-art-bloat.md); `infra/ffmpeg_transcode.py` (`_audio_only_map_options`); `tests/test_audio_encode.py`.
+
+---
+
+## D17 — Main-window chrome: flat frames + ttk interactive stack
+
+**Context:** The main window mixed classic Motif-like sunken `Frame` wells (root, toolbar, left/right, bottom) with selective `ttk` (Notebook, Treeview, Combobox, Progressbar, Scale) and classic `Button`/`Entry`/`Scrollbar` in the same strips — high visual complexity and a poor base for macOS / KDE / GNOME polish.
+
+**Decision (UI visual pass phase 1):**
+
+1. **Frame language:** Main layout regions are **flat** (`borderwidth=0`, no sunken relief). Hairline `ttk.Separator` marks toolbar↔body, sidebar↔content, and body↔bottom.
+2. **Control stack:** Main-window **interactive** controls prefer **ttk** (`Button`, `Entry`, `Scrollbar`, plus existing Notebook/Treeview/Combobox/Progressbar/Scale). Shared setup lives in `mtpmanager/ui/chrome.py` (`apply_chrome_baseline`, `flat_frame`, separators). Platform theme still defaults (Aqua on macOS); Linux desktop themes are phase 4b/4c.
+3. **Documented classic-tk exceptions:** `Menu`; `Text` / `Listbox`; `Label` (including `PhotoImage` device graphic); custom `_HoverTip`; **dialogs** in `dialogs.py` (not rewritten in phase 1).
+
+**Rationale:** One chrome language so later OS blend is palette/theme, not undoing nested MDI wells. ttk on interactive strips removes the dual-skin look without a Qt/GTK rewrite.
+
+**Consequences:** Controllers keep using `configure(state=DISABLED|NORMAL)` (works on ttk). Dialogs still look classic until a later phase. Glyph vs text button grammar is phase 3 (`docs/ui-visual-pass.md`).
+
+**Source:** [ui-visual-pass.md](./ui-visual-pass.md); `mtpmanager/ui/chrome.py`, `mtpmanager/ui/window.py`.

@@ -1,4 +1,8 @@
-"""Tk layout only — widgets and packing."""
+"""Tk layout only — widgets and packing.
+
+Main-window chrome baseline (phase 1): flat frames + ttk interactive
+controls via ``mtpmanager.ui.chrome``. See ``docs/ui-visual-pass.md``.
+"""
 
 from __future__ import annotations
 
@@ -12,7 +16,6 @@ from tkinter import (
     BOTH,
     BOTTOM,
     BooleanVar,
-    Button,
     DISABLED,
     DoubleVar,
     END,
@@ -23,18 +26,23 @@ from tkinter import (
     WORD,
     X,
     Y,
-    Entry,
     Frame,
     Label,
     Listbox,
     Menu,
     PhotoImage,
-    Scrollbar,
     StringVar,
     Text,
     Tk,
     Toplevel,
     ttk,
+)
+
+from mtpmanager.ui.chrome import (
+    apply_chrome_baseline,
+    flat_frame,
+    h_separator,
+    v_separator,
 )
 
 Mode = Literal["stable", "experimental"]
@@ -459,8 +467,12 @@ class MainWindow:
         self.root = root or Tk()
         self.root.title("MTP Manager")
         self.root.geometry("1000x600")
-        self.root["borderwidth"] = 1
-        self.root["relief"] = "sunken"
+        # Flat chrome (phase 1): no sunken root well — see ui/chrome.py / D17.
+        try:
+            self.root.configure(borderwidth=0, highlightthickness=0)
+        except Exception:
+            pass
+        self._style = apply_chrome_baseline(self.root)
 
         # Menubar: Library | Transfer | Device | View | Config
         self.menubar = Menu(self.root)
@@ -654,9 +666,9 @@ class MainWindow:
 
         self._prepare_device_context_menu = None
 
-        # Status toolbar: path + fuzzy search + track count.
-        library_toolbar = Frame(self.root, borderwidth=1, relief="sunken")
-        library_toolbar.pack(side=TOP, fill=X, padx=2, pady=2)
+        # Status toolbar: path + fuzzy search + track count (flat strip).
+        library_toolbar = flat_frame(self.root)
+        library_toolbar.pack(side=TOP, fill=X, padx=4, pady=(4, 2))
         self.library_toolbar = library_toolbar
 
         Label(library_toolbar, text="Library:").pack(side=LEFT, padx=(6, 2), pady=4)
@@ -671,7 +683,7 @@ class MainWindow:
 
         Label(library_toolbar, text="Search:").pack(side=LEFT, padx=(8, 2), pady=4)
         self.var_library_search = StringVar(value="")
-        self.entry_library_search = Entry(
+        self.entry_library_search = ttk.Entry(
             library_toolbar,
             textvariable=self.var_library_search,
             width=22,
@@ -684,8 +696,12 @@ class MainWindow:
             "Example: artist:nightwish ocean\n"
             "⌘F / Ctrl+F focus · Esc clear"
         )
-        self.btn_library_search_clear = Button(
-            library_toolbar, text="×", width=2, state=DISABLED
+        self.btn_library_search_clear = ttk.Button(
+            library_toolbar,
+            text="×",
+            width=2,
+            style="Compact.TButton",
+            state=DISABLED,
         )
         self.btn_library_search_clear.pack(side=LEFT, padx=(0, 4), pady=2)
         self._on_library_search_change = None
@@ -694,16 +710,16 @@ class MainWindow:
         self.lbl_library_count = Label(library_toolbar, text="0 tracks")
         self.lbl_library_count.pack(side=LEFT, padx=(4, 8), pady=4)
 
+        h_separator(self.root).pack(side=TOP, fill=X)
+
         # Pack bottom bar *before* the expanding body so it always keeps a
         # visible strip (Tk expand can otherwise starve a late BOTTOM pack).
-        bottomframe = Frame(self.root)
-        bottomframe["borderwidth"] = 1
-        bottomframe["relief"] = "sunken"
+        bottomframe = flat_frame(self.root)
         bottomframe.pack(side=BOTTOM, fill=X)
         self.bottomframe = bottomframe
 
         # Playback controls (hidden unless playing or View → always show).
-        self.playback_row = Frame(bottomframe)
+        self.playback_row = flat_frame(bottomframe)
         self._playback_row_visible = False
         self._playback_always_show = False
         self._playback_session_active = False
@@ -721,14 +737,26 @@ class MainWindow:
         self._playback_title_offset = 0
         self._playback_marquee_after_id: str | None = None
 
-        self.btn_playback_prev = Button(
-            self.playback_row, text="Prev", width=5, state=DISABLED
+        self.btn_playback_prev = ttk.Button(
+            self.playback_row,
+            text="Prev",
+            width=5,
+            style="Tool.TButton",
+            state=DISABLED,
         )
-        self.btn_playback_play = Button(
-            self.playback_row, text="Play", width=6, state=DISABLED
+        self.btn_playback_play = ttk.Button(
+            self.playback_row,
+            text="Play",
+            width=6,
+            style="Tool.TButton",
+            state=DISABLED,
         )
-        self.btn_playback_next = Button(
-            self.playback_row, text="Next", width=5, state=DISABLED
+        self.btn_playback_next = ttk.Button(
+            self.playback_row,
+            text="Next",
+            width=5,
+            style="Tool.TButton",
+            state=DISABLED,
         )
         self.var_playback_scrub = DoubleVar(value=0.0)
         self.playback_scrub = ttk.Scale(
@@ -748,8 +776,11 @@ class MainWindow:
             anchor="w",
             width=_PLAYBACK_TITLE_WIDTH,
         )
-        self.btn_playback_close = Button(
-            self.playback_row, text="×", width=3
+        self.btn_playback_close = ttk.Button(
+            self.playback_row,
+            text="×",
+            width=3,
+            style="Compact.TButton",
         )
         # Layout: [Prev] [Play] [Next] [title] [====scrub====] [time] [×]
         self.btn_playback_prev.pack(side=LEFT, padx=(4, 2), pady=4)
@@ -776,12 +807,13 @@ class MainWindow:
         self.lbl_progress_status.pack(side=TOP, fill=X, padx=8, pady=(4, 0))
 
         # Progress + Cancel (always mapped; Cancel enabled only while a job runs).
-        self.progress_row = Frame(bottomframe)
+        self.progress_row = flat_frame(bottomframe)
         self.progress_row.pack(side=TOP, fill=X, padx=4, pady=(2, 4))
-        self.btn_cancel_job = Button(
+        self.btn_cancel_job = ttk.Button(
             self.progress_row,
             text="Cancel",
             width=12,
+            style="Tool.TButton",
             state=DISABLED,
         )
         # Pack Cancel first on the right so the progress bar cannot cover it.
@@ -789,25 +821,26 @@ class MainWindow:
         self.progress = ttk.Progressbar(self.progress_row, length=200)
         self.progress.pack(side=LEFT, fill=X, expand=True, padx=(2, 0), pady=2)
 
-        body = Frame(self.root)
+        # Hairline above the bottom strip (after bottomframe so it sits above it).
+        h_separator(self.root).pack(side=BOTTOM, fill=X)
+
+        body = flat_frame(self.root)
         body.pack(side=TOP, fill=BOTH, expand=True)
 
         # Fixed-width left column: context (selection) + device subframes.
-        leftframe = Frame(body, width=_LEFT_PANEL_WIDTH)
-        leftframe["borderwidth"] = 1
-        leftframe["relief"] = "sunken"
+        leftframe = flat_frame(body, width=_LEFT_PANEL_WIDTH)
         leftframe.pack(side=LEFT, fill=Y)
         leftframe.pack_propagate(False)
         self.leftframe = leftframe
 
-        rightframe = Frame(body)
-        rightframe["borderwidth"] = 1
-        rightframe["relief"] = "sunken"
+        v_separator(body).pack(side=LEFT, fill=Y)
+
+        rightframe = flat_frame(body)
         rightframe.pack(side=RIGHT, fill=BOTH, expand=True)
 
         # --- Device subframe: fixed height, locked to bottom of leftframe ---
         # Pack BOTTOM first so Selection fills the remaining space above.
-        self.device_panel = Frame(
+        self.device_panel = flat_frame(
             leftframe, width=_LEFT_PANEL_WIDTH - 6, height=_DEVICE_PANEL_HEIGHT
         )
         self.device_panel.pack(side=BOTTOM, fill=X, padx=3, pady=(2, 6))
@@ -827,7 +860,7 @@ class MainWindow:
         )
         self.lbl_device_caption.pack(padx=6, pady=(4, 0), anchor="w")
         # Fixed-height slot so profile art cannot grow the device panel.
-        self.device_graphic_slot = Frame(
+        self.device_graphic_slot = flat_frame(
             self.device_panel, height=_DEVICE_GRAPHIC_HEIGHT
         )
         self.device_graphic_slot.pack(padx=6, pady=6, fill=X)
@@ -841,7 +874,7 @@ class MainWindow:
 
         # --- Context subframe: startup hint, then selection metadata ---
         # Fills all space above the bottom-locked device panel.
-        self.context_panel = Frame(leftframe)
+        self.context_panel = flat_frame(leftframe)
         self.context_panel.pack(
             side=TOP, fill=BOTH, expand=True, padx=3, pady=(6, 2)
         )
@@ -855,11 +888,11 @@ class MainWindow:
         self._context_detail = ""
         self._context_path = ""
         # Scrollable body: long podcast descriptions / multi-line selection text.
-        self.context_body = Frame(self.context_panel)
+        self.context_body = flat_frame(self.context_panel)
         self.context_body.pack(
             side=TOP, fill=BOTH, expand=True, padx=4, pady=(4, 0)
         )
-        self.context_scroll = Scrollbar(self.context_body)
+        self.context_scroll = ttk.Scrollbar(self.context_body)
         self.context_scroll.pack(side=RIGHT, fill=Y)
         self.txt_context_detail = Text(
             self.context_body,
@@ -943,7 +976,7 @@ class MainWindow:
         pod_sub_row.pack(side=TOP, fill=BOTH, expand=True)
         pod_sub_list_frame = Frame(pod_sub_row)
         pod_sub_list_frame.pack(side=LEFT, fill=BOTH, expand=True)
-        pod_sub_scroll = Scrollbar(pod_sub_list_frame)
+        pod_sub_scroll = ttk.Scrollbar(pod_sub_list_frame)
         pod_sub_scroll.pack(side=RIGHT, fill=Y)
         self.podcast_show_list = Listbox(
             pod_sub_list_frame,
@@ -956,15 +989,25 @@ class MainWindow:
         pod_sub_scroll.config(command=self.podcast_show_list.yview)
         pod_sub_btns = Frame(pod_sub_row)
         pod_sub_btns.pack(side=LEFT, fill=Y, padx=(6, 0))
-        self.btn_podcast_add = Button(pod_sub_btns, text="+", width=3)
+        self.btn_podcast_add = ttk.Button(
+            pod_sub_btns, text="+", width=3, style="Compact.TButton"
+        )
         self.btn_podcast_add.pack(side=TOP, pady=(0, 4))
-        self.btn_podcast_remove = Button(
-            pod_sub_btns, text="−", width=3, state=DISABLED
+        self.btn_podcast_remove = ttk.Button(
+            pod_sub_btns,
+            text="−",
+            width=3,
+            style="Compact.TButton",
+            state=DISABLED,
         )
         self.btn_podcast_remove.pack(side=TOP, pady=(0, 4))
         # Manual re-fetch of selected show feed(s) for new episodes.
-        self.btn_podcast_refresh = Button(
-            pod_sub_btns, text="↻", width=3, state=DISABLED
+        self.btn_podcast_refresh = ttk.Button(
+            pod_sub_btns,
+            text="↻",
+            width=3,
+            style="Compact.TButton",
+            state=DISABLED,
         )
         self.btn_podcast_refresh.pack(side=TOP)
 
@@ -974,16 +1017,19 @@ class MainWindow:
             pod_ep_header, text="Episodes", font=("", 11, "bold"), anchor="w"
         )
         self.lbl_podcast_episodes.pack(side=LEFT, fill=X, expand=True)
-        self.btn_podcast_more = Button(
-            pod_ep_header, text="More Episodes", state=DISABLED
+        self.btn_podcast_more = ttk.Button(
+            pod_ep_header,
+            text="More Episodes",
+            style="Tool.TButton",
+            state=DISABLED,
         )
         self.btn_podcast_more.pack(side=RIGHT)
 
         pod_ep_frame = Frame(pod_outer)
         pod_ep_frame.pack(side=TOP, fill=BOTH, expand=True)
-        pod_ep_yscroll = Scrollbar(pod_ep_frame)
+        pod_ep_yscroll = ttk.Scrollbar(pod_ep_frame)
         pod_ep_yscroll.pack(side=RIGHT, fill=Y)
-        pod_ep_xscroll = Scrollbar(pod_ep_frame, orient="horizontal")
+        pod_ep_xscroll = ttk.Scrollbar(pod_ep_frame, orient="horizontal")
         pod_ep_xscroll.pack(side=BOTTOM, fill=X)
         self.podcast_episode_tree = ttk.Treeview(
             pod_ep_frame,
@@ -1015,8 +1061,11 @@ class MainWindow:
 
         pod_bottom = Frame(pod_outer)
         pod_bottom.pack(side=TOP, fill=X, pady=(8, 0))
-        self.btn_podcast_sync_latest = Button(
-            pod_bottom, text="Sync Latest", state=DISABLED
+        self.btn_podcast_sync_latest = ttk.Button(
+            pod_bottom,
+            text="Sync Latest",
+            style="Tool.TButton",
+            state=DISABLED,
         )
         self.btn_podcast_sync_latest.pack(side=LEFT)
         self.lbl_podcast_status = Label(pod_bottom, text="", anchor="w")
@@ -1034,26 +1083,47 @@ class MainWindow:
             width=36,
         )
         self.playlist_combo.pack(side=LEFT, padx=2)
-        self.btn_playlist_rename = Button(
-            pl_toolbar, text="Rename…", width=9, state=DISABLED
+        self.btn_playlist_rename = ttk.Button(
+            pl_toolbar,
+            text="Rename…",
+            width=9,
+            style="Tool.TButton",
+            state=DISABLED,
         )
         self.btn_playlist_rename.pack(side=LEFT, padx=2)
-        self.btn_playlist_new = Button(pl_toolbar, text="+", width=3)
+        self.btn_playlist_new = ttk.Button(
+            pl_toolbar, text="+", width=3, style="Compact.TButton"
+        )
         self.btn_playlist_new.pack(side=LEFT, padx=2)
-        self.btn_playlist_delete = Button(
-            pl_toolbar, text="−", width=3, state=DISABLED
+        self.btn_playlist_delete = ttk.Button(
+            pl_toolbar,
+            text="−",
+            width=3,
+            style="Compact.TButton",
+            state=DISABLED,
         )
         self.btn_playlist_delete.pack(side=LEFT, padx=2)
-        self.btn_playlist_sync = Button(
-            pl_toolbar, text="Sync playlist to device", state=DISABLED
+        self.btn_playlist_sync = ttk.Button(
+            pl_toolbar,
+            text="Sync playlist to device",
+            style="Tool.TButton",
+            state=DISABLED,
         )
         self.btn_playlist_sync.pack(side=LEFT, padx=(8, 2))
-        self.btn_playlist_move_up = Button(
-            pl_toolbar, text="↑", width=3, state=DISABLED
+        self.btn_playlist_move_up = ttk.Button(
+            pl_toolbar,
+            text="↑",
+            width=3,
+            style="Compact.TButton",
+            state=DISABLED,
         )
         self.btn_playlist_move_up.pack(side=LEFT, padx=(8, 1))
-        self.btn_playlist_move_down = Button(
-            pl_toolbar, text="↓", width=3, state=DISABLED
+        self.btn_playlist_move_down = ttk.Button(
+            pl_toolbar,
+            text="↓",
+            width=3,
+            style="Compact.TButton",
+            state=DISABLED,
         )
         self.btn_playlist_move_down.pack(side=LEFT, padx=1)
         self.lbl_playlist_status = Label(pl_toolbar, text="", anchor="w")
@@ -1101,32 +1171,58 @@ class MainWindow:
             width=36,
         )
         self.device_playlist_combo.pack(side=LEFT, padx=2)
-        self.btn_device_playlist_rename = Button(
-            dpl_toolbar, text="Rename…", width=9, state=DISABLED
+        self.btn_device_playlist_rename = ttk.Button(
+            dpl_toolbar,
+            text="Rename…",
+            width=9,
+            style="Tool.TButton",
+            state=DISABLED,
         )
         self.btn_device_playlist_rename.pack(side=LEFT, padx=2)
-        self.btn_device_playlist_new = Button(
-            dpl_toolbar, text="+", width=3, state=DISABLED
+        self.btn_device_playlist_new = ttk.Button(
+            dpl_toolbar,
+            text="+",
+            width=3,
+            style="Compact.TButton",
+            state=DISABLED,
         )
         self.btn_device_playlist_new.pack(side=LEFT, padx=2)
-        self.btn_device_playlist_delete = Button(
-            dpl_toolbar, text="−", width=3, state=DISABLED
+        self.btn_device_playlist_delete = ttk.Button(
+            dpl_toolbar,
+            text="−",
+            width=3,
+            style="Compact.TButton",
+            state=DISABLED,
         )
         self.btn_device_playlist_delete.pack(side=LEFT, padx=2)
-        self.btn_device_playlist_refresh = Button(
-            dpl_toolbar, text="Refresh from device", state=DISABLED
+        self.btn_device_playlist_refresh = ttk.Button(
+            dpl_toolbar,
+            text="Refresh from device",
+            style="Tool.TButton",
+            state=DISABLED,
         )
         self.btn_device_playlist_refresh.pack(side=LEFT, padx=(8, 2))
-        self.btn_device_playlist_recreate = Button(
-            dpl_toolbar, text="Recreate locally…", state=DISABLED
+        self.btn_device_playlist_recreate = ttk.Button(
+            dpl_toolbar,
+            text="Recreate locally…",
+            style="Tool.TButton",
+            state=DISABLED,
         )
         self.btn_device_playlist_recreate.pack(side=LEFT, padx=2)
-        self.btn_device_playlist_move_up = Button(
-            dpl_toolbar, text="↑", width=3, state=DISABLED
+        self.btn_device_playlist_move_up = ttk.Button(
+            dpl_toolbar,
+            text="↑",
+            width=3,
+            style="Compact.TButton",
+            state=DISABLED,
         )
         self.btn_device_playlist_move_up.pack(side=LEFT, padx=(8, 1))
-        self.btn_device_playlist_move_down = Button(
-            dpl_toolbar, text="↓", width=3, state=DISABLED
+        self.btn_device_playlist_move_down = ttk.Button(
+            dpl_toolbar,
+            text="↓",
+            width=3,
+            style="Compact.TButton",
+            state=DISABLED,
         )
         self.btn_device_playlist_move_down.pack(side=LEFT, padx=1)
         self.lbl_device_playlist_status = Label(
@@ -1139,9 +1235,9 @@ class MainWindow:
         dpl_tree_frame = Frame(self.device_playlists_tab)
         dpl_tree_frame.pack(side=TOP, fill=BOTH, expand=True)
 
-        yscroll = Scrollbar(tree_frame)
+        yscroll = ttk.Scrollbar(tree_frame)
         yscroll.pack(side=RIGHT, fill=Y)
-        xscroll = Scrollbar(tree_frame, orient="horizontal")
+        xscroll = ttk.Scrollbar(tree_frame, orient="horizontal")
         xscroll.pack(side=BOTTOM, fill=X)
 
         self.tree = ttk.Treeview(
@@ -1170,11 +1266,10 @@ class MainWindow:
 
         self._thumb_size = DEFAULT_THUMB_SIZE
         self._tree_rowheight = max(DEFAULT_THUMB_SIZE + 8, 52)
-        style = ttk.Style(self.root)
-        try:
-            style.configure("Treeview", rowheight=self._tree_rowheight)
-        except Exception:
-            pass
+        # Re-apply baseline with album-art row height (per-tree styles → O11).
+        self._style = apply_chrome_baseline(
+            self.root, tree_rowheight=self._tree_rowheight
+        )
 
         # Expander + thumbnail padding; pushes Title column to the right.
         self.tree.column(
@@ -1190,9 +1285,9 @@ class MainWindow:
         self.tree.column("year", width=56, minwidth=40, stretch=False)
 
         # Device music tree (same columns/grouping as the library tree).
-        d_yscroll = Scrollbar(d_tree_frame)
+        d_yscroll = ttk.Scrollbar(d_tree_frame)
         d_yscroll.pack(side=RIGHT, fill=Y)
-        d_xscroll = Scrollbar(d_tree_frame, orient="horizontal")
+        d_xscroll = ttk.Scrollbar(d_tree_frame, orient="horizontal")
         d_xscroll.pack(side=BOTTOM, fill=X)
 
         self.device_tree = ttk.Treeview(
@@ -1224,9 +1319,9 @@ class MainWindow:
         self.device_tree.column("year", width=56, minwidth=40, stretch=False)
 
         # Device video tree (same columns; grouped by Video / TV folder).
-        dv_yscroll = Scrollbar(dv_tree_frame)
+        dv_yscroll = ttk.Scrollbar(dv_tree_frame)
         dv_yscroll.pack(side=RIGHT, fill=Y)
-        dv_xscroll = Scrollbar(dv_tree_frame, orient="horizontal")
+        dv_xscroll = ttk.Scrollbar(dv_tree_frame, orient="horizontal")
         dv_xscroll.pack(side=BOTTOM, fill=X)
 
         self.device_video_tree = ttk.Treeview(
@@ -1258,9 +1353,9 @@ class MainWindow:
         self.device_video_tree.column("year", width=56, minwidth=40, stretch=False)
 
         # Library video tree: folder → files; title column only (filename).
-        vl_yscroll = Scrollbar(vl_tree_frame)
+        vl_yscroll = ttk.Scrollbar(vl_tree_frame)
         vl_yscroll.pack(side=RIGHT, fill=Y)
-        vl_xscroll = Scrollbar(vl_tree_frame, orient="horizontal")
+        vl_xscroll = ttk.Scrollbar(vl_tree_frame, orient="horizontal")
         vl_xscroll.pack(side=BOTTOM, fill=X)
 
         self.videos_tree = ttk.Treeview(
@@ -1286,9 +1381,9 @@ class MainWindow:
         self.videos_tree.column("title", width=420, minwidth=120, stretch=True)
 
         # Library audiobooks tree (same columns; Author → Album - Year grouping).
-        ab_yscroll = Scrollbar(ab_tree_frame)
+        ab_yscroll = ttk.Scrollbar(ab_tree_frame)
         ab_yscroll.pack(side=RIGHT, fill=Y)
-        ab_xscroll = Scrollbar(ab_tree_frame, orient="horizontal")
+        ab_xscroll = ttk.Scrollbar(ab_tree_frame, orient="horizontal")
         ab_xscroll.pack(side=BOTTOM, fill=X)
 
         self.audiobooks_tree = ttk.Treeview(
@@ -1320,9 +1415,9 @@ class MainWindow:
         self.audiobooks_tree.column("year", width=56, minwidth=40, stretch=False)
 
         # Playlists tab tree (flat ordered list; same columns as Music).
-        pl_yscroll = Scrollbar(pl_tree_frame)
+        pl_yscroll = ttk.Scrollbar(pl_tree_frame)
         pl_yscroll.pack(side=RIGHT, fill=Y)
-        pl_xscroll = Scrollbar(pl_tree_frame, orient="horizontal")
+        pl_xscroll = ttk.Scrollbar(pl_tree_frame, orient="horizontal")
         pl_xscroll.pack(side=BOTTOM, fill=X)
 
         self.playlist_tree = ttk.Treeview(
@@ -1362,9 +1457,9 @@ class MainWindow:
         )
 
         # Device audiobooks tree (same columns/grouping as library audiobooks).
-        dab_yscroll = Scrollbar(dab_tree_frame)
+        dab_yscroll = ttk.Scrollbar(dab_tree_frame)
         dab_yscroll.pack(side=RIGHT, fill=Y)
-        dab_xscroll = Scrollbar(dab_tree_frame, orient="horizontal")
+        dab_xscroll = ttk.Scrollbar(dab_tree_frame, orient="horizontal")
         dab_xscroll.pack(side=BOTTOM, fill=X)
 
         self.device_audiobooks_tree = ttk.Treeview(
@@ -1400,9 +1495,9 @@ class MainWindow:
         )
 
         # Device podcasts tree (ZENcast / show folder → episodes; audio + video).
-        dp_yscroll = Scrollbar(dp_tree_frame)
+        dp_yscroll = ttk.Scrollbar(dp_tree_frame)
         dp_yscroll.pack(side=RIGHT, fill=Y)
-        dp_xscroll = Scrollbar(dp_tree_frame, orient="horizontal")
+        dp_xscroll = ttk.Scrollbar(dp_tree_frame, orient="horizontal")
         dp_xscroll.pack(side=BOTTOM, fill=X)
 
         self.device_podcasts_tree = ttk.Treeview(
@@ -1438,9 +1533,9 @@ class MainWindow:
         )
 
         # Device → Playlists tree (flat ordered list; same columns as host Playlists).
-        dpl_yscroll = Scrollbar(dpl_tree_frame)
+        dpl_yscroll = ttk.Scrollbar(dpl_tree_frame)
         dpl_yscroll.pack(side=RIGHT, fill=Y)
-        dpl_xscroll = Scrollbar(dpl_tree_frame, orient="horizontal")
+        dpl_xscroll = ttk.Scrollbar(dpl_tree_frame, orient="horizontal")
         dpl_xscroll.pack(side=BOTTOM, fill=X)
 
         self.device_playlist_tree = ttk.Treeview(
