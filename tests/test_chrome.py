@@ -1,4 +1,4 @@
-"""Unit tests for main-window chrome (visual pass phases 1–2)."""
+"""Unit tests for main-window chrome (visual pass phases 1–3)."""
 
 from __future__ import annotations
 
@@ -6,10 +6,19 @@ import unittest
 from tkinter import Tk
 
 from mtpmanager.ui.chrome import (
+    GLYPH_ADD,
+    GLYPH_DISMISS,
+    GLYPH_REMOVE,
+    LABEL_MOVE_DOWN,
+    LABEL_MOVE_UP,
+    LABEL_REFRESH,
     STYLE_TREE_COMPACT,
     STYLE_TREE_THUMB,
     apply_chrome_baseline,
     flat_frame,
+    make_ttk_scale,
+    snap_scale_value,
+    time_of_day_row,
 )
 from mtpmanager.ui.window import MainWindow
 
@@ -81,6 +90,37 @@ class ChromeBaselineTests(unittest.TestCase):
         self.assertEqual(
             str(win.device_playlist_tree.cget("style")), STYLE_TREE_COMPACT
         )
+
+    def test_phase3_button_grammar_ascii_glyphs(self) -> None:
+        win = MainWindow(self.root)
+        self.assertEqual(win.btn_library_search_clear.cget("text"), GLYPH_DISMISS)
+        self.assertEqual(win.btn_playback_close.cget("text"), GLYPH_DISMISS)
+        self.assertEqual(win.btn_podcast_add.cget("text"), GLYPH_ADD)
+        self.assertEqual(win.btn_podcast_remove.cget("text"), GLYPH_REMOVE)
+        self.assertEqual(win.btn_podcast_refresh.cget("text"), LABEL_REFRESH)
+        self.assertEqual(win.btn_playlist_move_up.cget("text"), LABEL_MOVE_UP)
+        self.assertEqual(win.btn_playlist_move_down.cget("text"), LABEL_MOVE_DOWN)
+        self.assertEqual(win.btn_playlist_new.cget("text"), GLYPH_ADD)
+        self.assertEqual(win.btn_device_playlist_move_up.cget("text"), LABEL_MOVE_UP)
+
+    def test_phase3_snap_scale_and_ttk_scale(self) -> None:
+        self.assertEqual(
+            snap_scale_value(2.4, from_=0, to=10, resolution=0.5), 2.5
+        )
+        self.assertEqual(snap_scale_value(7.2, from_=0, to=12, resolution=1), 7)
+        scale, var = make_ttk_scale(
+            self.root, from_=0, to=10, value=3, resolution=1
+        )
+        self.assertEqual(scale.winfo_class(), "TScale")
+        self.assertAlmostEqual(float(var.get()), 3.0)
+
+    def test_phase3_time_of_day_comboboxes(self) -> None:
+        frame, getter = time_of_day_row(self.root, initial_hhmm="18:30")
+        self.assertEqual(getter(), "18:30")
+        frame2, getter2 = time_of_day_row(self.root, initial_hhmm="00:05")
+        self.assertEqual(getter2(), "00:05")
+        frame3, getter3 = time_of_day_row(self.root, initial_hhmm="12:00")
+        self.assertEqual(getter3(), "12:00")
 
 
 if __name__ == "__main__":

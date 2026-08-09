@@ -1,37 +1,40 @@
-"""Main-window chrome baseline (UI visual pass phases 1–2).
+"""Main-window chrome + control grammar (UI visual pass phases 1–3).
 
-**Control stack (O1):** Interactive chrome on the main window prefers **ttk**
-(Button, Entry, Scrollbar, Notebook, Treeview, Combobox, Progressbar, Scale,
-Separator) so strips do not mix Motif-like classic controls with themed ones.
+**Control stack (O1):** Interactive chrome prefers **ttk** (Button, Entry,
+Scrollbar, Notebook, Treeview, Combobox, Progressbar, Scale, Separator).
 
-**Frame language (O4):** Layout regions use flat frames (no stacked sunken
-wells). Hairline ``ttk.Separator`` marks toolbar / body / bottom and the
-sidebar split.
+**Frame language (O4):** Flat frames + hairline separators.
 
-**Tree row heights (O11):** Named styles so album-art trees can be tall without
-forcing empty bulk on playlist / episode / subscription lists:
+**Tree row heights (O11):** ``Thumb.Treeview`` vs ``Compact.Treeview``.
 
-- ``Thumb.Treeview`` — library/device rows that show album art
-- ``Compact.Treeview`` — flat lists (playlists, episodes, shows)
-- default ``Treeview`` — same as Compact unless a caller sets ``tree_rowheight``
+**Control grammar (O5–O7, phase 3):**
+
+| Role | Style / widget | Label / pattern |
+|------|----------------|-----------------|
+| Add / remove | ``Compact.TButton`` | ASCII ``+`` / ``-`` |
+| Dismiss / clear | ``Compact.TButton`` | ASCII ``x`` |
+| Move up / down | ``Compact.TButton`` | Short English ``Up`` / ``Dn`` |
+| Refresh | ``Tool.TButton`` | ``Refresh`` (not Unicode arrows) |
+| Primary / tool | ``Tool.TButton`` | Short English (Play, Cancel, Sync…) |
+| Continuous value | **``ttk.Scale`` only** | via :func:`make_ttk_scale` |
+| Integer spin | ``ttk.Spinbox`` when available | else Entry |
+| Time of day | Combobox hour + minute + AM/PM | :func:`time_of_day_row` |
 
 **Still classic tk (documented exceptions):**
 
-- ``Menu`` (native menubar / context menus)
-- ``Text`` / ``Listbox`` (dialogs and legacy; main Podcasts shows are Treeview)
-- ``Label`` for ``PhotoImage`` (device graphic, album thumbs live on Treeview)
-- ``_HoverTip`` (custom overrideredirect panel)
-- Dialogs in ``dialogs.py`` — not rewritten in phase 1–2
+- ``Menu``; ``Text`` / ``Listbox`` (dialogs); ``Label`` + ``PhotoImage``;
+  ``_HoverTip``; many dialog ``Button``/``Checkbutton`` shells (phase 4+).
 
-Platform theme polish (Aqua / Breeze / Adwaita) is phase 4. See
-``docs/ui-visual-pass.md``.
+See ``docs/ui-visual-pass.md``.
 """
 
 from __future__ import annotations
 
 import logging
+import math
 import sys
-from tkinter import Frame, ttk
+from collections.abc import Callable
+from tkinter import DoubleVar, Frame, StringVar, ttk
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +44,16 @@ DEFAULT_THUMB_TREE_ROWHEIGHT = 52
 
 STYLE_TREE_COMPACT = "Compact.Treeview"
 STYLE_TREE_THUMB = "Thumb.Treeview"
+STYLE_BTN_COMPACT = "Compact.TButton"
+STYLE_BTN_TOOL = "Tool.TButton"
+
+# --- O5: compact glyphs / short labels (ASCII-first for font portability) ---
+GLYPH_ADD = "+"
+GLYPH_REMOVE = "-"
+GLYPH_DISMISS = "x"
+LABEL_MOVE_UP = "Up"
+LABEL_MOVE_DOWN = "Dn"
+LABEL_REFRESH = "Refresh"
 
 
 def preferred_ttk_theme() -> str | None:
@@ -76,10 +89,9 @@ def apply_chrome_baseline(
         except Exception:
             logger.debug("ttk theme_use(%r) failed", want, exc_info=True)
 
-    # Slightly tighter padding for tool/glyph buttons (width still per widget).
     try:
-        style.configure("Compact.TButton", padding=(4, 2))
-        style.configure("Tool.TButton", padding=(6, 2))
+        style.configure(STYLE_BTN_COMPACT, padding=(4, 2))
+        style.configure(STYLE_BTN_TOOL, padding=(6, 2))
     except Exception:
         logger.debug("ttk button style configure failed", exc_info=True)
 
@@ -97,7 +109,6 @@ def apply_chrome_baseline(
             else DEFAULT_THUMB_TREE_ROWHEIGHT
         )
     )
-    # Default Treeview = compact so unnamed trees stay dense.
     default_h = int(tree_rowheight) if tree_rowheight is not None else compact
     try:
         style.configure("Treeview", rowheight=default_h)
@@ -123,3 +134,157 @@ def h_separator(parent) -> ttk.Separator:
 
 def v_separator(parent) -> ttk.Separator:
     return ttk.Separator(parent, orient="vertical")
+
+
+def snap_scale_value(raw: float, *, from_: float, to: float, resolution: float) -> float:
+    """Clamp *raw* to [from_, to] and snap to *resolution* steps."""
+    lo = float(from_)
+    hi = float(to)
+    if hi < lo:
+        lo, hi = hi, lo
+    v = max(lo, min(hi, float(raw)))
+    res = float(resolution)
+    if res <= 0:
+        return v
+    steps = round((v - lo) / res)
+    snapped = lo + steps * res
+    # Avoid float dust (e.g. 1.999999).
+    if res >= 1 and float(res).is_integer():
+        return float(int(round(snapped)))
+    # Quantize to resolution decimals when sensible.
+    decimals = max(0, min(6, -int(math.floor(math.log10(res))) if res < 1 else 0))
+    if decimals:
+        return round(snapped, decimals)
+    return snapped
+
+
+def make_ttk_scale(
+    parent,
+    *,
+    from_: float,
+    to: float,
+    value: float | None = None,
+    variable: DoubleVar | None = None,
+    length: int = 260,
+    resolution: float = 1.0,
+    command: Callable[[str], None] | None = None,
+    orient: str = "horizontal",
+) -> tuple[ttk.Scale, DoubleVar]:
+    """Create a ``ttk.Scale`` with optional step snapping (phase 3 / O7).
+
+    Classic ``tk.Scale`` is not used in the app UI. *command* receives the
+    string value (ttk convention); the variable is always a ``DoubleVar``.
+    """
+    var = variable if variable is not None else DoubleVar()
+    initial = float(value) if value is not None else float(var.get() or from_)
+    initial = snap_scale_value(
+        initial, from_=from_, to=to, resolution=resolution
+    )
+    var.set(initial)
+
+    def _on_slide(raw: str) -> None:
+        try:
+            snapped = snap_scale_value(
+                float(raw), from_=from_, to=to, resolution=resolution
+            )
+        except (TypeError, ValueError):
+            snapped = float(from_)
+        if abs(float(var.get()) - snapped) > 1e-9:
+            var.set(snapped)
+        if command is not None:
+            command(str(snapped))
+
+    scale = ttk.Scale(
+        parent,
+        from_=float(from_),
+        to=float(to),
+        orient=orient,
+        variable=var,
+        length=int(length),
+        command=_on_slide,
+    )
+    return scale, var
+
+
+def time_of_day_row(
+    parent,
+    *,
+    initial_hhmm: str,
+    hour_values: list[str] | None = None,
+    minute_values: list[str] | None = None,
+) -> tuple[Frame, Callable[[], str]]:
+    """Hour + minute + AM/PM comboboxes; getter → normalized 24h ``HH:MM``.
+
+    Replaces the custom ▲/▼ spinner columns (phase 3 / O6).
+    """
+    from mtpmanager.app.podcast_schedule import components_to_hhmm, hhmm_to_12h
+
+    hour0, minute0, ampm0 = hhmm_to_12h(initial_hhmm)
+    row = Frame(parent)
+    hours = hour_values or [str(h) for h in range(1, 13)]
+    minutes = minute_values or [f"{m:02d}" for m in range(60)]
+    hour_var = StringVar(value=str(hour0))
+    min_var = StringVar(value=f"{minute0:02d}")
+    ampm_var = StringVar(value=ampm0 if ampm0 in ("AM", "PM") else "AM")
+
+    hour_cb = ttk.Combobox(
+        row,
+        textvariable=hour_var,
+        values=hours,
+        state="readonly",
+        width=3,
+    )
+    hour_cb.pack(side="left")
+    ttk.Label(row, text=":").pack(side="left", padx=2)
+    min_cb = ttk.Combobox(
+        row,
+        textvariable=min_var,
+        values=minutes,
+        state="readonly",
+        width=3,
+    )
+    min_cb.pack(side="left")
+    ampm_cb = ttk.Combobox(
+        row,
+        textvariable=ampm_var,
+        values=("AM", "PM"),
+        state="readonly",
+        width=4,
+    )
+    ampm_cb.pack(side="left", padx=(8, 0))
+
+    def get_hhmm() -> str:
+        try:
+            h = int(str(hour_var.get()).strip() or "12")
+        except ValueError:
+            h = 12
+        try:
+            m = int(str(min_var.get()).strip() or "0")
+        except ValueError:
+            m = 0
+        return components_to_hhmm(h, m, ampm_var.get())
+
+    return row, get_hhmm
+
+
+def int_spinbox(
+    parent,
+    *,
+    from_: int,
+    to: int,
+    textvariable: StringVar,
+    width: int = 4,
+) -> ttk.Spinbox | ttk.Entry:
+    """``ttk.Spinbox`` when available; otherwise a plain ``ttk.Entry``."""
+    try:
+        sp = ttk.Spinbox(
+            parent,
+            from_=int(from_),
+            to=int(to),
+            textvariable=textvariable,
+            width=int(width),
+        )
+        return sp
+    except Exception:
+        logger.debug("ttk.Spinbox unavailable; using Entry", exc_info=True)
+        return ttk.Entry(parent, textvariable=textvariable, width=int(width))

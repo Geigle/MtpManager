@@ -2,7 +2,7 @@
 
 **Purpose:** Capture the visual-element survey outcomes so a later implementation pass does not rediscover layout, control grammar, or Linux desktop blend work. **No send-path or MTP invariants change here** — UI chrome only (`mtpmanager/ui/`).
 
-**Status:** Phases **1–2 done**. Phases 3–4 still backlog.
+**Status:** Phases **1–3 done**. Phase 4 (platform blend) still backlog.
 
 **Related code:** `mtpmanager/ui/window.py`, `dialogs.py`, light styling via Treeview tags and `_HoverTip`. No design-token module yet.
 
@@ -107,19 +107,19 @@ Full classification lives in the conversation survey; this doc only tracks work 
 
 ---
 
-## Phase 3 — §7.3 Control grammar (O5–O7)
+## Phase 3 — §7.3 Control grammar (O5–O7) — **DONE**
 
 **Goal:** One vocabulary for primary actions, compact CRUD, transport, and continuous values.
 
-| Outlier | Direction |
-|---------|-----------|
-| **O5** | Standardize: glyph-only compact controls *or* short text labels; same dismiss control; avoid ad hoc Unicode where Linux fonts differ |
-| **O6** | Replace custom ▲▼ time columns with a smaller pattern (`ttk` spinbox, single time field, or 24h combobox); same for max-episodes stepper if possible |
-| **O7** | One Scale type app-wide (prefer the scrubber’s `ttk.Scale` or document why dialogs stay classic) |
+| Outlier | Shipped |
+|---------|---------|
+| **O5** | ASCII `+` / `-` / `x`; move `Up`/`Dn`; `Refresh` text; constants in `ui/chrome.py` |
+| **O6** | Time = hour/minute/AM·PM **comboboxes** (`time_of_day_row`); max-episodes = `ttk.Spinbox` |
+| **O7** | Continuous values via **`ttk.Scale` only** (`make_ttk_scale` + snap); scrubber already ttk |
 
-**Likely touch surfaces:** `window.py` toolbars / playback; `dialogs.py` `_time_spinner_row`, encode Scales, playlist/podcast buttons.
+**Control grammar (authoritative):** docstring of `mtpmanager/ui/chrome.py` + [D19](./decisions.md).
 
-**Done when:** A short “control grammar” note in this doc (or decisions.md) matches what the UI actually uses.
+**Done when:** A short “control grammar” note in this doc (or decisions.md) matches what the UI actually uses. ✅
 
 ---
 
@@ -312,3 +312,4 @@ Do **not** fold visual chrome into `domain/` or transport paths. Prefer durable 
 | 2026-08-08 | Inventory captured; phases 1→2→3→4a (macOS)→4b/4c (KDE/GNOME later) agreed. KDE/GNOME recommendations documented for deferred Linux testing. |
 | 2026-08-08 | **Phase 1 shipped:** flat main frames + separators; ttk main interactive stack; D17; `ui/chrome.py`. Dialogs deferred. |
 | 2026-08-08 | **Phase 2 shipped:** Podcasts P4 toolbar + show Treeview master–detail; Device combobox strip (no nested notebook); O11 Thumb/Compact Treeview styles. |
+| 2026-08-08 | **Phase 3 shipped:** control grammar (ASCII glyphs, Up/Dn, Refresh); time comboboxes; ttk.Scale only; D19. |

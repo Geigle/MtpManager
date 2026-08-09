@@ -263,3 +263,22 @@ Debriefs remain the forensic narrative; this file is what we keep doing.
 **Consequences:** Controller podcast selection uses Treeview iids `ps:{id}` (not Listbox indices). Device UI tests should use `show_device_subview` / combobox, not nested tab geometry.
 
 **Source:** [ui-visual-pass.md](./ui-visual-pass.md); `ui/window.py`, `ui/controllers.py`, `ui/chrome.py`.
+
+---
+
+## D19 — Control grammar: ASCII compact glyphs, combobox time, ttk.Scale only
+
+**Context:** Toolbars mixed Unicode `×` `−` `↻` `↑` `↓` `▲` `▼` with English transport labels (O5). Podcast Settings used a large custom hour/min/AM·PM spinner grid (O6). Encode/shrink dialogs used classic `tk.Scale` while playback scrubber used `ttk.Scale` (O7).
+
+**Decision (UI visual pass phase 3):**
+
+1. **Compact actions** use ASCII `+` / `-` / `x`; reorder uses short English `Up` / `Dn`; refresh uses the word **Refresh** (not a circular arrow). Constants live in `mtpmanager/ui/chrome.py`.
+2. **Tool / primary actions** stay short English on `Tool.TButton` (Play, Cancel, Sync Latest, …).
+3. **Time of day** is hour + minute + AM/PM **readonly comboboxes** (`time_of_day_row`); max-episodes uses **`ttk.Spinbox`** (Entry fallback).
+4. **Continuous values** use **`ttk.Scale` only**, via `make_ttk_scale` (resolution snap). No classic `tk.Scale` in app UI.
+
+**Rationale:** One grammar, portable fonts on Linux, less custom chrome. Matches phase 1 ttk interactive stack.
+
+**Consequences:** Context-menu shortcut strings may still say ⌥↑ / Alt+↑ (keyboard), while toolbar buttons say Up/Dn. Dialog primary buttons may remain classic `Button` until a later dialog chrome pass.
+
+**Source:** [ui-visual-pass.md](./ui-visual-pass.md); `ui/chrome.py`, `ui/window.py`, `ui/dialogs.py`.

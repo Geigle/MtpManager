@@ -38,6 +38,14 @@ from tkinter import (
 )
 
 from mtpmanager.ui.chrome import (
+    GLYPH_ADD,
+    GLYPH_DISMISS,
+    GLYPH_REMOVE,
+    LABEL_MOVE_DOWN,
+    LABEL_MOVE_UP,
+    LABEL_REFRESH,
+    STYLE_BTN_COMPACT,
+    STYLE_BTN_TOOL,
     STYLE_TREE_COMPACT,
     STYLE_TREE_THUMB,
     apply_chrome_baseline,
@@ -726,9 +734,9 @@ class MainWindow:
         )
         self.btn_library_search_clear = ttk.Button(
             library_toolbar,
-            text="×",
+            text=GLYPH_DISMISS,
             width=2,
-            style="Compact.TButton",
+            style=STYLE_BTN_COMPACT,
             state=DISABLED,
         )
         self.btn_library_search_clear.pack(side=LEFT, padx=(0, 4), pady=2)
@@ -769,21 +777,21 @@ class MainWindow:
             self.playback_row,
             text="Prev",
             width=5,
-            style="Tool.TButton",
+            style=STYLE_BTN_TOOL,
             state=DISABLED,
         )
         self.btn_playback_play = ttk.Button(
             self.playback_row,
             text="Play",
             width=6,
-            style="Tool.TButton",
+            style=STYLE_BTN_TOOL,
             state=DISABLED,
         )
         self.btn_playback_next = ttk.Button(
             self.playback_row,
             text="Next",
             width=5,
-            style="Tool.TButton",
+            style=STYLE_BTN_TOOL,
             state=DISABLED,
         )
         self.var_playback_scrub = DoubleVar(value=0.0)
@@ -806,9 +814,9 @@ class MainWindow:
         )
         self.btn_playback_close = ttk.Button(
             self.playback_row,
-            text="×",
+            text=GLYPH_DISMISS,
             width=3,
-            style="Compact.TButton",
+            style=STYLE_BTN_COMPACT,
         )
         # Layout: [Prev] [Play] [Next] [title] [====scrub====] [time] [×]
         self.btn_playback_prev.pack(side=LEFT, padx=(4, 2), pady=4)
@@ -841,7 +849,7 @@ class MainWindow:
             self.progress_row,
             text="Cancel",
             width=12,
-            style="Tool.TButton",
+            style=STYLE_BTN_TOOL,
             state=DISABLED,
         )
         # Pack Cancel first on the right so the progress bar cannot cover it.
@@ -1002,37 +1010,36 @@ class MainWindow:
         pod_toolbar.pack(side=TOP, fill=X, pady=(0, 2))
         Label(pod_toolbar, text="Show:").pack(side=LEFT, padx=(2, 4))
         self.btn_podcast_add = ttk.Button(
-            pod_toolbar, text="+", width=3, style="Compact.TButton"
+            pod_toolbar, text=GLYPH_ADD, width=3, style=STYLE_BTN_COMPACT
         )
         self.btn_podcast_add.pack(side=LEFT, padx=2)
         self.btn_podcast_remove = ttk.Button(
             pod_toolbar,
-            text="−",
+            text=GLYPH_REMOVE,
             width=3,
-            style="Compact.TButton",
+            style=STYLE_BTN_COMPACT,
             state=DISABLED,
         )
         self.btn_podcast_remove.pack(side=LEFT, padx=2)
         # Manual re-fetch of selected show feed(s) for new episodes.
         self.btn_podcast_refresh = ttk.Button(
             pod_toolbar,
-            text="↻",
-            width=3,
-            style="Compact.TButton",
+            text=LABEL_REFRESH,
+            style=STYLE_BTN_TOOL,
             state=DISABLED,
         )
         self.btn_podcast_refresh.pack(side=LEFT, padx=2)
         self.btn_podcast_sync_latest = ttk.Button(
             pod_toolbar,
             text="Sync Latest",
-            style="Tool.TButton",
+            style=STYLE_BTN_TOOL,
             state=DISABLED,
         )
         self.btn_podcast_sync_latest.pack(side=LEFT, padx=(8, 2))
         self.btn_podcast_more = ttk.Button(
             pod_toolbar,
             text="More Episodes",
-            style="Tool.TButton",
+            style=STYLE_BTN_TOOL,
             state=DISABLED,
         )
         self.btn_podcast_more.pack(side=LEFT, padx=2)
@@ -1124,42 +1131,42 @@ class MainWindow:
             pl_toolbar,
             text="Rename…",
             width=9,
-            style="Tool.TButton",
+            style=STYLE_BTN_TOOL,
             state=DISABLED,
         )
         self.btn_playlist_rename.pack(side=LEFT, padx=2)
         self.btn_playlist_new = ttk.Button(
-            pl_toolbar, text="+", width=3, style="Compact.TButton"
+            pl_toolbar, text=GLYPH_ADD, width=3, style=STYLE_BTN_COMPACT
         )
         self.btn_playlist_new.pack(side=LEFT, padx=2)
         self.btn_playlist_delete = ttk.Button(
             pl_toolbar,
-            text="−",
+            text=GLYPH_REMOVE,
             width=3,
-            style="Compact.TButton",
+            style=STYLE_BTN_COMPACT,
             state=DISABLED,
         )
         self.btn_playlist_delete.pack(side=LEFT, padx=2)
         self.btn_playlist_sync = ttk.Button(
             pl_toolbar,
             text="Sync playlist to device",
-            style="Tool.TButton",
+            style=STYLE_BTN_TOOL,
             state=DISABLED,
         )
         self.btn_playlist_sync.pack(side=LEFT, padx=(8, 2))
         self.btn_playlist_move_up = ttk.Button(
             pl_toolbar,
-            text="↑",
+            text=LABEL_MOVE_UP,
             width=3,
-            style="Compact.TButton",
+            style=STYLE_BTN_COMPACT,
             state=DISABLED,
         )
         self.btn_playlist_move_up.pack(side=LEFT, padx=(8, 1))
         self.btn_playlist_move_down = ttk.Button(
             pl_toolbar,
-            text="↓",
+            text=LABEL_MOVE_DOWN,
             width=3,
-            style="Compact.TButton",
+            style=STYLE_BTN_COMPACT,
             state=DISABLED,
         )
         self.btn_playlist_move_down.pack(side=LEFT, padx=1)
@@ -1235,53 +1242,53 @@ class MainWindow:
             dpl_toolbar,
             text="Rename…",
             width=9,
-            style="Tool.TButton",
+            style=STYLE_BTN_TOOL,
             state=DISABLED,
         )
         self.btn_device_playlist_rename.pack(side=LEFT, padx=2)
         self.btn_device_playlist_new = ttk.Button(
             dpl_toolbar,
-            text="+",
+            text=GLYPH_ADD,
             width=3,
-            style="Compact.TButton",
+            style=STYLE_BTN_COMPACT,
             state=DISABLED,
         )
         self.btn_device_playlist_new.pack(side=LEFT, padx=2)
         self.btn_device_playlist_delete = ttk.Button(
             dpl_toolbar,
-            text="−",
+            text=GLYPH_REMOVE,
             width=3,
-            style="Compact.TButton",
+            style=STYLE_BTN_COMPACT,
             state=DISABLED,
         )
         self.btn_device_playlist_delete.pack(side=LEFT, padx=2)
         self.btn_device_playlist_refresh = ttk.Button(
             dpl_toolbar,
             text="Refresh from device",
-            style="Tool.TButton",
+            style=STYLE_BTN_TOOL,
             state=DISABLED,
         )
         self.btn_device_playlist_refresh.pack(side=LEFT, padx=(8, 2))
         self.btn_device_playlist_recreate = ttk.Button(
             dpl_toolbar,
             text="Recreate locally…",
-            style="Tool.TButton",
+            style=STYLE_BTN_TOOL,
             state=DISABLED,
         )
         self.btn_device_playlist_recreate.pack(side=LEFT, padx=2)
         self.btn_device_playlist_move_up = ttk.Button(
             dpl_toolbar,
-            text="↑",
+            text=LABEL_MOVE_UP,
             width=3,
-            style="Compact.TButton",
+            style=STYLE_BTN_COMPACT,
             state=DISABLED,
         )
         self.btn_device_playlist_move_up.pack(side=LEFT, padx=(8, 1))
         self.btn_device_playlist_move_down = ttk.Button(
             dpl_toolbar,
-            text="↓",
+            text=LABEL_MOVE_DOWN,
             width=3,
-            style="Compact.TButton",
+            style=STYLE_BTN_COMPACT,
             state=DISABLED,
         )
         self.btn_device_playlist_move_down.pack(side=LEFT, padx=1)
