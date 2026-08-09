@@ -2338,8 +2338,10 @@ class PodcastSettingsResult:
     # When True, *podcast_audio_encode* overrides Config for podcast episodes.
     use_podcast_encode_override: bool = False
     podcast_audio_encode: AudioEncodeSettings | None = None
-    # Experimental: MTP track # = episode pub date YYYYMMDD (sort by date).
+    # Experimental: MTP track # from pub date (newest-first invert packing).
     podcast_tracknumber_as_date: bool = False
+    # Experimental: prefix episode Title with YYYYMMDD.
+    podcast_title_date_prefix: bool = False
 
 
 @dataclass(frozen=True)
@@ -2652,6 +2654,7 @@ def show_podcast_settings_dialog(
     use_podcast_encode_override: bool = False,
     podcast_audio_encode: AudioEncodeSettings | None = None,
     podcast_tracknumber_as_date: bool = False,
+    podcast_title_date_prefix: bool = False,
     global_audio_encode: AudioEncodeSettings | None = None,
     allowed_send_formats: frozenset[str] | None = None,
     profile_display_name: str | None = None,
@@ -2830,16 +2833,28 @@ def show_podcast_settings_dialog(
     Checkbutton(
         body,
         text=(
-            "Experimental: date-order podcasts — sets MTP track number from "
-            "episode pub date as 65535−packed(YYYYMMDD) so newest episodes "
-            "sort first (oldest last), and prefixes YYYYMMDD onto the title "
-            "so the date stays readable. Both apply together."
+            "Experimental: set MTP track number from episode pub date as "
+            "65535−packed(YYYYMMDD) so newest episodes sort first "
+            "(oldest last). Track # alone is not human-readable on the player."
         ),
         variable=track_date_var,
         anchor="w",
         wraplength=420,
         justify=LEFT,
     ).pack(fill="x", pady=(4, 2))
+
+    title_date_var = BooleanVar(value=bool(podcast_title_date_prefix))
+    Checkbutton(
+        body,
+        text=(
+            "Experimental: prefix episode title with YYYYMMDD so the pub "
+            "date is readable on the player (e.g. “20260808 Morning Brief”)."
+        ),
+        variable=title_date_var,
+        anchor="w",
+        wraplength=420,
+        justify=LEFT,
+    ).pack(fill="x", pady=(2, 2))
 
     if status_line:
         Label(
@@ -2912,6 +2927,7 @@ def show_podcast_settings_dialog(
             use_podcast_encode_override=use_pod,
             podcast_audio_encode=pod_settings,
             podcast_tracknumber_as_date=bool(track_date_var.get()),
+            podcast_title_date_prefix=bool(title_date_var.get()),
         )
 
     def _cleanup_bindings() -> None:

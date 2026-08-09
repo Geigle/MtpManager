@@ -37,7 +37,36 @@ class AppConfigTests(unittest.TestCase):
             self.assertEqual(cfg.podcast_max_new_per_show, 1)
             self.assertTrue(cfg.podcast_auto_sync_to_device)
             self.assertFalse(cfg.podcast_tracknumber_as_date)
+            self.assertFalse(cfg.podcast_title_date_prefix)
             self.assertEqual(cfg.active_mode(), "experimental")
+
+    def test_title_date_prefix_inherits_legacy_track_flag(self) -> None:
+        """Pre-split configs only stored tracknumber_as_date (meant both)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "config.json"
+            dest.write_text(
+                json.dumps({"podcast_tracknumber_as_date": True}),
+                encoding="utf-8",
+            )
+            cfg = load_app_config(path=dest)
+            self.assertTrue(cfg.podcast_tracknumber_as_date)
+            self.assertTrue(cfg.podcast_title_date_prefix)
+
+    def test_title_date_prefix_explicit_false_not_overridden(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "config.json"
+            dest.write_text(
+                json.dumps(
+                    {
+                        "podcast_tracknumber_as_date": True,
+                        "podcast_title_date_prefix": False,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            cfg = load_app_config(path=dest)
+            self.assertTrue(cfg.podcast_tracknumber_as_date)
+            self.assertFalse(cfg.podcast_title_date_prefix)
 
     def test_round_trip(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

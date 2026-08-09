@@ -1694,6 +1694,7 @@ class AppController:
             use_podcast_encode_override=cfg.uses_podcast_encode_override(),
             podcast_audio_encode=cfg.podcast_audio_encode,
             podcast_tracknumber_as_date=bool(cfg.podcast_tracknumber_as_date),
+            podcast_title_date_prefix=bool(cfg.podcast_title_date_prefix),
             global_audio_encode=cfg.resolved_audio_encode(),
             allowed_send_formats=self._allowed_send_formats(),
             profile_display_name=profile_name,
@@ -1708,6 +1709,9 @@ class AppController:
         self._config.podcast_tracknumber_as_date = bool(
             result.podcast_tracknumber_as_date
         )
+        self._config.podcast_title_date_prefix = bool(
+            result.podcast_title_date_prefix
+        )
         if result.use_podcast_encode_override and result.podcast_audio_encode:
             self._config.apply_podcast_audio_encode(result.podcast_audio_encode)
         else:
@@ -1721,7 +1725,7 @@ class AppController:
             return
         logger.info(
             "Podcast settings saved enabled=%s days=%s time=%s max=%s "
-            "podcast_encode=%s tracknumber_as_date=%s",
+            "podcast_encode=%s tracknumber_as_date=%s title_date_prefix=%s",
             self._config.podcast_auto_enabled,
             self._config.podcast_schedule_days,
             self._config.podcast_schedule_time,
@@ -1732,6 +1736,7 @@ class AppController:
                 else "global"
             ),
             self._config.podcast_tracknumber_as_date,
+            self._config.podcast_title_date_prefix,
         )
         if result.run_full_sync_now:
             self._start_full_podcast_sync(
@@ -2006,6 +2011,9 @@ class AppController:
                 tracknumber_as_date=bool(
                     self._config.podcast_tracknumber_as_date
                 ),
+                title_date_prefix=bool(
+                    self._config.podcast_title_date_prefix
+                ),
                 now_local=datetime.now().astimezone(),
                 since_last_full_sync=since,
                 on_episode_ready=on_episode_ready,
@@ -2248,6 +2256,9 @@ class AppController:
                 resolve_audio_format=self._target_format_for_podcast_episode,
                 tracknumber_as_date=bool(
                     self._config.podcast_tracknumber_as_date
+                ),
+                title_date_prefix=bool(
+                    self._config.podcast_title_date_prefix
                 ),
             )
 
@@ -2870,6 +2881,9 @@ class AppController:
                 tracknumber_as_date=bool(
                     self._config.podcast_tracknumber_as_date
                 ),
+                title_date_prefix=bool(
+                    self._config.podcast_title_date_prefix
+                ),
             )
 
         def on_done(prep) -> None:
@@ -2925,6 +2939,9 @@ class AppController:
                 resolve_audio_format=self._target_format_for_podcast_episode,
                 tracknumber_as_date=bool(
                     self._config.podcast_tracknumber_as_date
+                ),
+                title_date_prefix=bool(
+                    self._config.podcast_title_date_prefix
                 ),
             )
 
@@ -10287,6 +10304,9 @@ class AppController:
                 tracknumber_as_date=bool(
                     self._config.podcast_tracknumber_as_date
                 ),
+                title_date_prefix=bool(
+                    self._config.podcast_title_date_prefix
+                ),
             )
         except FileNotFoundError:
             return None
@@ -10581,6 +10601,9 @@ class AppController:
                             tracknumber_as_date=bool(
                                 self._config.podcast_tracknumber_as_date
                             ),
+                            title_date_prefix=bool(
+                                self._config.podcast_title_date_prefix
+                            ),
                         )
                     )
                 else:
@@ -10674,6 +10697,9 @@ class AppController:
                 show,
                 tracknumber_as_date=bool(
                     self._config.podcast_tracknumber_as_date
+                ),
+                title_date_prefix=bool(
+                    self._config.podcast_title_date_prefix
                 ),
             )
         except Exception:

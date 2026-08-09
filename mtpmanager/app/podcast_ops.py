@@ -409,9 +409,8 @@ def podcast_episode_title(
 ) -> str:
     """Episode title for send metadata.
 
-    When *use_date* is True (same experimental flag as track-number-as-date),
-    prefix the title with ``YYYYMMDD`` so the pub date is readable on the
-    player (track # alone is packed into 16 bits and looks opaque).
+    When *use_date* is True, prefix the title with ``YYYYMMDD`` so the pub
+    date is readable on the player.
     """
     base = (episode.title or "Episode").strip() or "Episode"
     if not use_date:
@@ -430,6 +429,7 @@ def episode_as_track(
     podcast: Podcast,
     *,
     tracknumber_as_date: bool = False,
+    title_date_prefix: bool = False,
 ) -> Track:
     """Build a Track for the transfer pipeline (requires local_path)."""
     if not episode.local_path or not os.path.isfile(episode.local_path):
@@ -438,18 +438,19 @@ def episode_as_track(
         )
     if not is_track_guid(episode.guid):
         raise ValueError(f"Episode missing host GUID: id={episode.id}")
-    date_mode = bool(tracknumber_as_date)
     meta = TrackMetadata(
         artist=(podcast.author or podcast.title or "Podcast").strip()
         or "Podcast",
         albumartist=(podcast.title or "Podcast").strip() or "Podcast",
         album=(podcast.title or "Podcast").strip() or "Podcast",
-        title=podcast_episode_title(episode, use_date=date_mode),
+        title=podcast_episode_title(
+            episode, use_date=bool(title_date_prefix)
+        ),
         genre="Podcast",
         date=(episode.pub_date or "")[:10],
         length_sec=float(episode.duration_sec or 0),
         tracknumber=podcast_episode_tracknumber(
-            episode, use_date=date_mode
+            episode, use_date=bool(tracknumber_as_date)
         ),
     )
     return Track(path=episode.local_path, meta=meta, guid=episode.guid)
@@ -562,6 +563,7 @@ def run_full_sync_host_pass(
     target_audio_format: str = "mp3",
     resolve_audio_format: Callable[[PodcastEpisode], str] | None = None,
     tracknumber_as_date: bool = False,
+    title_date_prefix: bool = False,
     now_local: datetime | None = None,
     since_last_full_sync: str = "",
     on_episode_ready: Callable[[PodcastEpisode, Track], None] | None = None,
@@ -623,7 +625,10 @@ def run_full_sync_host_pass(
             if not ready.local_path or not os.path.isfile(ready.local_path):
                 return
             track = episode_as_track(
-                ready, show, tracknumber_as_date=bool(tracknumber_as_date)
+                ready,
+                show,
+                tracknumber_as_date=bool(tracknumber_as_date),
+                title_date_prefix=bool(title_date_prefix),
             )
         except Exception:
             logger.debug(
@@ -905,6 +910,7 @@ def prepare_episodes_for_sync(
     target_audio_format: str = "mp3",
     resolve_audio_format: Callable[[PodcastEpisode], str] | None = None,
     tracknumber_as_date: bool = False,
+    title_date_prefix: bool = False,
 ) -> PodcastSyncPrep:
     """Download missing media; return audio tracks and optional video jobs.
 
@@ -920,7 +926,9 @@ def prepare_episodes_for_sync(
     encode override). Falls back to *target_audio_format*.
 
     *tracknumber_as_date*: experimental — MTP track # from pub date
-    (``0xFFFF − packed YYYYMMDD``, newest first) and title date prefix.
+    (``0xFFFF − packed YYYYMMDD``, newest first).
+
+    *title_date_prefix*: experimental — prefix episode Title with ``YYYYMMDD``.
     """
     prep = PodcastSyncPrep()
     podcast_cache: dict[int, Podcast] = {}
@@ -1012,6 +1020,7 @@ def prepare_episodes_for_sync(
                         ready,
                         show,
                         tracknumber_as_date=bool(tracknumber_as_date),
+                        title_date_prefix=bool(title_date_prefix),
                     )
                 )
         except Exception:

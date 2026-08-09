@@ -175,9 +175,10 @@ class AppConfig:
     # 1–N most recent new episodes per show per full sync.
     podcast_max_new_per_show: int = DEFAULT_PODCAST_MAX_NEW_PER_SHOW
     podcast_auto_sync_to_device: bool = True
-    # Experimental: MTP track # = 0xFFFF − packed(YYYYMMDD) so newest episodes
-    # sort first; Title also gets a YYYYMMDD prefix for readability. Default off.
+    # Experimental: MTP track # = 0xFFFF − packed(YYYYMMDD) so newest first.
     podcast_tracknumber_as_date: bool = False
+    # Experimental: prefix episode Title with YYYYMMDD for readable dates.
+    podcast_title_date_prefix: bool = False
     # Last completed full sync (UTC ISO + local calendar date for catch-up).
     podcast_last_full_sync_at: str = ""
     podcast_last_full_sync_local_date: str = ""
@@ -427,6 +428,13 @@ def load_app_config(*, path: Path | None = None) -> AppConfig:
         podcast_tracknumber_as_date=_as_bool(
             raw.get("podcast_tracknumber_as_date"), False
         ),
+        # Split from the old combined flag: missing key + track-date on →
+        # keep title prefix on so existing configs do not lose the prefix.
+        podcast_title_date_prefix=(
+            _as_bool(raw.get("podcast_title_date_prefix"), False)
+            if "podcast_title_date_prefix" in raw
+            else _as_bool(raw.get("podcast_tracknumber_as_date"), False)
+        ),
         podcast_last_full_sync_at=str(
             raw.get("podcast_last_full_sync_at") or ""
         ).strip(),
@@ -510,6 +518,7 @@ def save_app_config(config: AppConfig, *, path: Path | None = None) -> Path:
         ),
         "podcast_auto_sync_to_device": bool(config.podcast_auto_sync_to_device),
         "podcast_tracknumber_as_date": bool(config.podcast_tracknumber_as_date),
+        "podcast_title_date_prefix": bool(config.podcast_title_date_prefix),
         "podcast_last_full_sync_at": str(
             config.podcast_last_full_sync_at or ""
         ).strip(),
