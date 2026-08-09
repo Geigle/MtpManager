@@ -89,7 +89,8 @@ TREE_COLS = ("title", "artist", "album", "year")
 # Library menu labels (used for entryconfig by label).
 MENU_MANAGE_LIBRARY = "Manage Library…"
 MENU_MANAGE_PLAYLISTS = "Manage Playlists…"
-MENU_PODCAST_SETTINGS = "Podcast Settings…"
+# Label is updated dynamically with today's day-playlist name.
+MENU_FINISH_DAY_PODCAST_SYNC = "Finish Sync (day playlist)"
 # Back-compat aliases (older docs / call sites).
 MENU_SELECT_ROOT = MENU_MANAGE_LIBRARY
 MENU_UPDATE_LIBRARY = MENU_MANAGE_LIBRARY
@@ -120,6 +121,8 @@ MENU_AUDIO_PODCASTS_AS_VIDEO = (
 MENU_KEEP_DOWNLOADED_PODCASTS = "Keep downloaded podcasts"
 MENU_CLEAR_DOWNLOADED_PODCASTS = "Clear downloaded podcasts…"
 MENU_REVEAL_PODCAST_DOWNLOADS = "Reveal podcast downloads folder"
+MENU_PODCAST_SETTINGS = "Podcast Settings…"
+MENU_AUDIOBOOK_ENCODE = "Audiobook Encode…"
 MENU_CONFIG = "Config…"
 
 # Video podcast episode row (teal / blue-green; Tk Treeview has no gradient outline).
@@ -127,10 +130,14 @@ BG_VIDEO_PODCAST = "#c5e8e6"
 
 # Podcasts tab
 CTX_PODCAST_SYNC_LATEST = "Sync Latest"
+CTX_PODCAST_ENCODE = "Encode Settings…"
 CTX_PODCAST_EPISODE_SYNC = "Sync Episodes Now"
 CTX_PODCAST_PLAY_EPISODE = "Play This Episode"
 CTX_PODCAST_PLAY_EPISODES = "Play These Episodes"
 CTX_PODCAST_REVEAL_DOWNLOAD = "Reveal Download in Finder"
+# Labels updated dynamically with today's day-playlist name.
+CTX_PODCAST_ADD_TO_DAY_PLAYLIST = "Add This Episode to Day Playlist"
+CTX_PODCAST_REMOVE_FROM_DAY_PLAYLIST = "Remove This Episode from Day Playlist"
 
 # Device menu (PyMTP / default)
 MENU_CONNECT = "Connect"
@@ -237,7 +244,9 @@ CTX_DEVICE_DELETE = "Delete from device…"
 CTX_DEVICE_PULL = "Pull to library…"
 CTX_DEVICE_PULL_FOLDER = "Pull to folder…"
 CTX_DEVICE_FETCH_TAGS = "Fetch track tags…"
+CTX_DEVICE_TRACK_INFO = "Track Info…"
 CTX_DEVICE_ADD_TO_PLAYLIST = "Add to Device Playlist…"
+CTX_DEVICE_SHRINK = "Shrink…"
 CTX_DEVICE_DELETE_ARTIST = "Delete all from Artist…"
 CTX_DEVICE_DELETE_ALBUM = "Delete album from device…"
 CTX_DEVICE_DELETE_FOLDER = "Delete all in folder…"
@@ -461,7 +470,11 @@ class MainWindow:
         self.menubar.add_cascade(label="Library", menu=self.menu_library)
         self.menu_library.add_command(label=MENU_MANAGE_LIBRARY)
         self.menu_library.add_command(label=MENU_MANAGE_PLAYLISTS)
-        self.menu_library.add_command(label=MENU_PODCAST_SETTINGS)
+        self.menu_library.add_separator()
+        self.menu_library.add_command(
+            label=MENU_FINISH_DAY_PODCAST_SYNC, state=DISABLED
+        )
+        self._finish_day_podcast_menu_label = MENU_FINISH_DAY_PODCAST_SYNC
 
         self.menu_transfer = Menu(self.menubar, tearoff=0)
         self.menubar.add_cascade(label="Transfer", menu=self.menu_transfer)
@@ -581,10 +594,18 @@ class MainWindow:
 
         self.menu_podcast_show_ctx = Menu(self.root, tearoff=0)
         self.menu_podcast_show_ctx.add_command(label=CTX_PODCAST_SYNC_LATEST)
+        self.menu_podcast_show_ctx.add_command(label=CTX_PODCAST_ENCODE)
 
         self.menu_podcast_episode_ctx = Menu(self.root, tearoff=0)
         self.menu_podcast_episode_ctx.add_command(label=CTX_PODCAST_PLAY_EPISODE)
         self.menu_podcast_episode_ctx.add_command(label=CTX_PODCAST_EPISODE_SYNC)
+        self.menu_podcast_episode_ctx.add_separator()
+        self.menu_podcast_episode_ctx.add_command(
+            label=CTX_PODCAST_ADD_TO_DAY_PLAYLIST, state=DISABLED
+        )
+        self.menu_podcast_episode_ctx.add_command(
+            label=CTX_PODCAST_REMOVE_FROM_DAY_PLAYLIST, state=DISABLED
+        )
         self.menu_podcast_episode_ctx.add_separator()
         self.menu_podcast_episode_ctx.add_command(
             label=CTX_PODCAST_REVEAL_DOWNLOAD, state=DISABLED
@@ -595,8 +616,10 @@ class MainWindow:
         self.menu_device_track_ctx.add_command(label=CTX_DEVICE_PULL)
         self.menu_device_track_ctx.add_command(label=CTX_DEVICE_PULL_FOLDER)
         self.menu_device_track_ctx.add_command(label=CTX_DEVICE_FETCH_TAGS)
+        self.menu_device_track_ctx.add_command(label=CTX_DEVICE_TRACK_INFO)
         self.menu_device_track_ctx.add_separator()
         self.menu_device_track_ctx.add_command(label=CTX_DEVICE_ADD_TO_PLAYLIST)
+        self.menu_device_track_ctx.add_command(label=CTX_DEVICE_SHRINK)
         self.menu_device_track_ctx.add_separator()
         self.menu_device_track_ctx.add_command(label=CTX_DEVICE_DELETE)
 
@@ -604,6 +627,7 @@ class MainWindow:
         self.menu_device_artist_ctx.add_command(
             label=CTX_DEVICE_ADD_ARTIST_TO_PLAYLIST
         )
+        self.menu_device_artist_ctx.add_command(label=CTX_DEVICE_SHRINK)
         self.menu_device_artist_ctx.add_separator()
         self.menu_device_artist_ctx.add_command(label=CTX_DEVICE_DELETE_ARTIST)
 
@@ -611,6 +635,7 @@ class MainWindow:
         self.menu_device_album_ctx.add_command(
             label=CTX_DEVICE_ADD_ALBUM_TO_PLAYLIST
         )
+        self.menu_device_album_ctx.add_command(label=CTX_DEVICE_SHRINK)
         self.menu_device_album_ctx.add_separator()
         self.menu_device_album_ctx.add_command(label=CTX_DEVICE_DELETE_ALBUM)
 
@@ -904,7 +929,7 @@ class MainWindow:
         ab_tree_frame.pack(fill=BOTH, expand=True)
 
         # Podcasts tab: subscriptions + episodes + Sync Latest.
-        # Full-sync schedule: Library → Podcast Settings…
+        # Full-sync schedule: Config → Podcast Settings…
         # TODO(follow-up): OPML import/export
         pod_outer = Frame(self.podcastsLibrary_tab)
         pod_outer.pack(fill=BOTH, expand=True, padx=4, pady=4)
@@ -1596,18 +1621,19 @@ class MainWindow:
         *,
         on_manage_library,
         on_manage_playlists=None,
-        on_podcast_settings=None,
+        on_finish_day_podcast_sync=None,
         on_select_root=None,
         on_update=None,
+        **_legacy,
     ) -> None:
         """Wire Library menu entries (called once from the controller).
 
         *on_manage_library* opens the roots manager (add/remove/update).
         *on_manage_playlists* focuses the Playlists notebook tab.
-        *on_podcast_settings* opens Podcast Settings (schedule / full sync).
-        *on_select_root* / *on_update* are ignored legacy kwargs.
+        *on_finish_day_podcast_sync* pushes today's day podcast playlist to the device.
+        *on_select_root* / *on_update* / legacy kwargs are ignored.
         """
-        del on_select_root, on_update
+        del on_select_root, on_update, _legacy
         self.menu_library.entryconfig(
             MENU_MANAGE_LIBRARY, command=on_manage_library
         )
@@ -1615,10 +1641,52 @@ class MainWindow:
             self.menu_library.entryconfig(
                 MENU_MANAGE_PLAYLISTS, command=on_manage_playlists
             )
-        if on_podcast_settings is not None:
+        if on_finish_day_podcast_sync is not None:
             self.menu_library.entryconfig(
-                MENU_PODCAST_SETTINGS, command=on_podcast_settings
+                MENU_FINISH_DAY_PODCAST_SYNC,
+                command=on_finish_day_podcast_sync,
             )
+
+    def set_finish_day_podcast_sync_menu(
+        self,
+        *,
+        playlist_name: str,
+        enabled: bool,
+        episode_count: int = 0,
+    ) -> None:
+        """Update Library → Finish Sync label and enabled state."""
+        name = (playlist_name or "").strip() or "day playlist"
+        if episode_count > 0:
+            label = f"Finish Sync ({name}) — {episode_count}"
+        else:
+            label = f"Finish Sync ({name})"
+        try:
+            prev = getattr(
+                self, "_finish_day_podcast_menu_label", MENU_FINISH_DAY_PODCAST_SYNC
+            )
+            try:
+                self.menu_library.entryconfig(
+                    prev,
+                    label=label,
+                    state=NORMAL if enabled else DISABLED,
+                )
+            except Exception:
+                end = int(self.menu_library.index(END) or 0)
+                for i in range(end + 1):
+                    try:
+                        lab = str(self.menu_library.entrycget(i, "label") or "")
+                    except Exception:
+                        continue
+                    if lab.startswith("Finish Sync ("):
+                        self.menu_library.entryconfig(
+                            i,
+                            label=label,
+                            state=NORMAL if enabled else DISABLED,
+                        )
+                        break
+            self._finish_day_podcast_menu_label = label
+        except Exception:
+            pass
 
     def set_transfer_menu_commands(
         self,
@@ -1721,6 +1789,8 @@ class MainWindow:
         on_keep_downloaded_podcasts_toggle=None,
         on_clear_downloaded_podcasts=None,
         on_reveal_podcast_downloads=None,
+        on_podcast_settings=None,
+        on_audiobook_encode=None,
     ) -> None:
         self._config_menu_commands = {
             "on_config": on_config,
@@ -1735,6 +1805,8 @@ class MainWindow:
             "on_keep_downloaded_podcasts_toggle": on_keep_downloaded_podcasts_toggle,
             "on_clear_downloaded_podcasts": on_clear_downloaded_podcasts,
             "on_reveal_podcast_downloads": on_reveal_podcast_downloads,
+            "on_podcast_settings": on_podcast_settings,
+            "on_audiobook_encode": on_audiobook_encode,
         }
         self._apply_config_menu_commands()
 
@@ -1775,6 +1847,8 @@ class MainWindow:
                 MENU_CLEAR_DOWNLOADED_PODCASTS,
                 cmds.get("on_clear_downloaded_podcasts"),
             ),
+            (MENU_PODCAST_SETTINGS, cmds.get("on_podcast_settings")),
+            (MENU_AUDIOBOOK_ENCODE, cmds.get("on_audiobook_encode")),
         )
         for label, cmd in pairs:
             if cmd is not None:
@@ -1791,9 +1865,12 @@ class MainWindow:
         on_show_select=None,
         on_episode_select=None,
         on_show_sync=None,
+        on_show_encode=None,
         on_episode_sync=None,
         on_episode_play=None,
         on_episode_reveal_download=None,
+        on_episode_add_to_day_playlist=None,
+        on_episode_remove_from_day_playlist=None,
     ) -> None:
         if on_add is not None:
             self.btn_podcast_add.configure(command=on_add)
@@ -1817,6 +1894,10 @@ class MainWindow:
             self.menu_podcast_show_ctx.entryconfig(
                 CTX_PODCAST_SYNC_LATEST, command=on_show_sync
             )
+        if on_show_encode is not None:
+            self.menu_podcast_show_ctx.entryconfig(
+                CTX_PODCAST_ENCODE, command=on_show_encode
+            )
         if on_episode_play is not None:
             # Index 0: Play (label toggles This/These).
             self.menu_podcast_episode_ctx.entryconfig(0, command=on_episode_play)
@@ -1830,6 +1911,38 @@ class MainWindow:
                 CTX_PODCAST_REVEAL_DOWNLOAD,
                 command=on_episode_reveal_download,
             )
+        if on_episode_add_to_day_playlist is not None:
+            self.menu_podcast_episode_ctx.entryconfig(
+                CTX_PODCAST_ADD_TO_DAY_PLAYLIST,
+                command=on_episode_add_to_day_playlist,
+            )
+        if on_episode_remove_from_day_playlist is not None:
+            self.menu_podcast_episode_ctx.entryconfig(
+                CTX_PODCAST_REMOVE_FROM_DAY_PLAYLIST,
+                command=on_episode_remove_from_day_playlist,
+            )
+
+    def set_podcast_day_playlist_episode_menu(
+        self,
+        *,
+        playlist_name: str,
+        can_add: bool,
+        can_remove: bool,
+    ) -> None:
+        """Update Add/Remove day-playlist labels and enabled state."""
+        name = (playlist_name or "").strip() or "day playlist"
+        add_label = f"Add This Episode to {name}"
+        rem_label = f"Remove This Episode from {name}"
+        try:
+            # Index: 0 Play, 1 Sync, 2 sep, 3 Add, 4 Remove, 5 sep, 6 Reveal
+            self.menu_podcast_episode_ctx.entryconfig(
+                3, label=add_label, state=NORMAL if can_add else DISABLED
+            )
+            self.menu_podcast_episode_ctx.entryconfig(
+                4, label=rem_label, state=NORMAL if can_remove else DISABLED
+            )
+        except Exception:
+            pass
 
     def popup_podcast_show_context(self, event) -> str | None:
         try:
@@ -2088,6 +2201,9 @@ class MainWindow:
         )
         self.menu_config.add_command(label=MENU_REVEAL_PODCAST_DOWNLOADS)
         self.menu_config.add_command(label=MENU_CLEAR_DOWNLOADED_PODCASTS)
+        self.menu_config.add_command(label=MENU_PODCAST_SETTINGS)
+        self.menu_config.add_separator()
+        self.menu_config.add_command(label=MENU_AUDIOBOOK_ENCODE)
         self.menu_config.add_separator()
         self.menu_config.add_command(label=MENU_CONFIG)
         self._apply_config_menu_commands()
@@ -2120,9 +2236,9 @@ class MainWindow:
         self.menu_track_ctx.entryconfig(CTX_SYNC_ARTIST, command=on_sync_artist)
         if on_play_track is not None:
             # Index (not label): label toggles Play This / These Tracks.
+            # Layout: 0 Sync sel, 1 sep, 2–4 sync, 5 sep, 6 Play, 7 Add…
             self.menu_track_ctx.entryconfig(6, command=on_play_track)
         if on_add_to_playlist is not None:
-            # Index 7: Add to playlist (label toggles This/These).
             self.menu_track_ctx.entryconfig(7, command=on_add_to_playlist)
         if on_exclude_file is not None:
             self.menu_track_ctx.entryconfig(
@@ -2134,13 +2250,13 @@ class MainWindow:
             )
         self.menu_artist_ctx.entryconfig(0, command=on_sync_artist_group)
         if on_play_artist_group is not None:
-            # Index 2 (label changes with artist name).
+            # Index 2 (0 Sync, 1 sep, 2 Play…).
             self.menu_artist_ctx.entryconfig(2, command=on_play_artist_group)
         if on_add_artist_to_playlist is not None:
             self.menu_artist_ctx.entryconfig(3, command=on_add_artist_to_playlist)
         self.menu_album_ctx.entryconfig(0, command=on_sync_album_group)
         if on_play_album_group is not None:
-            # Index 2 (label changes with album/folder name).
+            # Index 2 (0 Sync, 1 sep, 2 Play…).
             self.menu_album_ctx.entryconfig(2, command=on_play_album_group)
         if on_add_album_to_playlist is not None:
             self.menu_album_ctx.entryconfig(3, command=on_add_album_to_playlist)
@@ -3178,7 +3294,9 @@ class MainWindow:
         on_pull=None,
         on_pull_folder=None,
         on_fetch_tags=None,
+        on_track_info=None,
         on_add_to_playlist=None,
+        on_shrink=None,
         on_delete_artist=None,
         on_delete_album=None,
         on_delete_folder=None,
@@ -3201,6 +3319,20 @@ class MainWindow:
             self.menu_device_track_ctx.entryconfig(
                 CTX_DEVICE_FETCH_TAGS, command=on_fetch_tags
             )
+        if on_shrink is not None:
+            self.menu_device_track_ctx.entryconfig(
+                CTX_DEVICE_SHRINK, command=on_shrink
+            )
+            self.menu_device_artist_ctx.entryconfig(
+                CTX_DEVICE_SHRINK, command=on_shrink
+            )
+            self.menu_device_album_ctx.entryconfig(
+                CTX_DEVICE_SHRINK, command=on_shrink
+            )
+        if on_track_info is not None:
+            self.menu_device_track_ctx.entryconfig(
+                CTX_DEVICE_TRACK_INFO, command=on_track_info
+            )
         if on_add_to_playlist is not None:
             self.menu_device_track_ctx.entryconfig(
                 CTX_DEVICE_ADD_TO_PLAYLIST, command=on_add_to_playlist
@@ -3211,28 +3343,31 @@ class MainWindow:
             )
         if on_add_artist_to_playlist is not None:
             self.menu_device_artist_ctx.entryconfig(
-                0, command=on_add_artist_to_playlist
+                CTX_DEVICE_ADD_ARTIST_TO_PLAYLIST,
+                command=on_add_artist_to_playlist,
             )
         if on_delete_artist is not None:
-            # Index 2: Add, separator, Delete.
+            # Layout: Add, Shrink, separator, Delete — never index a separator.
             self.menu_device_artist_ctx.entryconfig(
-                2, command=on_delete_artist
+                CTX_DEVICE_DELETE_ARTIST, command=on_delete_artist
             )
         if on_add_album_to_playlist is not None:
             self.menu_device_album_ctx.entryconfig(
-                0, command=on_add_album_to_playlist
+                CTX_DEVICE_ADD_ALBUM_TO_PLAYLIST,
+                command=on_add_album_to_playlist,
             )
         if on_delete_album is not None:
             self.menu_device_album_ctx.entryconfig(
-                2, command=on_delete_album
+                CTX_DEVICE_DELETE_ALBUM, command=on_delete_album
             )
         if on_add_folder_to_playlist is not None:
             self.menu_device_folder_ctx.entryconfig(
-                0, command=on_add_folder_to_playlist
+                CTX_DEVICE_ADD_FOLDER_TO_PLAYLIST,
+                command=on_add_folder_to_playlist,
             )
         if on_delete_folder is not None:
             self.menu_device_folder_ctx.entryconfig(
-                2, command=on_delete_folder
+                CTX_DEVICE_DELETE_FOLDER, command=on_delete_folder
             )
         if on_device_info is not None:
             self.menu_device_panel_ctx.entryconfig(

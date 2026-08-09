@@ -10,8 +10,11 @@ from pathlib import Path
 from mtpmanager.infra.day_podcast_playlist import (
     append_day_playlist_guid,
     clear_day_playlist_plan,
+    day_playlist_contains,
+    day_playlist_guid_count,
     ensure_day_playlist_plan,
     load_day_playlist_plan,
+    remove_day_playlist_guid,
 )
 
 
@@ -48,6 +51,12 @@ class DayPodcastPlaylistPlanTests(unittest.TestCase):
             self.assertIsNotNone(loaded)
             assert loaded is not None
             self.assertEqual(loaded["guids"], [g1, g2])
+            self.assertTrue(day_playlist_contains(g1, path=path))
+            self.assertEqual(day_playlist_guid_count(path=path), 2)
+            p4 = remove_day_playlist_guid(g1, path=path)
+            assert p4 is not None
+            self.assertEqual(p4["guids"], [g2])
+            self.assertFalse(day_playlist_contains(g1, path=path))
             clear_day_playlist_plan(path=path)
             self.assertIsNone(load_day_playlist_plan(path=path))
 

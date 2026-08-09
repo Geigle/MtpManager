@@ -359,9 +359,77 @@ def ensure_episode_audio_file(
     return refreshed
 
 
+def pub_date_to_yyyymmdd(pub_date: str) -> str:
+    """Parse feed pub_date into ``YYYYMMDD``, or empty if unknown."""
+    raw = (pub_date or "").strip()
+    if not raw:
+        return ""
+    # Common: 2026-08-08, 2026-08-08T12:00:00Z, 20260808
+    digits = "".join(c for c in raw[:10] if c.isdigit())
+    if len(digits) >= 8:
+        ymd = digits[:8]
+        try:
+            y, m, d = int(ymd[:4]), int(ymd[4:6]), int(ymd[6:8])
+        except ValueError:
+            return ""
+        if 1900 <= y <= 2100 and 1 <= m <= 12 and 1 <= d <= 31:
+            return ymd
+    return ""
+
+
+def podcast_episode_tracknumber(
+    episode: PodcastEpisode,
+    *,
+    use_date: bool = False,
+) -> str:
+    """Track number for send metadata.
+
+    When *use_date* is True (experimental), use pub date as ``YYYYMMDD``.
+    Otherwise use feed index.
+
+    Note: MTP stores track # as ``uint16``; on the wire the date is packed
+    and inverted as ``0xFFFF − ordinal`` so ascending sort lists newest first
+    (see ``TrackMetadata.tracknumber_for_mtp``). Pair with
+    :func:`podcast_episode_title` so the human-readable date appears in Title.
+    """
+    if use_date:
+        ymd = pub_date_to_yyyymmdd(episode.pub_date)
+        if ymd:
+            return ymd
+    idx = episode.episode_index
+    if idx and int(idx) > 0:
+        return str(int(idx))
+    return "01"
+
+
+def podcast_episode_title(
+    episode: PodcastEpisode,
+    *,
+    use_date: bool = False,
+) -> str:
+    """Episode title for send metadata.
+
+    When *use_date* is True, prefix the title with ``YYYYMMDD`` so the pub
+    date is readable on the player.
+    """
+    base = (episode.title or "Episode").strip() or "Episode"
+    if not use_date:
+        return base
+    ymd = pub_date_to_yyyymmdd(episode.pub_date)
+    if not ymd:
+        return base
+    # Avoid double-prefix if re-sent or title already starts with the date.
+    if base.startswith(ymd):
+        return base
+    return f"{ymd} {base}"
+
+
 def episode_as_track(
     episode: PodcastEpisode,
     podcast: Podcast,
+    *,
+    tracknumber_as_date: bool = False,
+    title_date_prefix: bool = False,
 ) -> Track:
     """Build a Track for the transfer pipeline (requires local_path)."""
     if not episode.local_path or not os.path.isfile(episode.local_path):
@@ -375,11 +443,15 @@ def episode_as_track(
         or "Podcast",
         albumartist=(podcast.title or "Podcast").strip() or "Podcast",
         album=(podcast.title or "Podcast").strip() or "Podcast",
-        title=(episode.title or "Episode").strip() or "Episode",
+        title=podcast_episode_title(
+            episode, use_date=bool(title_date_prefix)
+        ),
         genre="Podcast",
         date=(episode.pub_date or "")[:10],
         length_sec=float(episode.duration_sec or 0),
-        tracknumber=str(episode.episode_index or "01"),
+        tracknumber=podcast_episode_tracknumber(
+            episode, use_date=bool(tracknumber_as_date)
+        ),
     )
     return Track(path=episode.local_path, meta=meta, guid=episode.guid)
 
@@ -489,6 +561,9 @@ def run_full_sync_host_pass(
     path: Path | None = None,
     data_dir: Path | None = None,
     target_audio_format: str = "mp3",
+    resolve_audio_format: Callable[[PodcastEpisode], str] | None = None,
+    tracknumber_as_date: bool = False,
+    title_date_prefix: bool = False,
     now_local: datetime | None = None,
     since_last_full_sync: str = "",
     on_episode_ready: Callable[[PodcastEpisode, Track], None] | None = None,
@@ -528,13 +603,33 @@ def run_full_sync_host_pass(
             if p is not None:
                 shows.append(p)
 
+    def _fmt_for(ep: PodcastEpisode) -> str:
+        if resolve_audio_format is not None:
+            try:
+                raw = resolve_audio_format(ep)
+                fmt = (raw or "").lower().lstrip(".")
+                if fmt:
+                    return fmt
+            except Exception:
+                logger.debug(
+                    "resolve_audio_format failed for episode id=%s",
+                    ep.id,
+                    exc_info=True,
+                )
+        return (target_audio_format or "mp3").lower().lstrip(".")
+
     def _notify_ready(ready: PodcastEpisode, show: Podcast) -> None:
         if on_episode_ready is None:
             return
         try:
             if not ready.local_path or not os.path.isfile(ready.local_path):
                 return
-            track = episode_as_track(ready, show)
+            track = episode_as_track(
+                ready,
+                show,
+                tracknumber_as_date=bool(tracknumber_as_date),
+                title_date_prefix=bool(title_date_prefix),
+            )
         except Exception:
             logger.debug(
                 "full sync on_episode_ready track build failed id=%s",
@@ -576,7 +671,7 @@ def run_full_sync_host_pass(
                     ep,
                     path=path,
                     data_dir=data_dir,
-                    target_format=target_audio_format,
+                    target_format=_fmt_for(ep),
                 )
                 if not had_file and ready.local_path and os.path.isfile(
                     ready.local_path
@@ -689,6 +784,41 @@ def upsert_scheduled_day_playlist(
     )
 
 
+def add_episode_to_day_host_playlist(
+    episode: PodcastEpisode,
+    *,
+    when: datetime | None = None,
+    path: Path | None = None,
+) -> DayPlaylistResult | None:
+    """Append one episode to today's host day playlist (if not already present)."""
+    return upsert_scheduled_day_playlist([episode], when=when, path=path)
+
+
+def remove_episode_from_day_host_playlist(
+    guid: str,
+    *,
+    when: datetime | None = None,
+    path: Path | None = None,
+) -> bool:
+    """Remove ``podcast:<guid>`` from today's host day playlist if present.
+
+    Returns True when a playlist was found and rewritten (even if path absent).
+    """
+    from mtpmanager.infra.playlists import remove_paths_from_playlist
+
+    g = (guid or "").strip().lower()
+    if not is_track_guid(g):
+        return False
+    name = podcast_day_playlist_name(when)
+    existing = get_playlist_by_name(name, path=path)
+    if existing is None:
+        return False
+    remove_paths_from_playlist(
+        existing.id, [f"podcast:{g}"], path=path
+    )
+    return True
+
+
 def pending_episodes_for_device_sync(
     *,
     device_guids: Collection[str] | None = None,
@@ -778,6 +908,9 @@ def prepare_episodes_for_sync(
     allow_video: bool = False,
     audio_as_video: bool = False,
     target_audio_format: str = "mp3",
+    resolve_audio_format: Callable[[PodcastEpisode], str] | None = None,
+    tracknumber_as_date: bool = False,
+    title_date_prefix: bool = False,
 ) -> PodcastSyncPrep:
     """Download missing media; return audio tracks and optional video jobs.
 
@@ -788,10 +921,34 @@ def prepare_episodes_for_sync(
     When *audio_as_video* is True (experimental), non-video episodes become
     still-image video jobs (artwork or black + audio) so they can land under
     ZENcast on devices that only list video there.
+
+    *resolve_audio_format*: optional per-episode container (e.g. podcast/show
+    encode override). Falls back to *target_audio_format*.
+
+    *tracknumber_as_date*: experimental — MTP track # from pub date
+    (``0xFFFF − packed YYYYMMDD``, newest first).
+
+    *title_date_prefix*: experimental — prefix episode Title with ``YYYYMMDD``.
     """
     prep = PodcastSyncPrep()
     podcast_cache: dict[int, Podcast] = {}
     artwork_cache: dict[int, str | None] = {}
+
+    def _fmt_for(ep: PodcastEpisode) -> str:
+        if resolve_audio_format is not None:
+            try:
+                raw = resolve_audio_format(ep)
+                fmt = (raw or "").lower().lstrip(".")
+                if fmt:
+                    return fmt
+            except Exception:
+                logger.debug(
+                    "resolve_audio_format failed for episode id=%s",
+                    ep.id,
+                    exc_info=True,
+                )
+        return (target_audio_format or "mp3").lower().lstrip(".")
+
     for ep in episodes:
         show = podcast_cache.get(ep.podcast_id)
         if show is None:
@@ -837,7 +994,7 @@ def prepare_episodes_for_sync(
                     ep,
                     path=path,
                     data_dir=data_dir,
-                    target_format=target_audio_format,
+                    target_format=_fmt_for(ep),
                 )
                 if not ready.local_path or not os.path.isfile(ready.local_path):
                     raise FileNotFoundError("audio download missing")
@@ -856,9 +1013,16 @@ def prepare_episodes_for_sync(
                     ep,
                     path=path,
                     data_dir=data_dir,
-                    target_format=target_audio_format,
+                    target_format=_fmt_for(ep),
                 )
-                prep.audio_tracks.append(episode_as_track(ready, show))
+                prep.audio_tracks.append(
+                    episode_as_track(
+                        ready,
+                        show,
+                        tracknumber_as_date=bool(tracknumber_as_date),
+                        title_date_prefix=bool(title_date_prefix),
+                    )
+                )
         except Exception:
             logger.exception(
                 "Failed to prepare episode id=%s title=%r",

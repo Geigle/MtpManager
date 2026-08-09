@@ -36,7 +36,37 @@ class AppConfigTests(unittest.TestCase):
             self.assertEqual(cfg.podcast_schedule_time, "06:30")
             self.assertEqual(cfg.podcast_max_new_per_show, 1)
             self.assertTrue(cfg.podcast_auto_sync_to_device)
+            self.assertFalse(cfg.podcast_tracknumber_as_date)
+            self.assertFalse(cfg.podcast_title_date_prefix)
             self.assertEqual(cfg.active_mode(), "experimental")
+
+    def test_title_date_prefix_inherits_legacy_track_flag(self) -> None:
+        """Pre-split configs only stored tracknumber_as_date (meant both)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "config.json"
+            dest.write_text(
+                json.dumps({"podcast_tracknumber_as_date": True}),
+                encoding="utf-8",
+            )
+            cfg = load_app_config(path=dest)
+            self.assertTrue(cfg.podcast_tracknumber_as_date)
+            self.assertTrue(cfg.podcast_title_date_prefix)
+
+    def test_title_date_prefix_explicit_false_not_overridden(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "config.json"
+            dest.write_text(
+                json.dumps(
+                    {
+                        "podcast_tracknumber_as_date": True,
+                        "podcast_title_date_prefix": False,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            cfg = load_app_config(path=dest)
+            self.assertTrue(cfg.podcast_tracknumber_as_date)
+            self.assertFalse(cfg.podcast_title_date_prefix)
 
     def test_round_trip(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -132,12 +162,22 @@ class AppConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             dest = Path(tmp) / "config.json"
             dest.write_text(
-                json.dumps({"version": 1, "send_format": "flac"}),
+                json.dumps({"version": 1, "send_format": "not-a-codec"}),
                 encoding="utf-8",
             )
             cfg = load_app_config(path=dest)
             self.assertEqual(cfg.normalized_send_format(), "mp3")
             self.assertFalse(cfg.stable_mode)
+
+    def test_flac_is_valid_send_format(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "config.json"
+            dest.write_text(
+                json.dumps({"version": 1, "send_format": "flac"}),
+                encoding="utf-8",
+            )
+            cfg = load_app_config(path=dest)
+            self.assertEqual(cfg.normalized_send_format(), "flac")
 
     def test_wav_is_valid_send_format(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -145,6 +185,95 @@ class AppConfigTests(unittest.TestCase):
             save_app_config(AppConfig(send_format="wav"), path=dest)
             loaded = load_app_config(path=dest)
             self.assertEqual(loaded.normalized_send_format(), "wav")
+
+    def test_audiobook_encode_override_round_trip(self) -> None:
+        from mtpmanager.domain.audio_encode import get_preset
+        from mtpmanager.domain.models import Track, TrackMetadata
+        from mtpmanager.infra.app_config import default_audiobook_audio_encode_settings
+
+        speech = get_preset("mp3_cbr_32_mono")
+        assert speech is not None
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "config.json"
+            cfg = AppConfig(send_format="mp3")
+            cfg.apply_audio_encode(get_preset("mp3_cbr_320").settings)  # type: ignore[union-attr]
+            cfg.apply_audiobook_audio_encode(speech.settings)
+            save_app_config(cfg, path=dest)
+            loaded = load_app_config(path=dest)
+            self.assertTrue(loaded.uses_audiobook_encode_override())
+            self.assertEqual(
+                loaded.resolved_audiobook_audio_encode().preset_id, "mp3_cbr_32_mono"
+            )
+            self.assertEqual(
+                loaded.resolved_audio_encode().preset_id, "mp3_cbr_320"
+            )
+            music = Track(
+                path="/m.flac",
+                meta=TrackMetadata(title="Song", artist="A", genre="Rock"),
+            )
+            book = Track(
+                path="/b.flac",
+                meta=TrackMetadata(title="Ch1", artist="Author", genre="Audiobook"),
+            )
+            self.assertEqual(
+                loaded.resolved_audio_encode_for_track(music).preset_id,
+                "mp3_cbr_320",
+            )
+            self.assertEqual(
+                loaded.resolved_audio_encode_for_track(book).preset_id,
+                "mp3_cbr_32_mono",
+            )
+            # Clear override → audiobooks fall back to global.
+            loaded.apply_audiobook_audio_encode(None)
+            save_app_config(loaded, path=dest)
+            reloaded = load_app_config(path=dest)
+            self.assertFalse(reloaded.uses_audiobook_encode_override())
+            self.assertEqual(
+                reloaded.resolved_audio_encode_for_track(book).preset_id,
+                "mp3_cbr_320",
+            )
+            self.assertIsNotNone(default_audiobook_audio_encode_settings())
+
+    def test_podcast_encode_override_and_per_show(self) -> None:
+        from mtpmanager.domain.audio_encode import get_preset
+        from mtpmanager.domain.models import Track, TrackMetadata
+
+        speech = get_preset("mp3_cbr_32_mono")
+        high = get_preset("mp3_cbr_192")
+        music_p = get_preset("mp3_cbr_320")
+        assert speech and high and music_p
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "config.json"
+            cfg = AppConfig()
+            cfg.apply_audio_encode(music_p.settings)
+            cfg.apply_podcast_audio_encode(speech.settings)
+            save_app_config(cfg, path=dest)
+            loaded = load_app_config(path=dest)
+            self.assertTrue(loaded.uses_podcast_encode_override())
+            pod = Track(
+                path="/p.mp3",
+                meta=TrackMetadata(title="Ep", artist="Host", genre="Podcast"),
+            )
+            self.assertEqual(
+                loaded.resolved_audio_encode_for_track(pod).preset_id,
+                "mp3_cbr_32_mono",
+            )
+            # Per-show wins over podcast default.
+            self.assertEqual(
+                loaded.resolved_audio_encode_for_track(
+                    pod, podcast_per_show=high.settings
+                ).preset_id,
+                "mp3_cbr_192",
+            )
+            # Music unchanged.
+            music = Track(
+                path="/m.flac",
+                meta=TrackMetadata(title="Song", genre="Rock"),
+            )
+            self.assertEqual(
+                loaded.resolved_audio_encode_for_track(music).preset_id,
+                "mp3_cbr_320",
+            )
 
 
 if __name__ == "__main__":

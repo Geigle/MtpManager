@@ -30,6 +30,26 @@ class TrackMetadata:
         except (TypeError, ValueError):
             return 1
 
+    def tracknumber_for_mtp(self) -> int:
+        """Track number for LIBMTP (``uint16`` / ``c_ushort``).
+
+        Values that fit in 0…65535 are passed through. Experimental podcast
+        date form ``YYYYMMDD`` is packed into a day ordinal
+        ``(year-2000)*512 + month*32 + day``, then inverted as
+        ``0xFFFF - ordinal`` so ascending track-number sort on the player
+        lists newest episodes first (oldest sink to the bottom).
+        """
+        n = self.tracknumber_int()
+        if 0 <= n <= 0xFFFF:
+            return n
+        raw = str(self.tracknumber).split("/")[0].strip()
+        if len(raw) == 8 and raw.isdigit():
+            y, m, d = int(raw[:4]), int(raw[4:6]), int(raw[6:8])
+            if 2000 <= y <= 2127 and 1 <= m <= 12 and 1 <= d <= 31:
+                ordinal = (y - 2000) * 512 + m * 32 + d
+                return 0xFFFF - ordinal
+        return 1
+
 
 @dataclass(frozen=True)
 class Track:

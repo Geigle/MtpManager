@@ -55,8 +55,12 @@ from mtpmanager.app.podcast_schedule import (
 from mtpmanager.infra.day_podcast_playlist import (
     append_day_playlist_guid,
     clear_day_playlist_plan,
+    day_playlist_contains,
+    day_playlist_display_name,
+    day_playlist_guid_count,
     ensure_day_playlist_plan,
     load_day_playlist_plan,
+    remove_day_playlist_guid,
 )
 from mtpmanager.app.scan_library import scan_library, scan_library_roots
 from mtpmanager.app.transfer import transfer_track, transfer_tracks
@@ -104,6 +108,7 @@ from mtpmanager.domain.device_media import (
 from mtpmanager.domain.models import (
     DeviceInfo,
     DevicePlaylist,
+    DeviceTrackInfo,
     DeviceTrackRef,
     Track,
     TrackMetadata,
@@ -124,6 +129,7 @@ from mtpmanager.infra.device_assets import device_graphic_path
 from mtpmanager.infra.device_index import (
     device_list_is_complete,
     device_serial_key,
+    files_by_item_ids,
     guid_stems_on_device,
     list_cached_files,
     list_cached_music_refs,
@@ -203,7 +209,10 @@ from mtpmanager.ui.dialogs import (
     show_file_info_dialog,
     show_file_list_dialog,
     show_folder_list_dialog,
+    show_audiobook_encode_dialog,
     show_podcast_settings_dialog,
+    show_podcast_show_encode_dialog,
+    show_shrink_encode_dialog,
     show_track_info_dialog,
     show_track_list_dialog,
 )
@@ -407,8 +416,9 @@ class AppController:
         w.set_library_menu_commands(
             on_manage_library=self.on_manage_library,
             on_manage_playlists=self.on_manage_playlists,
-            on_podcast_settings=self.on_podcast_settings,
+            on_finish_day_podcast_sync=self.on_finish_day_podcast_sync,
         )
+        self._refresh_finish_day_podcast_menu()
         w.set_library_search_commands(
             on_change=self.on_library_search_changed,
             on_clear=self.on_library_search_clear,
@@ -435,6 +445,8 @@ class AppController:
             on_keep_downloaded_podcasts_toggle=self.on_keep_downloaded_podcasts_toggle,
             on_clear_downloaded_podcasts=self.on_clear_downloaded_podcasts,
             on_reveal_podcast_downloads=self.on_reveal_podcast_downloads,
+            on_podcast_settings=self.on_podcast_settings,
+            on_audiobook_encode=self.on_audiobook_encode,
         )
         artist_on = bool(self._config.store_tracks_in_artist_folder)
         album_on = bool(self._config.store_tracks_in_album_folder) and artist_on
@@ -467,9 +479,14 @@ class AppController:
             on_show_select=self.on_podcast_show_select,
             on_episode_select=self.on_podcast_episode_select,
             on_show_sync=self.on_podcast_sync_latest_selected,
+            on_show_encode=self.on_podcast_show_encode,
             on_episode_sync=self.on_podcast_sync_episodes_selected,
             on_episode_play=self.on_podcast_play_episodes_selected,
             on_episode_reveal_download=self.on_podcast_reveal_download,
+            on_episode_add_to_day_playlist=self.on_podcast_add_to_day_playlist,
+            on_episode_remove_from_day_playlist=(
+                self.on_podcast_remove_from_day_playlist
+            ),
         )
         try:
             w.podcast_show_list.bind(
@@ -594,7 +611,9 @@ class AppController:
             on_pull=self.action_device_pull_selected,
             on_pull_folder=self.action_device_pull_to_folder,
             on_fetch_tags=self.action_device_fetch_tags_selected,
+            on_track_info=self.action_device_track_info_selected,
             on_add_to_playlist=self.action_device_add_selected_to_playlist,
+            on_shrink=self.action_shrink_device_selection,
             on_delete_artist=self.action_device_delete_artist_group,
             on_delete_album=self.action_device_delete_album_group,
             on_delete_folder=self.action_device_delete_folder_group,
@@ -706,7 +725,97 @@ class AppController:
         return self.device
 
     def _target_format(self) -> str:
-        return self._config.normalized_send_format()
+        return self._config.resolved_audio_encode().normalized_format()
+
+    def _allowed_send_formats(self):
+        """Device-profile format restriction for encode UI / resolve, if any."""
+        if self._active_profile is not None:
+            return self._active_profile.send_formats_for_config()
+        return None
+
+    def _encode_settings(self):
+        """Global audio encode recipe for ffmpeg convert (music / default)."""
+        from mtpmanager.domain.audio_encode import resolve_settings
+
+        return resolve_settings(
+            settings=self._config.resolved_audio_encode(),
+            allowed_formats=self._allowed_send_formats(),
+        )
+
+    def _podcast_show_for_track(self, track: Track):
+        """Resolve Podcast row for a podcast episode track (by GUID), if any."""
+        from mtpmanager.infra.podcast_index import get_episode_by_guid
+
+        guid = (getattr(track, "guid", None) or "").strip()
+        if not guid:
+            return None
+        try:
+            ep = get_episode_by_guid(guid)
+        except Exception:
+            logger.debug("get_episode_by_guid failed", exc_info=True)
+            return None
+        if ep is None:
+            return None
+        try:
+            return get_podcast(int(ep.podcast_id))
+        except Exception:
+            logger.debug("get_podcast failed", exc_info=True)
+            return None
+
+    def _podcast_per_show_encode_for_track(
+        self, track: Track
+    ):
+        """Per-subscription encode override for a podcast track, if any."""
+        show = self._podcast_show_for_track(track)
+        if show is None:
+            return None
+        return show.audio_encode
+
+    def _encode_settings_for_track(self, track: Track):
+        """Encode recipe for one track (audiobook / podcast / music)."""
+        from dataclasses import replace
+
+        from mtpmanager.domain.audio_encode import (
+            normalize_playback_speed,
+            resolve_settings,
+        )
+
+        per_show = None
+        playback_speed = 1.0
+        genre = (
+            (track.meta.genre if track and track.meta else "") or ""
+        ).strip().casefold()
+        if genre == "podcast":
+            show = self._podcast_show_for_track(track)
+            if show is not None:
+                per_show = show.audio_encode
+                playback_speed = normalize_playback_speed(show.playback_speed)
+        settings = resolve_settings(
+            settings=self._config.resolved_audio_encode_for_track(
+                track, podcast_per_show=per_show
+            ),
+            allowed_formats=self._allowed_send_formats(),
+        )
+        if abs(playback_speed - 1.0) >= 0.01:
+            settings = replace(settings, playback_speed=playback_speed)
+        return settings
+
+    def _target_format_for_podcast_episode(self, episode) -> str:
+        """Audio container for download/extract of one episode."""
+        per_show = None
+        try:
+            show = get_podcast(int(episode.podcast_id))
+            if show is not None:
+                per_show = show.audio_encode
+        except Exception:
+            logger.debug("podcast encode lookup for episode failed", exc_info=True)
+        enc = self._config.resolved_podcast_audio_encode(per_show=per_show)
+        from mtpmanager.domain.audio_encode import resolve_settings
+
+        return resolve_settings(
+            settings=enc,
+            allowed_formats=self._allowed_send_formats(),
+        ).file_extension()
 
     def _device_audio_formats(self) -> frozenset[str] | None:
         """Native playable formats from the USB-matched profile, if any.
@@ -721,16 +830,24 @@ class AppController:
 
     def on_config(self) -> None:
         """Open Config dialog; persist preferences on Save."""
+        allowed = None
+        profile_name = None
+        if self._active_profile is not None:
+            allowed = self._active_profile.send_formats_for_config()
+            profile_name = self._active_profile.display_name
         result = show_config_dialog(
             self.win.root,
             send_format=self._config.normalized_send_format(),
+            audio_encode=self._config.resolved_audio_encode(),
             show_broken_video_presets=bool(
                 self._config.show_broken_video_presets
             ),
+            allowed_send_formats=allowed,
+            profile_display_name=profile_name,
         )
         if result is None:
             return
-        self._config.send_format = result.send_format
+        self._config.apply_audio_encode(result.audio_encode)
         self._config.show_broken_video_presets = bool(
             result.show_broken_video_presets
         )
@@ -741,8 +858,9 @@ class AppController:
             messagebox.showerror("Config", f"Could not save settings:\n{e}")
             return
         logger.info(
-            "Config send_format=%s show_broken_video_presets=%s",
+            "Config send_format=%s preset=%s show_broken_video_presets=%s",
             result.send_format,
+            result.audio_encode.preset_id,
             result.show_broken_video_presets,
         )
 
@@ -1086,6 +1204,16 @@ class AppController:
                     has_video = False
                 if has_video:
                     label = f"▶ {label}"
+                # ★ = custom encode for this show (context menu).
+                if p.audio_encode is not None:
+                    label = f"{label} ★"
+                # Speed marker when encode-time tempo is not 1×.
+                try:
+                    sp = float(p.playback_speed or 1.0)
+                except (TypeError, ValueError):
+                    sp = 1.0
+                if abs(sp - 1.0) >= 0.01:
+                    label = f"{label} {sp:g}×"
                 lb.insert("end", label)
         except Exception:
             logger.debug("refresh podcast list failed", exc_info=True)
@@ -1242,6 +1370,22 @@ class AppController:
             self.win.menu_podcast_episode_ctx.entryconfig(
                 CTX_PODCAST_REVEAL_DOWNLOAD,
                 state=NORMAL if can_reveal else DISABLED,
+            )
+            # Day playlist add/remove (single episode selection only).
+            day_name = day_playlist_display_name()
+            can_add = False
+            can_remove = False
+            if n == 1:
+                ep = get_episode(self._selected_episode_ids()[0])
+                g = (ep.guid if ep is not None else "") or ""
+                if is_track_guid(g):
+                    in_plan = day_playlist_contains(g)
+                    can_add = not in_plan
+                    can_remove = in_plan
+            self.win.set_podcast_day_playlist_episode_menu(
+                playlist_name=day_name,
+                can_add=can_add,
+                can_remove=can_remove,
             )
         except Exception:
             pass
@@ -1533,9 +1677,12 @@ class AppController:
         self._bg.submit(work, on_done=on_done, on_error=on_error, name="podcast-more")
 
     def on_podcast_settings(self) -> None:
-        """Library → Podcast Settings…"""
+        """Config → Podcast Settings…"""
         cfg = self._config
         status = self._podcast_schedule_status_line()
+        profile_name = None
+        if self._active_profile is not None:
+            profile_name = self._active_profile.display_name
         result = show_podcast_settings_dialog(
             self.win.root,
             auto_enabled=bool(cfg.podcast_auto_enabled),
@@ -1544,6 +1691,13 @@ class AppController:
             max_new_per_show=int(cfg.podcast_max_new_per_show),
             auto_sync_to_device=bool(cfg.podcast_auto_sync_to_device),
             status_line=status,
+            use_podcast_encode_override=cfg.uses_podcast_encode_override(),
+            podcast_audio_encode=cfg.podcast_audio_encode,
+            podcast_tracknumber_as_date=bool(cfg.podcast_tracknumber_as_date),
+            podcast_title_date_prefix=bool(cfg.podcast_title_date_prefix),
+            global_audio_encode=cfg.resolved_audio_encode(),
+            allowed_send_formats=self._allowed_send_formats(),
+            profile_display_name=profile_name,
         )
         if result is None:
             return
@@ -1552,6 +1706,16 @@ class AppController:
         self._config.podcast_schedule_time = result.schedule_time
         self._config.podcast_max_new_per_show = int(result.max_new_per_show)
         self._config.podcast_auto_sync_to_device = bool(result.auto_sync_to_device)
+        self._config.podcast_tracknumber_as_date = bool(
+            result.podcast_tracknumber_as_date
+        )
+        self._config.podcast_title_date_prefix = bool(
+            result.podcast_title_date_prefix
+        )
+        if result.use_podcast_encode_override and result.podcast_audio_encode:
+            self._config.apply_podcast_audio_encode(result.podcast_audio_encode)
+        else:
+            self._config.apply_podcast_audio_encode(None)
         try:
             save_app_config(self._config)
         except Exception as e:
@@ -1560,11 +1724,19 @@ class AppController:
             )
             return
         logger.info(
-            "Podcast settings saved enabled=%s days=%s time=%s max=%s",
+            "Podcast settings saved enabled=%s days=%s time=%s max=%s "
+            "podcast_encode=%s tracknumber_as_date=%s title_date_prefix=%s",
             self._config.podcast_auto_enabled,
             self._config.podcast_schedule_days,
             self._config.podcast_schedule_time,
             self._config.podcast_max_new_per_show,
+            (
+                self._config.podcast_audio_encode.summary_line()
+                if self._config.podcast_audio_encode is not None
+                else "global"
+            ),
+            self._config.podcast_tracknumber_as_date,
+            self._config.podcast_title_date_prefix,
         )
         if result.run_full_sync_now:
             self._start_full_podcast_sync(
@@ -1572,6 +1744,109 @@ class AppController:
             )
         else:
             self.win.root.after(200, self._podcast_schedule_tick)
+
+    def on_audiobook_encode(self) -> None:
+        """Config → Audiobook Encode…"""
+        cfg = self._config
+        profile_name = None
+        if self._active_profile is not None:
+            profile_name = self._active_profile.display_name
+        result = show_audiobook_encode_dialog(
+            self.win.root,
+            use_override=cfg.uses_audiobook_encode_override(),
+            audio_encode=cfg.audiobook_audio_encode,
+            global_audio_encode=cfg.resolved_audio_encode(),
+            allowed_send_formats=self._allowed_send_formats(),
+            profile_display_name=profile_name,
+        )
+        if result is None:
+            return
+        if result.use_override and result.audio_encode is not None:
+            self._config.apply_audiobook_audio_encode(result.audio_encode)
+        else:
+            self._config.apply_audiobook_audio_encode(None)
+        try:
+            save_app_config(self._config)
+        except Exception as e:
+            messagebox.showerror(
+                "Audiobook Encode", f"Could not save settings:\n{e}"
+            )
+            return
+        logger.info(
+            "Audiobook encode saved encode=%s",
+            (
+                self._config.audiobook_audio_encode.summary_line()
+                if self._config.audiobook_audio_encode is not None
+                else "global"
+            ),
+        )
+
+    def on_podcast_show_encode(self) -> None:
+        """Podcasts tab show context menu → Encode Settings…"""
+        from mtpmanager.infra.podcast_index import (
+            set_podcast_audio_encode,
+            set_podcast_playback_speed,
+        )
+
+        ids = self._selected_podcast_ids()
+        if not ids and self._selected_podcast_id is not None:
+            ids = [self._selected_podcast_id]
+        if not ids:
+            messagebox.showinfo("Podcast", "Select a podcast show first.")
+            return
+        # Single-show dialog; if multi-select, use the first selected row.
+        pid = int(ids[0])
+        show = get_podcast(pid)
+        if show is None:
+            messagebox.showerror("Podcast", "Could not load that show.")
+            return
+        title = (show.title or show.feed_url or f"Podcast {pid}").strip()
+        cfg = self._config
+        if cfg.uses_podcast_encode_override() and cfg.podcast_audio_encode:
+            inherit = (
+                f"podcast default ({cfg.podcast_audio_encode.summary_line()})"
+            )
+        else:
+            inherit = (
+                f"Config ({cfg.resolved_audio_encode().summary_line()})"
+            )
+        profile_name = None
+        if self._active_profile is not None:
+            profile_name = self._active_profile.display_name
+        result = show_podcast_show_encode_dialog(
+            self.win.root,
+            show_title=title,
+            use_override=show.audio_encode is not None,
+            audio_encode=show.audio_encode,
+            playback_speed=float(show.playback_speed or 1.0),
+            inherit_summary=inherit,
+            allowed_send_formats=self._allowed_send_formats(),
+            profile_display_name=profile_name,
+        )
+        if result is None:
+            return
+        enc = result.audio_encode if result.use_override else None
+        updated = set_podcast_audio_encode(pid, enc)
+        if updated is None:
+            messagebox.showerror(
+                "Podcast", "Could not save encode settings for this show."
+            )
+            return
+        speed_updated = set_podcast_playback_speed(pid, result.playback_speed)
+        if speed_updated is None:
+            messagebox.showerror(
+                "Podcast", "Could not save playback speed for this show."
+            )
+            return
+        logger.info(
+            "Podcast show encode saved id=%s title=%r encode=%s speed=%g",
+            pid,
+            title,
+            enc.summary_line() if enc is not None else "inherit",
+            float(result.playback_speed),
+        )
+        # Refresh list labels (★ marker for per-show override).
+        self._refresh_podcast_tab()
 
     def _podcast_schedule_status_line(self) -> str:
         from datetime import datetime
@@ -1732,6 +2007,13 @@ class AppController:
                 max_new_per_show=max_n,
                 device_guids=stems,
                 target_audio_format=fmt,
+                resolve_audio_format=self._target_format_for_podcast_episode,
+                tracknumber_as_date=bool(
+                    self._config.podcast_tracknumber_as_date
+                ),
+                title_date_prefix=bool(
+                    self._config.podcast_title_date_prefix
+                ),
                 now_local=datetime.now().astimezone(),
                 since_last_full_sync=since,
                 on_episode_ready=on_episode_ready,
@@ -1764,9 +2046,17 @@ class AppController:
             except Exception:
                 logger.debug("save last full podcast sync failed", exc_info=True)
 
-            day_pl = self._pending_day_podcast_playlist or {}
+            day_pl = self._pending_day_podcast_playlist or load_day_playlist_plan() or {}
             day_name = str(day_pl.get("name") or "").strip()
-            day_pl_note = f" · device playlist “{day_name}”" if day_name else ""
+            day_n = len(
+                [g for g in (day_pl.get("guids") or []) if is_track_guid(str(g))]
+            )
+            day_pl_note = ""
+            if day_name and day_n:
+                day_pl_note = (
+                    f" · {day_n} in “{day_name}” (Library → Finish Sync)"
+                )
+            self._refresh_finish_day_podcast_menu()
 
             msg = f"{label}: {n} episode(s) ready{day_pl_note}"
             if errs:
@@ -1963,6 +2253,13 @@ class AppController:
                 allow_video=False,
                 audio_as_video=False,
                 target_audio_format=self._target_format(),
+                resolve_audio_format=self._target_format_for_podcast_episode,
+                tracknumber_as_date=bool(
+                    self._config.podcast_tracknumber_as_date
+                ),
+                title_date_prefix=bool(
+                    self._config.podcast_title_date_prefix
+                ),
             )
 
         def on_done(prep) -> None:
@@ -2057,14 +2354,20 @@ class AppController:
                 "(reconnect / Resume Sync if more episodes remain)"
             )
             return
-        # Publish day playlist ASAP after a successful podcast batch (uses
-        # send-cache object ids; no list_files). Then quiet-drain leftovers.
-        if ok:
-            self._try_publish_day_podcast_playlist()
+        # Day playlist is *not* auto-pushed after a podcast flood (PTP 02ff /
+        # session poison on ZEN). Episodes are recorded into today's plan;
+        # user runs Library → Finish Sync when ready.
+        #
+        # TODO(podcast-auto-day-playlist): re-enable automatic on-device day
+        # playlist publish after a quiet period / successful reconnect once
+        # ZEN PTP 02ff after bulk podcast send is mitigated (session recycle,
+        # deferred push with longer quiet, or push on next connect). Until
+        # then Finish Sync is the only publish path.
+        self._refresh_finish_day_podcast_menu()
         self._schedule_podcast_leftover_drain()
 
     def _schedule_podcast_leftover_drain(self) -> None:
-        """After a quiet pause, sync any still-pending episodes + retry day PL."""
+        """After a quiet pause, sync any still-pending episodes (no playlist push)."""
         try:
             self._device_io.mark_quiet()
         except Exception:
@@ -2081,20 +2384,22 @@ class AppController:
             if self._podcast_auto_host_inflight or self._transfer_busy:
                 return
             self._maybe_auto_sync_pending_podcasts()
-            if (
-                not self._podcast_auto_device_inflight
-                and not self._transfer_busy
-            ):
-                # Retry if first publish raced USB quiet / missing handles.
-                self._try_publish_day_podcast_playlist()
+            self._refresh_finish_day_podcast_menu()
 
         try:
+            n = day_playlist_guid_count()
+            day_note = ""
+            if n > 0:
+                day_note = (
+                    f" · {n} ready for Finish Sync "
+                    f"({day_playlist_display_name()})"
+                )
             self.win.lbl_podcast_status.configure(
                 text=(
                     f"Podcast: waiting {delay_ms // 1000}s for device "
-                    "before remaining episodes…"
+                    f"before remaining episodes…{day_note}"
                     if delay_ms >= 1000
-                    else "Podcast: checking for remaining episodes…"
+                    else f"Podcast: checking for remaining episodes…{day_note}"
                 )
             )
         except Exception:
@@ -2105,7 +2410,11 @@ class AppController:
         self.win.root.after(delay_ms, _run)
 
     def _record_day_podcast_playlist_guid(self, guid: str) -> None:
-        """Append a successfully sent episode GUID to today's device playlist."""
+        """Append a successfully sent episode GUID to today's day playlist plan.
+
+        Does **not** push the on-device playlist (that is Library → Finish Sync
+        after the podcast flood, to avoid ZEN PTP 02ff session poison).
+        """
         g = (guid or "").strip().lower()
         if not is_track_guid(g):
             return
@@ -2117,14 +2426,163 @@ class AppController:
             "name": plan.get("name") or podcast_day_playlist_name(),
             "guids": list(plan.get("guids") or []),
         }
+        # Mirror into the host day playlist (Playlists tab).
+        try:
+            from mtpmanager.app.podcast_ops import add_episode_to_day_host_playlist
+            from mtpmanager.infra.podcast_index import get_episode_by_guid
+
+            ep = get_episode_by_guid(g)
+            if ep is not None:
+                add_episode_to_day_host_playlist(ep)
+        except Exception:
+            logger.debug("host day playlist mirror failed", exc_info=True)
+        self._refresh_finish_day_podcast_menu()
         logger.debug(
             "Day podcast playlist +1 guid=%s… total=%d",
             g[:8],
             len(self._pending_day_podcast_playlist["guids"]),
         )
 
-    def _try_publish_day_podcast_playlist(self) -> None:
-        """Create/update today's on-device playlist for just-sent episodes.
+    def _refresh_finish_day_podcast_menu(self) -> None:
+        """Enable Library → Finish Sync when today's plan has episode GUIDs."""
+        try:
+            name = day_playlist_display_name()
+            n = day_playlist_guid_count()
+            self.win.set_finish_day_podcast_sync_menu(
+                playlist_name=name,
+                enabled=n > 0,
+                episode_count=n,
+            )
+        except Exception:
+            logger.debug("refresh Finish Sync menu failed", exc_info=True)
+
+    def on_finish_day_podcast_sync(self) -> None:
+        """Library → Finish Sync (day playlist): push plan to the device."""
+        plan = load_day_playlist_plan()
+        if not plan or not (plan.get("guids") or []):
+            messagebox.showinfo(
+                "Finish Sync",
+                "No episodes are queued for today's day podcast playlist yet.\n\n"
+                "Sync podcasts (or add episodes from the Podcasts tab), then "
+                "try again.",
+            )
+            self._refresh_finish_day_podcast_menu()
+            return
+        name = str(plan.get("name") or day_playlist_display_name())
+        n = len([g for g in plan["guids"] if is_track_guid(str(g))])
+        if not self.device.is_connected():
+            messagebox.showinfo(
+                "Finish Sync",
+                f"“{name}” has {n} episode(s) ready, but no device is connected.\n\n"
+                "Connect the player (Experimental / PyMTP mode), then choose "
+                f"Finish Sync again.",
+            )
+            return
+        if self.win.active_mode() != "experimental":
+            messagebox.showinfo(
+                "Finish Sync",
+                f"Pushing “{name}” needs Experimental mode (PyMTP).\n\n"
+                "Turn off Stable Mode, reconnect, then try again.",
+            )
+            return
+        if self._transfer_busy or self._bg.busy:
+            messagebox.showinfo(
+                "Finish Sync",
+                "Another transfer or background job is still running.\n\n"
+                "Wait for it to finish (or cancel it), then Finish Sync.",
+            )
+            return
+        self._pending_day_podcast_playlist = {
+            "name": name,
+            "guids": list(plan.get("guids") or []),
+        }
+        self._try_publish_day_podcast_playlist(manual=True)
+
+    def on_podcast_add_to_day_playlist(self) -> None:
+        """Episode context: add selected episode GUID to today's day playlist."""
+        from mtpmanager.app.podcast_ops import add_episode_to_day_host_playlist
+
+        eids = self._selected_episode_ids()
+        if len(eids) != 1:
+            messagebox.showinfo(
+                "Day Playlist", "Select a single episode to add."
+            )
+            return
+        ep = get_episode(eids[0])
+        if ep is None:
+            return
+        g = (ep.guid or "").strip().lower()
+        if not is_track_guid(g):
+            messagebox.showerror(
+                "Day Playlist", "That episode has no stable GUID yet."
+            )
+            return
+        if day_playlist_contains(g):
+            self._update_podcast_episode_menu_labels()
+            return
+        plan = append_day_playlist_guid(g)
+        try:
+            add_episode_to_day_host_playlist(ep)
+        except Exception:
+            logger.debug("host day playlist add failed", exc_info=True)
+        if plan is not None:
+            self._pending_day_podcast_playlist = {
+                "name": plan.get("name") or podcast_day_playlist_name(),
+                "guids": list(plan.get("guids") or []),
+            }
+        self._refresh_finish_day_podcast_menu()
+        self._update_podcast_episode_menu_labels()
+        name = day_playlist_display_name()
+        try:
+            self.win.lbl_podcast_status.configure(
+                text=f"Added to “{name}” ({day_playlist_guid_count()} episode(s))"
+            )
+        except Exception:
+            pass
+
+    def on_podcast_remove_from_day_playlist(self) -> None:
+        """Episode context: remove selected episode from today's day playlist."""
+        from mtpmanager.app.podcast_ops import remove_episode_from_day_host_playlist
+
+        eids = self._selected_episode_ids()
+        if len(eids) != 1:
+            messagebox.showinfo(
+                "Day Playlist", "Select a single episode to remove."
+            )
+            return
+        ep = get_episode(eids[0])
+        if ep is None:
+            return
+        g = (ep.guid or "").strip().lower()
+        if not is_track_guid(g):
+            return
+        if not day_playlist_contains(g):
+            self._update_podcast_episode_menu_labels()
+            return
+        plan = remove_day_playlist_guid(g)
+        try:
+            remove_episode_from_day_host_playlist(g)
+        except Exception:
+            logger.debug("host day playlist remove failed", exc_info=True)
+        if plan is not None:
+            self._pending_day_podcast_playlist = {
+                "name": plan.get("name") or podcast_day_playlist_name(),
+                "guids": list(plan.get("guids") or []),
+            }
+        else:
+            self._pending_day_podcast_playlist = None
+        self._refresh_finish_day_podcast_menu()
+        self._update_podcast_episode_menu_labels()
+        name = day_playlist_display_name()
+        try:
+            self.win.lbl_podcast_status.configure(
+                text=f"Removed from “{name}” ({day_playlist_guid_count()} left)"
+            )
+        except Exception:
+            pass
+
+    def _try_publish_day_podcast_playlist(self, *, manual: bool = False) -> None:
+        """Create/update today's on-device playlist from the durable day plan.
 
         Membership is GUID-only (episodes already on the player). Object ids
         come from the incremental device index (``record_send`` after each
@@ -2132,10 +2590,18 @@ class AppController:
         after a long podcast flood — that walk is a common LIBMTP panic
         trigger on ZEN and is unnecessary when send returned real item ids.
 
+        Auto paths no longer call this after a podcast batch (PTP 02ff risk);
+        use Library → Finish Sync… (*manual*=True) when the user is ready.
+
         Requires Experimental mode + connected device.
         """
         pending = self._pending_day_podcast_playlist or load_day_playlist_plan()
         if not pending:
+            if manual:
+                messagebox.showinfo(
+                    "Finish Sync",
+                    "No day podcast playlist is ready to publish.",
+                )
             return
         self._pending_day_podcast_playlist = pending
         name = str(pending.get("name") or "").strip()
@@ -2148,14 +2614,18 @@ class AppController:
             self._pending_day_podcast_playlist = None
             return
         if not guids:
-            if not self._podcast_auto_host_inflight:
+            if manual:
+                messagebox.showinfo(
+                    "Finish Sync",
+                    f"“{name}” has no episode GUIDs yet.",
+                )
+            elif not self._podcast_auto_host_inflight:
                 logger.info(
-                    "Day podcast playlist %r skipped: no successfully sent "
-                    "episode GUIDs",
+                    "Day podcast playlist %r skipped: no episode GUIDs",
                     name,
                 )
-                clear_day_playlist_plan()
-                self._pending_day_podcast_playlist = None
+                # Keep empty plan only while host is still filling it.
+            self._refresh_finish_day_podcast_menu()
             return
         if not self.device.is_connected():
             logger.info(
@@ -2164,6 +2634,12 @@ class AppController:
                 name,
                 len(guids),
             )
+            if manual:
+                messagebox.showinfo(
+                    "Finish Sync",
+                    f"Device not connected. “{name}” still has {len(guids)} "
+                    "episode(s) saved for today.",
+                )
             return
         if self.win.active_mode() != "experimental":
             logger.info(
@@ -2172,10 +2648,26 @@ class AppController:
                 name,
                 len(guids),
             )
+            if manual:
+                messagebox.showinfo(
+                    "Finish Sync",
+                    f"Pushing “{name}” needs Experimental mode (PyMTP).",
+                )
             return
         serial = self._device_serial or ""
         if not serial:
             return
+
+        if manual:
+            try:
+                self.win.set_progress_status(
+                    f"Publishing “{name}” ({len(guids)} episode(s))…"
+                )
+                self.win.lbl_podcast_status.configure(
+                    text=f"Finish Sync: pushing “{name}”…"
+                )
+            except Exception:
+                pass
 
         def work() -> object:
             # Resolve from send cache only — no list_files after batch.
@@ -2220,6 +2712,7 @@ class AppController:
                 pass
             clear_day_playlist_plan()
             self._pending_day_podcast_playlist = None
+            self._refresh_finish_day_podcast_menu()
             if result is None:
                 return
             verb = "Created" if result.created else "Updated"
@@ -2249,12 +2742,20 @@ class AppController:
                 100,
                 lambda: self._refresh_device_playlists_tab(keep_selection=True),
             )
+            if manual and result.missing_guid:
+                messagebox.showinfo(
+                    "Finish Sync",
+                    f"Pushed “{result.name}” with {result.resolved} episode(s).\n\n"
+                    f"{result.missing_guid} GUID(s) were not found on the device "
+                    "(not synced yet or send cache missing handles).",
+                )
 
         def on_error(exc: BaseException) -> None:
             try:
                 self.win.set_progress_status("")
             except Exception:
                 pass
+            self._refresh_finish_day_podcast_menu()
             msg = str(exc).lower()
             if "no on-device object" in msg or "object id" in msg:
                 logger.info(
@@ -2262,6 +2763,12 @@ class AppController:
                     name,
                     exc,
                 )
+                if manual:
+                    messagebox.showwarning(
+                        "Finish Sync",
+                        f"Could not publish “{name}” yet:\n{exc}\n\n"
+                        "Sync the episodes to the device first, then try again.",
+                    )
                 return
             # Keep durable plan for retry after reconnect.
             logger.warning(
@@ -2270,6 +2777,12 @@ class AppController:
                 exc,
                 exc_info=True,
             )
+            if manual:
+                messagebox.showerror(
+                    "Finish Sync",
+                    f"Could not publish “{name}”:\n{exc}\n\n"
+                    "The day playlist was kept — reconnect and try Finish Sync again.",
+                )
 
         try:
             self.win.set_progress_status(
@@ -2364,6 +2877,13 @@ class AppController:
                 episodes,
                 allow_video=False,
                 target_audio_format=self._target_format(),
+                resolve_audio_format=self._target_format_for_podcast_episode,
+                tracknumber_as_date=bool(
+                    self._config.podcast_tracknumber_as_date
+                ),
+                title_date_prefix=bool(
+                    self._config.podcast_title_date_prefix
+                ),
             )
 
         def on_done(prep) -> None:
@@ -2416,6 +2936,13 @@ class AppController:
                 allow_video=allow_video,
                 audio_as_video=audio_as_video,
                 target_audio_format=self._target_format(),
+                resolve_audio_format=self._target_format_for_podcast_episode,
+                tracknumber_as_date=bool(
+                    self._config.podcast_tracknumber_as_date
+                ),
+                title_date_prefix=bool(
+                    self._config.podcast_title_date_prefix
+                ),
             )
 
         def on_done(prep) -> None:
@@ -3222,18 +3749,22 @@ class AppController:
                         else "Fetch track tags…"
                     ),
                 )
-                # Index 4: Add to Device Playlist (after first separator).
+                # Index 3: Track Info (single-track detail).
                 self.win.menu_device_track_ctx.entryconfig(
-                    4,
+                    3, label="Track Info…"
+                )
+                # Index 5: Add to Device Playlist (after first separator).
+                self.win.menu_device_track_ctx.entryconfig(
+                    5,
                     label=(
                         f"Add {n} {noun} to Device Playlist…"
                         if n > 1
                         else "Add to Device Playlist…"
                     ),
                 )
-                # Index 6: Delete (after second separator).
+                # Index 7: Delete (after second separator).
                 self.win.menu_device_track_ctx.entryconfig(
-                    6,
+                    7,
                     label=f"Delete {n} {noun} from device…",
                 )
             else:
@@ -3247,10 +3778,13 @@ class AppController:
                     2, label="Fetch track tags…"
                 )
                 self.win.menu_device_track_ctx.entryconfig(
-                    4, label="Add to Device Playlist…"
+                    3, label="Track Info…"
                 )
                 self.win.menu_device_track_ctx.entryconfig(
-                    6, label="Delete from device…"
+                    5, label="Add to Device Playlist…"
+                )
+                self.win.menu_device_track_ctx.entryconfig(
+                    7, label="Delete from device…"
                 )
         except Exception:
             pass
@@ -7278,6 +7812,359 @@ class AppController:
             return
         self._start_device_tag_enrich(batch, interactive=True)
 
+    def action_device_track_info_selected(self) -> None:
+        """Context menu: show metadata / codec / size for the selected track."""
+        tree = self._device_context_tree or self.win.active_device_tree()
+        tracks = self._device_tracks_from_tree_selection(tree)
+        refs = self._device_refs_for_tracks(tracks)
+        if not refs:
+            messagebox.showinfo("Track Info", "No track selected.")
+            return
+        # Prefer the right-clicked row's object when multi-select.
+        ref = refs[0]
+        track = tracks[0] if tracks else None
+        if self._device_context_row:
+            by_iid = self._device_track_map_for_tree(tree)
+            focused = by_iid.get(self._device_context_row)
+            if focused is not None:
+                track = focused
+                oid = self._item_id_from_device_track(focused)
+                if oid is not None:
+                    by_id = self._device_refs_by_item_id()
+                    if oid in by_id:
+                        ref = by_id[oid]
+        oid = int(ref.item_id or 0)
+        if oid <= 0:
+            messagebox.showinfo("Track Info", "No device object id for selection.")
+            return
+
+        multi_note = ""
+        if len(refs) > 1:
+            multi_note = f"Showing 1 of {len(refs)} selected items."
+
+        serial = self._device_serial or ""
+        cached_files = (
+            files_by_item_ids(serial, [oid]) if serial else {}
+        )
+        cached = cached_files.get(oid)
+
+        # Build a best-effort snapshot without USB first.
+        info = self._compose_device_track_info(
+            ref, track=track, file_entry=cached, live=None
+        )
+        extra = self._track_info_extra_lines(
+            ref, track=track, file_entry=cached, source_note=multi_note
+        )
+
+        # If device is free, refresh live metadata then show dialog.
+        can_query = (
+            self.device.is_connected()
+            and not self._transfer_busy
+            and not self._device_tag_enrich_inflight
+            and self._device_io.try_acquire("track-info")
+        )
+        if not can_query:
+            note = "Cached listing / host join only (device busy or offline)."
+            extra = self._track_info_extra_lines(
+                ref,
+                track=track,
+                file_entry=cached,
+                source_note=multi_note,
+                live_note=note,
+            )
+            show_track_info_dialog(
+                self.win.root, info, title="Track Info", extra_lines=extra
+            )
+            return
+
+        device = self.device
+        gate_reason = "track-info"
+
+        def work():
+            live_info = None
+            live_file = None
+            live_err = ""
+            try:
+                live_info = device_ops.get_track_metadata(device, oid)
+            except Exception as e:
+                live_err = f"Get_Trackmetadata: {e}"
+                logger.info(
+                    "Track Info live metadata failed id=%s: %s", oid, e
+                )
+            try:
+                live_file = device_ops.get_file_metadata(device, oid)
+            except Exception as e:
+                if not live_err:
+                    live_err = f"Get_Filemetadata: {e}"
+                logger.info(
+                    "Track Info live file metadata failed id=%s: %s", oid, e
+                )
+            return live_info, live_file, live_err
+
+        def on_done(result) -> None:
+            self._device_io.release(
+                reason=gate_reason, quiet_s=_DEVICE_USB_COOLDOWN_S
+            )
+            try:
+                self.win.set_progress_status("")
+            except Exception:
+                pass
+            live_info, live_file, live_err = result
+            merged = self._compose_device_track_info(
+                ref,
+                track=track,
+                file_entry=live_file or cached,
+                live=live_info,
+            )
+            live_note = "Live MTP metadata."
+            if live_err and live_info is None and live_file is None:
+                live_note = f"Live query failed ({live_err}); showing cache."
+            elif live_err:
+                live_note = f"Partial live data ({live_err})."
+            extras = self._track_info_extra_lines(
+                ref,
+                track=track,
+                file_entry=live_file or cached,
+                source_note=multi_note,
+                live_note=live_note,
+            )
+            logger.info(
+                "Track Info id=%s name=%r title=%r size=%s ft=%s",
+                merged.item_id,
+                merged.name,
+                merged.title,
+                merged.filesize,
+                merged.filetype,
+            )
+            show_track_info_dialog(
+                self.win.root, merged, title="Track Info", extra_lines=extras
+            )
+
+        def on_error(exc: BaseException) -> None:
+            self._device_io.release(
+                reason=gate_reason, quiet_s=_DEVICE_USB_COOLDOWN_S
+            )
+            try:
+                self.win.set_progress_status("")
+            except Exception:
+                pass
+            logger.warning("Track Info job failed: %s", exc)
+            extras = self._track_info_extra_lines(
+                ref,
+                track=track,
+                file_entry=cached,
+                source_note=multi_note,
+                live_note=f"Live query failed: {exc}",
+            )
+            show_track_info_dialog(
+                self.win.root, info, title="Track Info", extra_lines=extras
+            )
+
+        try:
+            self.win.set_progress_status("Reading track info…")
+        except Exception:
+            pass
+        self._bg.submit(
+            work,
+            on_done=on_done,
+            on_error=on_error,
+            name="device-track-info",
+        )
+
+    def _compose_device_track_info(
+        self,
+        ref: DeviceTrackRef,
+        *,
+        track: Track | None,
+        file_entry,
+        live: DeviceTrackInfo | None,
+    ) -> DeviceTrackInfo:
+        """Merge live MTP, cache, and host tags into one DeviceTrackInfo."""
+        meta = track.meta if track is not None else None
+        name = (
+            (live.name if live and live.name else "")
+            or (file_entry.name if file_entry is not None else "")
+            or (ref.name or "")
+            or ""
+        ).strip()
+        parent_id = (
+            int(live.parent_id)
+            if live and live.parent_id
+            else int(file_entry.parent_id)
+            if file_entry is not None and file_entry.parent_id
+            else int(ref.parent_id or 0)
+        )
+        storage_id = (
+            int(live.storage_id)
+            if live and live.storage_id
+            else int(file_entry.storage_id)
+            if file_entry is not None and file_entry.storage_id
+            else int(ref.storage_id or 0)
+        )
+        filesize = (
+            int(live.filesize)
+            if live and live.filesize
+            else int(file_entry.filesize)
+            if file_entry is not None
+            else 0
+        )
+        filetype = (
+            int(live.filetype)
+            if live and live.filetype
+            else int(file_entry.filetype)
+            if file_entry is not None and file_entry.filetype
+            else int(ref.filetype or 0)
+        )
+        mtime = int(live.modificationdate) if live else 0
+        if not mtime and file_entry is not None:
+            mtime = int(getattr(file_entry, "modificationdate", 0) or 0)
+
+        def _pick_str(*vals: str) -> str:
+            for v in vals:
+                s = (v or "").strip()
+                if s and s.lower() not in {
+                    "unknown title",
+                    "unknown artist",
+                    "unknown album",
+                    "unknown genre",
+                    "unknown composer",
+                    "(none)",
+                }:
+                    return s
+            for v in vals:
+                s = (v or "").strip()
+                if s:
+                    return s
+            return ""
+
+        title = _pick_str(
+            live.title if live else "",
+            ref.title,
+            meta.title if meta else "",
+        )
+        artist = _pick_str(
+            live.artist if live else "",
+            ref.artist,
+            meta.artist if meta else "",
+        )
+        album = _pick_str(
+            live.album if live else "",
+            ref.album,
+            meta.album if meta else "",
+        )
+        genre = _pick_str(
+            live.genre if live else "",
+            ref.genre,
+            meta.genre if meta else "",
+        )
+        composer = _pick_str(
+            live.composer if live else "",
+            meta.composer if meta else "",
+        )
+        date = _pick_str(
+            live.date if live else "",
+            ref.date,
+            meta.date if meta else "",
+        )
+        tn = 0
+        if live and live.tracknumber:
+            tn = int(live.tracknumber)
+        elif ref.tracknumber:
+            try:
+                tn = int(str(ref.tracknumber).split("/")[0].strip())
+            except (TypeError, ValueError):
+                tn = 0
+        elif meta and meta.tracknumber:
+            try:
+                tn = int(str(meta.tracknumber).split("/")[0].strip())
+            except (TypeError, ValueError):
+                tn = 0
+
+        duration_ms = int(live.duration_ms) if live and live.duration_ms else 0
+        if not duration_ms and meta and meta.length_sec:
+            try:
+                duration_ms = int(float(meta.length_sec) * 1000)
+            except (TypeError, ValueError):
+                duration_ms = 0
+
+        sample_rate = (
+            int(live.sample_rate)
+            if live and live.sample_rate
+            else int(meta.sample_rate)
+            if meta
+            else 0
+        )
+        channels = (
+            int(live.channels)
+            if live and live.channels
+            else int(meta.channels)
+            if meta
+            else 0
+        )
+        bitrate = (
+            int(live.bitrate)
+            if live and live.bitrate
+            else int(meta.bitrate)
+            if meta
+            else 0
+        )
+        bitrate_type = (
+            int(live.bitrate_type)
+            if live and live.bitrate_type
+            else int(meta.bitrate_mode)
+            if meta
+            else 0
+        )
+
+        return DeviceTrackInfo(
+            item_id=int(ref.item_id or 0),
+            name=name,
+            parent_id=parent_id,
+            storage_id=storage_id,
+            filesize=filesize,
+            filetype=filetype,
+            modificationdate=mtime,
+            title=title,
+            artist=artist,
+            album=album,
+            genre=genre,
+            composer=composer,
+            date=date,
+            tracknumber=tn,
+            duration_ms=duration_ms,
+            sample_rate=sample_rate,
+            channels=channels,
+            bitrate=bitrate,
+            bitrate_type=bitrate_type,
+            rating=int(live.rating) if live else 0,
+            usecount=int(live.usecount) if live else 0,
+        )
+
+    def _track_info_extra_lines(
+        self,
+        ref: DeviceTrackRef,
+        *,
+        track: Track | None,
+        file_entry,
+        source_note: str = "",
+        live_note: str = "",
+    ) -> list[str]:
+        lines: list[str] = []
+        guid = guid_from_remote_name(ref.name) or (
+            track.guid if track and is_track_guid(track.guid) else ""
+        )
+        if guid:
+            lines.append(f"Track GUID: {guid}")
+        if track is not None:
+            host = self._host_path_for_device_track(track)
+            if host:
+                lines.append(f"Host library path: {host}")
+        if source_note:
+            lines.append(source_note)
+        if live_note:
+            lines.append(live_note)
+        return lines
+
     def _start_device_tag_enrich(
         self,
         need: list[DeviceTrackRef],
@@ -9091,6 +9978,8 @@ class AppController:
         transport = self._transport()
         transcoder = self.transcoder
         device_formats = self._device_audio_formats()
+        encode_settings = self._encode_settings_for_track(track)
+        fmt = encode_settings.normalized_format()
         path = track.path
         self._mark_batch_queued([track])
 
@@ -9109,9 +9998,10 @@ class AppController:
 
                 logger.info(
                     "Single-track transfer start: path=%s target_format=%s "
-                    "device_formats=%s",
+                    "encode=%s device_formats=%s",
                     path,
                     fmt,
+                    encode_settings.summary_line(),
                     sorted(device_formats) if device_formats else None,
                 )
                 self._batch_track_by_path = {track.path: track}
@@ -9129,6 +10019,8 @@ class AppController:
                     should_cancel=self._should_cancel_job,
                     device_guid_stems=stems,
                     on_after_send=self._on_after_send,
+                    encode_settings=encode_settings,
+                    resolve_encode_settings=self._encode_settings_for_track,
                 )
                 report("progress", 1, 1, "")
                 logger.info("Single-track transfer done: path=%s", path)
@@ -9406,7 +10298,16 @@ class AppController:
             # Prefer the on-disk path we were given for the send.
             if p and os.path.isfile(p) and (ep.local_path or "") != p:
                 ep = replace(ep, local_path=p)
-            return episode_as_track(ep, show)
+            return episode_as_track(
+                ep,
+                show,
+                tracknumber_as_date=bool(
+                    self._config.podcast_tracknumber_as_date
+                ),
+                title_date_prefix=bool(
+                    self._config.podcast_title_date_prefix
+                ),
+            )
         except FileNotFoundError:
             return None
         except Exception:
@@ -9525,6 +10426,13 @@ class AppController:
         transport = self._transport()
         transcoder = self.transcoder
         device_formats = self._device_audio_formats()
+        encode_settings = self._encode_settings()
+        fmt = encode_settings.normalized_format()
+        ab_enc = (
+            self._config.resolved_audiobook_audio_encode()
+            if self._config.uses_audiobook_encode_override()
+            else None
+        )
         mode = self.win.active_mode()
 
         if resume_job is not None:
@@ -9550,8 +10458,10 @@ class AppController:
         self.win.set_resume_sync_enabled(False)
         self._mark_batch_queued(batch)
         logger.info(
-            "Sync job start: %s (queue=%d)",
+            "Sync job start: %s encode=%s audiobook_encode=%s (queue=%d)",
             job.summary_line(),
+            encode_settings.summary_line(),
+            ab_enc.summary_line() if ab_enc is not None else "global",
             track_queue.total(),
         )
 
@@ -9578,6 +10488,8 @@ class AppController:
                 should_cancel=self._should_cancel_job,
                 device_guid_stems=stems,
                 on_after_send=self._on_after_send,
+                encode_settings=encode_settings,
+                resolve_encode_settings=self._encode_settings_for_track,
             )
 
         def on_done(succeeded: int) -> None:
@@ -9643,6 +10555,363 @@ class AppController:
             self._start_send_video([track.path])
             return
         self._transfer_one(track, self._target_format())
+
+    def action_shrink_library_selection(self) -> None:
+        """Library tree context: Shrink selected tracks / group contents."""
+        tracks = self._tracks_from_selected_iids(quiet=True)
+        if not tracks:
+            # Artist/album header: use group seed expansion via sync helpers.
+            seed = self._context_group_seed
+            if seed is None:
+                iid = self.win.selected_tree_iid()
+                seed = self._group_seed_by_iid.get(iid or "")
+            if seed is not None:
+                # Expand same as sync album/artist
+                kind = "album"
+                iid = self.win.selected_tree_iid()
+                if iid:
+                    try:
+                        tags = set(self.win.active_library_tree().item(iid, "tags"))
+                    except Exception:
+                        tags = set()
+                    if "group_artist" in tags:
+                        kind = "artist"
+                tracks = self._tracks_for_shrink_from_seed(seed, kind=kind)
+        self._start_shrink(tracks, source="library")
+
+    def action_shrink_podcast_selection(self) -> None:
+        """Podcasts tab episode context: Shrink selected episodes on device."""
+        from mtpmanager.app.podcast_ops import episode_as_track
+
+        eids = self._selected_episode_ids()
+        tracks: list[Track] = []
+        for eid in eids:
+            ep = get_episode(eid)
+            if ep is None:
+                continue
+            show = get_podcast(int(ep.podcast_id))
+            if show is None:
+                continue
+            try:
+                if ep.local_path and os.path.isfile(ep.local_path):
+                    tracks.append(
+                        episode_as_track(
+                            ep,
+                            show,
+                            tracknumber_as_date=bool(
+                                self._config.podcast_tracknumber_as_date
+                            ),
+                            title_date_prefix=bool(
+                                self._config.podcast_title_date_prefix
+                            ),
+                        )
+                    )
+                else:
+                    # Display-shaped track with guid; shrink needs a local path
+                    # for re-encode — skip if no download.
+                    if is_track_guid(ep.guid):
+                        tracks.append(
+                            Track(
+                                path=ep.local_path or f"podcast:{ep.guid}",
+                                meta=TrackMetadata(
+                                    title=ep.title or "Episode",
+                                    genre="Podcast",
+                                ),
+                                guid=ep.guid,
+                            )
+                        )
+            except Exception:
+                logger.debug("shrink podcast track build failed", exc_info=True)
+        # Drop tracks without a real local file for re-encode.
+        tracks = [t for t in tracks if t.path and os.path.isfile(t.path)]
+        if not tracks:
+            messagebox.showinfo(
+                "Shrink",
+                "No local episode files to re-encode.\n\n"
+                "Download or Sync the episode first so a cache file exists.",
+            )
+            return
+        self._start_shrink(tracks, source="podcast")
+
+    def action_shrink_device_selection(self) -> None:
+        """Device tree context: Shrink selected on-device objects (by GUID)."""
+        tree = self._device_context_tree or self.win.active_device_tree()
+        iid = self._device_context_row
+        tracks: list[Track] = []
+        if iid:
+            try:
+                tags = set(tree.item(iid, "tags") or ())
+            except Exception:
+                tags = set()
+            if tags & {"group_artist", "group_album", "group_directory", "group_folder"}:
+                tracks = self._device_tracks_under_iid(tree, iid)
+            else:
+                tracks = self._device_tracks_from_tree_selection(tree)
+        else:
+            tracks = self._device_tracks_from_tree_selection(tree)
+        refs = self._device_refs_for_tracks(tracks)
+        # Map device objects → host library/podcast tracks by ObjectFileName GUID.
+        host: list[Track] = []
+        seen: set[str] = set()
+        for ref in refs:
+            g = guid_from_remote_name(ref.name or "")
+            if not is_track_guid(g):
+                continue
+            if g in seen:
+                continue
+            ht = self._host_track_for_guid(g)
+            if ht is not None:
+                seen.add(g)
+                host.append(ht)
+        if not host:
+            messagebox.showinfo(
+                "Shrink",
+                "Could not match selected device items to host library or "
+                "podcast files (GUID join).\n\n"
+                "Refresh the device index after a full sync, or Shrink from "
+                "the Library / Podcasts tab.",
+            )
+            return
+        self._start_shrink(host, source="device")
+
+    def _host_track_for_guid(self, guid: str) -> Track | None:
+        """Resolve a host Track (library or downloaded podcast) by GUID."""
+        g = (guid or "").strip().lower()
+        if not is_track_guid(g):
+            return None
+        for t in self.library.tracks:
+            if (t.guid or "").lower() == g and t.path and os.path.isfile(t.path):
+                return t
+        try:
+            from mtpmanager.app.podcast_ops import episode_as_track
+            from mtpmanager.infra.podcast_index import get_episode_by_guid
+
+            ep = get_episode_by_guid(g)
+            if ep is None or not ep.local_path or not os.path.isfile(ep.local_path):
+                return None
+            show = get_podcast(int(ep.podcast_id))
+            if show is None:
+                return None
+            return episode_as_track(
+                ep,
+                show,
+                tracknumber_as_date=bool(
+                    self._config.podcast_tracknumber_as_date
+                ),
+                title_date_prefix=bool(
+                    self._config.podcast_title_date_prefix
+                ),
+            )
+        except Exception:
+            logger.debug("host track for guid failed", exc_info=True)
+            return None
+
+    def _tracks_for_shrink_from_seed(
+        self, seed: Track | None, *, kind: str
+    ) -> list[Track]:
+        """Expand artist/album seed the same way sync does (audio only)."""
+        if seed is None:
+            return []
+        # Reuse existing seed expansion via library filters.
+        try:
+            if kind == "artist":
+                artist = (seed.meta.artist or "").strip()
+                return self._audio_tracks_only(
+                    [
+                        t
+                        for t in self.library.tracks
+                        if (t.meta.artist or "").strip() == artist
+                    ]
+                )
+            if kind == "album":
+                artist = (seed.meta.artist or "").strip()
+                album = (seed.meta.album or "").strip()
+                return self._audio_tracks_only(
+                    [
+                        t
+                        for t in self.library.tracks
+                        if (t.meta.artist or "").strip() == artist
+                        and (t.meta.album or "").strip() == album
+                    ]
+                )
+        except Exception:
+            logger.debug("shrink seed expand failed", exc_info=True)
+        return self._audio_tracks_only([seed]) if seed else []
+
+    def _start_shrink(self, tracks: list[Track], *, source: str) -> None:
+        """Confirm, pick encode if needed, delete+re-send with force compress."""
+        from mtpmanager.app.shrink import (
+            collect_shrink_items,
+            shrink_items,
+            suggest_shrink_preset,
+            would_passthrough,
+        )
+        from mtpmanager.domain.audio_encode import (
+            presets_for_format,
+            shrink_presets_at_or_below,
+        )
+
+        audio = self._audio_tracks_only(list(tracks or []))
+        audio = [t for t in audio if t.path and os.path.isfile(t.path)]
+        if not audio:
+            messagebox.showinfo("Shrink", "No local audio tracks to shrink.")
+            return
+        if not self.device.is_connected():
+            messagebox.showinfo(
+                "Shrink",
+                "Connect the device first (Shrink deletes and re-sends "
+                "on-device objects).",
+            )
+            return
+        if self.win.active_mode() != "experimental":
+            messagebox.showinfo(
+                "Shrink",
+                "Shrink needs Experimental mode (PyMTP) so object ids and "
+                "playlists can be updated.",
+            )
+            return
+        serial = self._device_serial or device_serial_key()
+        if not serial:
+            messagebox.showinfo("Shrink", "No device serial available.")
+            return
+        items, missing = collect_shrink_items(audio, serial=serial)
+        if not items:
+            messagebox.showinfo(
+                "Shrink",
+                "None of the selected tracks are on the device "
+                "(no GUID→object-id in the device index).\n\n"
+                "Sync them once first, or refresh the device index.",
+            )
+            return
+        n_miss = len(missing)
+        miss_note = (
+            f"\n\n({n_miss} not on device will be skipped.)" if n_miss else ""
+        )
+        if not messagebox.askyesno(
+            "Shrink",
+            f"Delete and re-encode {len(items)} track(s) already on the device "
+            f"with more aggressive compression?\n\n"
+            "Device playlists that reference these tracks will be updated "
+            f"to the new objects.{miss_note}",
+        ):
+            return
+
+        # Resolve per-track configured settings; detect passthrough cases.
+        need_dialog = False
+        for it in items:
+            conf = self._encode_settings_for_track(it.track)
+            if would_passthrough(it.track.path, conf):
+                need_dialog = True
+                break
+
+        user_settings = None
+        if need_dialog:
+            sample = items[0]
+            conf = self._encode_settings_for_track(sample.track)
+            allowed = self._allowed_send_formats()
+            preset = suggest_shrink_preset(
+                sample.track, configured=conf, allowed_formats=allowed
+            )
+            fmt = conf.normalized_format()
+            ladder = list(presets_for_format(fmt))
+            if allowed is not None:
+                allowed_set = {str(x).lower().lstrip(".") for x in allowed}
+                ladder = [p for p in ladder if p.format in allowed_set]
+            if not ladder:
+                ladder = shrink_presets_at_or_below(fmt)
+            initial = 0
+            if preset is not None:
+                for i, p in enumerate(ladder):
+                    if p.id == preset.id:
+                        initial = i
+                        break
+            # Prefer starting at or below current track quality.
+            dlg = show_shrink_encode_dialog(
+                self.win.root,
+                track_label=(
+                    sample.track.meta.title if sample.track.meta else ""
+                ),
+                presets=ladder,
+                initial_index=initial,
+                n_tracks=len(items),
+            )
+            if dlg is None:
+                return
+            user_settings = dlg.audio_encode
+
+        if not self._begin_transfer_job():
+            return
+        device = self.device
+        transport = self._transport()
+        transcoder = self.transcoder
+        batch = list(items)
+
+        def encode_for(it):
+            conf = self._encode_settings_for_track(it.track)
+            if user_settings is not None and would_passthrough(
+                it.track.path, conf
+            ):
+                return user_settings
+            return conf
+
+        def work():
+            gen = self._bg.generation
+            report = self._bg.progress_callback(gen)
+
+            def on_progress(done, total, path):
+                report("progress", done, total, path)
+
+            return shrink_items(
+                batch,
+                serial=serial,
+                device=device,
+                transport=transport,
+                transcoder=transcoder,
+                encode_for_item=encode_for,
+                resolve_parent_folder=self._parent_folder_resolver(),
+                should_cancel=self._should_cancel_job,
+                on_progress=on_progress,
+                on_after_send=self._on_after_send,
+            )
+
+        def on_done(result) -> None:
+            self._end_transfer_job()
+            self._schedule_device_music_tree_refresh(enrich_missing_tags=False)
+            errs = list(result.errors or [])
+            msg = (
+                f"Shrink finished.\n\n"
+                f"Deleted: {result.deleted}\n"
+                f"Re-sent: {result.resent}\n"
+                f"Playlists updated: {result.playlists_updated}\n"
+                f"Skipped/missing: {result.skipped + n_miss}"
+            )
+            if errs:
+                msg += f"\n\nErrors ({len(errs)}):\n" + "\n".join(errs[:8])
+                messagebox.showwarning("Shrink", msg)
+            else:
+                messagebox.showinfo("Shrink", msg)
+
+        def on_error(exc: BaseException) -> None:
+            self._end_transfer_job()
+            if isinstance(exc, JobCancelled):
+                self._handle_job_cancelled(exc, title="Shrink cancelled")
+                return
+            logger.exception("Shrink failed")
+            messagebox.showerror("Shrink", str(exc))
+
+        logger.info(
+            "Shrink start source=%s items=%d force_dialog=%s",
+            source,
+            len(batch),
+            need_dialog,
+        )
+        self._bg.submit(
+            work,
+            on_done=on_done,
+            on_error=on_error,
+            on_progress=self._on_transfer_ui_event,
+            name="shrink",
+        )
 
     def action_sync_selected(self) -> None:
         """Sync multi-selected tracks (Shift/Ctrl/Cmd selection) as one job."""

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from mtpmanager.domain.library import year_from_date
 from mtpmanager.domain.models import (
     DeviceInfo,
@@ -157,28 +159,41 @@ def track_line(entry: DeviceTrackRef) -> str:
     )
 
 
+def _format_bytes(size: int) -> str:
+    size = int(size or 0)
+    if size >= 1_000_000:
+        return f"{size / 1_000_000:.2f} MB ({size} bytes)"
+    if size >= 1000:
+        return f"{size / 1000:.1f} kB ({size} bytes)"
+    return f"{size} bytes"
+
+
+def _format_mtime(mtime: int) -> str:
+    mtime = int(mtime or 0)
+    if mtime <= 0:
+        return "(none)"
+    try:
+        from datetime import datetime, timezone
+
+        return datetime.fromtimestamp(mtime, tz=timezone.utc).strftime(
+            "%Y-%m-%d %H:%M:%S UTC"
+        )
+    except (OverflowError, OSError, ValueError):
+        return str(mtime)
+
+
+def _format_bitrate(bps: int) -> str:
+    br = int(bps or 0)
+    if br <= 0:
+        return "(none)"
+    if br >= 1000:
+        return f"{br / 1000:.0f} kbps ({br} bps)"
+    return f"{br} bps"
+
+
 def file_metadata_summary(entry: FileEntry) -> str:
     """Multi-line summary for Device → Get File Info."""
-    size = int(entry.filesize or 0)
-    if size >= 1_000_000:
-        size_s = f"{size / 1_000_000:.2f} MB ({size} bytes)"
-    elif size >= 1000:
-        size_s = f"{size / 1000:.1f} kB ({size} bytes)"
-    else:
-        size_s = f"{size} bytes"
-
-    mtime = int(entry.modificationdate or 0)
-    if mtime > 0:
-        try:
-            from datetime import datetime, timezone
-
-            mtime_s = datetime.fromtimestamp(mtime, tz=timezone.utc).strftime(
-                "%Y-%m-%d %H:%M:%S UTC"
-            )
-        except (OverflowError, OSError, ValueError):
-            mtime_s = str(mtime)
-    else:
-        mtime_s = "(none)"
+    from mtpmanager.domain.device_media import filetype_label
 
     name = (entry.name or "").strip() or "(unnamed)"
     return (
@@ -186,40 +201,29 @@ def file_metadata_summary(entry: FileEntry) -> str:
         f"Name: {name}\n"
         f"Parent id: {entry.parent_id}\n"
         f"Storage id: 0x{int(entry.storage_id):08x} ({entry.storage_id})\n"
-        f"Filetype: {entry.filetype}\n"
-        f"Size: {size_s}\n"
-        f"Modified: {mtime_s}"
+        f"Filetype: {filetype_label(entry.filetype)}\n"
+        f"Size: {_format_bytes(entry.filesize)}\n"
+        f"Modified: {_format_mtime(entry.modificationdate)}"
     )
 
 
-def track_metadata_summary(info: DeviceTrackInfo) -> str:
-    """Multi-line summary for Device → Get Track Info."""
-    size = int(info.filesize or 0)
-    if size >= 1_000_000:
-        size_s = f"{size / 1_000_000:.2f} MB ({size} bytes)"
-    elif size >= 1000:
-        size_s = f"{size / 1000:.1f} kB ({size} bytes)"
-    else:
-        size_s = f"{size} bytes"
-
-    mtime = int(info.modificationdate or 0)
-    if mtime > 0:
-        try:
-            from datetime import datetime, timezone
-
-            mtime_s = datetime.fromtimestamp(mtime, tz=timezone.utc).strftime(
-                "%Y-%m-%d %H:%M:%S UTC"
-            )
-        except (OverflowError, OSError, ValueError):
-            mtime_s = str(mtime)
-    else:
-        mtime_s = "(none)"
+def track_metadata_summary(
+    info: DeviceTrackInfo,
+    *,
+    extra_lines: Sequence[str] | None = None,
+) -> str:
+    """Multi-line summary for Device track info dialogs."""
+    from mtpmanager.domain.device_media import filetype_label
 
     dur_ms = int(info.duration_ms or 0)
     if dur_ms > 0:
         total_s = dur_ms // 1000
-        mm, ss = divmod(total_s, 60)
-        duration_s = f"{mm}:{ss:02d} ({dur_ms} ms)"
+        hh, rem = divmod(total_s, 3600)
+        mm, ss = divmod(rem, 60)
+        if hh:
+            duration_s = f"{hh}:{mm:02d}:{ss:02d} ({dur_ms} ms)"
+        else:
+            duration_s = f"{mm}:{ss:02d} ({dur_ms} ms)"
     else:
         duration_s = "(none)"
 
@@ -231,34 +235,55 @@ def track_metadata_summary(info: DeviceTrackInfo) -> str:
     composer = (info.composer or "").strip() or "(none)"
     date = (info.date or "").strip() or "(none)"
 
-    br = int(info.bitrate or 0)
-    br_s = f"{br} bps" if br else "(none)"
     sr = int(info.sample_rate or 0)
     sr_s = f"{sr} Hz" if sr else "(none)"
     ch = int(info.channels or 0)
-    ch_s = str(ch) if ch else "(none)"
+    if ch == 1:
+        ch_s = "1 (mono)"
+    elif ch == 2:
+        ch_s = "2 (stereo)"
+    elif ch:
+        ch_s = str(ch)
+    else:
+        ch_s = "(none)"
 
-    return (
-        f"Object id: {info.item_id}\n"
-        f"Filename: {name}\n"
-        f"Parent id: {info.parent_id}\n"
-        f"Storage id: 0x{int(info.storage_id):08x} ({info.storage_id})\n"
-        f"Filetype: {info.filetype}\n"
-        f"Size: {size_s}\n"
-        f"Modified: {mtime_s}\n"
-        f"---\n"
-        f"Title: {title}\n"
-        f"Artist: {artist}\n"
-        f"Album: {album}\n"
-        f"Track #: {info.tracknumber}\n"
-        f"Genre: {genre}\n"
-        f"Composer: {composer}\n"
-        f"Date: {date}\n"
-        f"Duration: {duration_s}\n"
-        f"Sample rate: {sr_s}\n"
-        f"Channels: {ch_s}\n"
-        f"Bitrate: {br_s}\n"
-        f"Bitrate type: {info.bitrate_type}\n"
-        f"Rating: {info.rating}\n"
-        f"Use count: {info.usecount}"
-    )
+    br_type = int(info.bitrate_type or 0)
+    br_type_s = {0: "(none)", 1: "CBR", 2: "VBR"}.get(br_type, str(br_type))
+
+    # Device bitrate fields are often wrong for VBR/cover-bloated objects.
+    # Always show size/duration average when both are known.
+    size = int(info.filesize or 0)
+    avg_br_s = "(n/a)"
+    if size > 0 and dur_ms > 0:
+        avg_bps = int(size * 8 * 1000 / dur_ms)
+        avg_br_s = _format_bitrate(avg_bps)
+
+    lines = [
+        f"Object id: {info.item_id}",
+        f"Filename: {name}",
+        f"Parent id: {info.parent_id}",
+        f"Storage id: 0x{int(info.storage_id):08x} ({info.storage_id})",
+        f"Codec / filetype: {filetype_label(info.filetype)}",
+        f"Size: {_format_bytes(info.filesize)}",
+        f"Modified: {_format_mtime(info.modificationdate)}",
+        "---",
+        f"Title: {title}",
+        f"Artist: {artist}",
+        f"Album: {album}",
+        f"Track #: {info.tracknumber}",
+        f"Genre: {genre}",
+        f"Composer: {composer}",
+        f"Date: {date}",
+        f"Duration: {duration_s}",
+        f"Sample rate: {sr_s}",
+        f"Channels: {ch_s}",
+        f"Bitrate (device tag): {_format_bitrate(info.bitrate)}",
+        f"Bitrate (size÷duration): {avg_br_s}",
+        f"Bitrate type: {br_type_s}",
+        f"Rating: {info.rating}",
+        f"Use count: {info.usecount}",
+    ]
+    if extra_lines:
+        lines.append("---")
+        lines.extend(extra_lines)
+    return "\n".join(lines)

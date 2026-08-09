@@ -23,6 +23,7 @@
 - Opening **any new stock pymtp API** or Device menu path → [docs/pymtp-binding-hazards.md](docs/pymtp-binding-hazards.md) (failure classes + predicted breaks)  
 - “Does libmtp/pymtp support X?” / coverage gaps → [docs/libmtp-api-coverage.md](docs/libmtp-api-coverage.md)  
 - Long Experimental bulk / PTP 2002 session poison → [docs/debrief-zen-experimental-bulk-session-poison.md](docs/debrief-zen-experimental-bulk-session-poison.md)  
+- Huge “low bitrate” convert / slow ZEN play start after sync → [docs/debrief-ffmpeg-cover-art-bloat.md](docs/debrief-ffmpeg-cover-art-bloat.md) (ffmpeg must map audio-only; never remux FLAC covers into temps)
 
 Run/setup: [README.md](README.md), [PLATFORMS.md](PLATFORMS.md).
 
@@ -39,6 +40,7 @@ Do **not**:
 5. **Put full titles with `&` / 64-char basenames** on the wire object name. Tags may be full; ObjectFileName is the track GUID (+ ext), not a title string.
 6. **Import stock pymtp without** `mtpmanager.infra.pymtp_wrapper` (macOS lib path + filetype + ctypes fixes).
 7. **Embed `mtp-sendtr` construction in `ui/`** — use ports/app + `AppController._transport()`.
+8. **Drop audio-only ffmpeg mapping** on convert/extract (`-map 0:a:0`, `-vn`, strip metadata). Default ffmpeg maps remux FLAC cover art into “MP3” temps → multi‑MB low-bitrate objects and slow DAP open. See [docs/debrief-ffmpeg-cover-art-bloat.md](docs/debrief-ffmpeg-cover-art-bloat.md) / decisions D16.
 
 ---
 
@@ -62,12 +64,12 @@ Do **not**:
 | Host playlists (M3U in index DB; local reorder/shuffle → device on next Sync) | `domain/playlist_m3u.py` (`move_paths`), `domain/playlist_shuffle.py` (artist merge + Spotify dither), `infra/playlists.py` (`move_paths_in_playlist`, `replace_playlist_tracks`), Playlists tab ↑/↓ + Shuffle context menu in `ui/window.py` / `ui/controllers.py`, dialog `ui/dialogs.py` (`ask_add_to_playlist`) |
 | On-device playlist push (GUID→item_id) | `app/playlist_device.py`, `infra/device_index.item_ids_for_guids`, patched playlist APIs in `pymtp_wrapper` / `pymtp_device`; phase-2 after Sync playlist track transfer |
 | Podcasts (RSS, ZENcast sync; video detect + optional video sync) | `infra/podcast_feed.py`, `infra/podcast_index.py` (`podcasts` + `podcast_episodes` by episode GUID — not music `tracks`), `app/podcast_ops.py`, Config `enable_experimental_tools` + `allow_video_podcasts_to_sync` / `sync_audio_podcasts_as_video` (both experimental; UI gated; runtime no-ops if tools off), Podcasts tab in `ui/window.py` / `ui/controllers.py`; Device tree joins episode GUID via `get_tracks_by_podcast_guids` (Music-folder audio reclassified when GUID is a podcast); parent ZENcast; default video-only → audio extract; XviD / still+XviD only when experimental tools + toggles on |
-| Podcast schedule / full sync (1–N new eps since last full sync) | `app/podcast_schedule.py`, `app/podcast_ops.run_full_sync_host_pass`, Config `podcast_auto_*` / `podcast_max_new_per_show`, Library → Podcast Settings dialog in `ui/dialogs.py`, timer + device phase in `ui/controllers.py` |
+| Podcast schedule / full sync (1–N new eps since last full sync) | `app/podcast_schedule.py`, `app/podcast_ops.run_full_sync_host_pass`, Config `podcast_auto_*` / `podcast_max_new_per_show`, Config → Podcast Settings; day playlist plan `infra/day_podcast_playlist.py` (GUIDs after send); **no** auto on-device playlist push after flood — Library → Finish Sync; episode context add/remove; timer + device phase in `ui/controllers.py` |
 | Device → Podcasts inventory | `domain/device_media.looks_like_podcast` / `podcast_refs_from_files`, `device_index.list_cached_podcast_refs`, Device Podcasts tree in `ui/window.py` / controllers; pull via existing device context menu |
 | Device list join / skip-if-present | `domain/device_media.py`, `app/transfer.py`, controllers list/sync |
 | Durable device inventory (list_files once) | `infra/device_index.py` + connect seed / Refresh menu in controllers |
 | Device profiles / graphics | `domain/device_profile.py`, `domain/device_profiles.py`, `assets/devices/` |
-| App config (send format, …) | `infra/app_config.py` (`config.json` under data dir) |
+| App config (send format, encode presets, …) | `infra/app_config.py` (`config.json`); encode model `domain/audio_encode.py`; ffmpeg map `infra/ffmpeg_transcode.py`; Config → Config…; podcast encode default in Config → Podcast Settings; audiobook encode in Config → Audiobook Encode…; per-show encode via Podcasts tab show context **Encode Settings…** |
 | Track listing / media filter (ZEN) | `domain/device_media.py` + `pymtp_device.list_tracks` (filelisting + media filter). Device tree uses listing + host GUID join only — **no** auto `get_track_metadata`. Explicit: Device track context **Fetch track tags…** → `enrich_track_refs_with_embedded_fallback` (metadata then download/mutagen) + `tests/test_enrich_tracks.py` |
 | Headless CLI / MCP for agents | `mtpmanager/headless/` + `mtpmanager/cli/` + `mcp_server.py`; cross-process USB lock `infra/device_session_lock.py`; [docs/agent-interface.md](docs/agent-interface.md) |
 | Export map / retail zip / restore | `infra/device_export_map.py`, `infra/retail_package.py`, `app/retail_ops.py` + `tests/test_device_export_map.py`, `tests/test_retail_package.py` |

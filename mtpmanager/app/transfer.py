@@ -18,6 +18,7 @@ from mtpmanager.app.cancellation import (
     raise_if_cancelled,
 )
 from mtpmanager.app.transfer_queue import BatchTransferQueue
+from mtpmanager.domain.audio_encode import AudioEncodeSettings
 from mtpmanager.domain.device_profile import needs_transcode
 from mtpmanager.domain.models import Track, TrackMetadata
 from mtpmanager.domain.track_id import is_track_guid, new_track_guid
@@ -36,6 +37,8 @@ TrackStatusCallback = Callable[[str, str], None]
 ParentFolderResolver = Callable[[TrackMetadata], int | None]
 # After a successful send: (guid, remote send path, optional object id)
 AfterSendCallback = Callable[[str, str, int | None], None]
+# Per-track encode recipe (e.g. audiobook override vs global Config).
+EncodeSettingsResolver = Callable[[Track], AudioEncodeSettings | None]
 
 
 @dataclass(frozen=True)
@@ -98,23 +101,47 @@ def prepare_track(
     on_track_status: TrackStatusCallback | None = None,
     device_formats: Collection[str] | None = None,
     should_cancel: CancelCheck | None = None,
+    encode_settings: AudioEncodeSettings | None = None,
+    force_transcode: bool = False,
 ) -> PreparedTrack:
     """Transcode into *slot* if needed; return path/meta for send (no send yet).
 
     When *device_formats* is set, sources already in a native device format are
     sent as-is (no re-encode), even if they differ from *target_format*.
+
+    *encode_settings* (when set) drives bitrate/VBR/channels for the convert;
+    *target_format* should match the settings file extension.
+
+    *force_transcode*: always run ffmpeg (e.g. Shrink re-encode of an already
+    native MP3 to a lower bitrate).
     """
     raise_if_cancelled(should_cancel)
-    target_format = target_format.lower().lstrip(".")
+    if encode_settings is not None:
+        target_format = encode_settings.file_extension()
+    else:
+        target_format = target_format.lower().lstrip(".")
     src = track.path
     meta = track.meta
     cleanup_path: str | None = None
 
-    if needs_transcode(
-        src, target_format=target_format, device_formats=device_formats
+    force_tempo = bool(
+        encode_settings is not None and encode_settings.needs_tempo_filter()
+    )
+    if (
+        force_transcode
+        or force_tempo
+        or needs_transcode(
+            src, target_format=target_format, device_formats=device_formats
+        )
     ):
         _notify_status(on_track_status, track.path, "transcoding")
-        src = transcoder.convert(src, target_format, slot=slot)
+        src = transcoder.convert(
+            src,
+            target_format,
+            slot=slot,
+            settings=encode_settings,
+            force=bool(force_transcode or force_tempo),
+        )
         cleanup_path = src
         if reread_tags_after_convert:
             converted = read_metadata(src)
@@ -172,6 +199,22 @@ def _guid_already_on_device(
     return guid in device_guid_stems
 
 
+def _resolve_encode_settings(
+    track: Track,
+    *,
+    encode_settings: AudioEncodeSettings | None,
+    resolve_encode_settings: EncodeSettingsResolver | None,
+) -> AudioEncodeSettings | None:
+    if resolve_encode_settings is not None:
+        try:
+            return resolve_encode_settings(track)
+        except Exception:
+            logger.debug(
+                "resolve_encode_settings failed for %s", track.path, exc_info=True
+            )
+    return encode_settings
+
+
 def transfer_track(
     track: Track,
     *,
@@ -186,6 +229,9 @@ def transfer_track(
     should_cancel: CancelCheck | None = None,
     device_guid_stems: Collection[str] | None = None,
     on_after_send: AfterSendCallback | None = None,
+    encode_settings: AudioEncodeSettings | None = None,
+    resolve_encode_settings: EncodeSettingsResolver | None = None,
+    force_transcode: bool = False,
 ) -> None:
     """
     Ensure track is device-ready (transcode if needed), then send via transport.
@@ -208,15 +254,27 @@ def transfer_track(
         _notify_status(on_track_status, track.path, "skipped")
         return
 
+    track_encode = _resolve_encode_settings(
+        track,
+        encode_settings=encode_settings,
+        resolve_encode_settings=resolve_encode_settings,
+    )
+    track_fmt = (
+        track_encode.file_extension()
+        if track_encode is not None
+        else target_format
+    )
     prepared = prepare_track(
         track,
-        target_format=target_format,
+        target_format=track_fmt,
         transcoder=transcoder,
         slot=slot,
         reread_tags_after_convert=reread_tags_after_convert,
         on_track_status=on_track_status,
         device_formats=device_formats,
         should_cancel=should_cancel,
+        encode_settings=track_encode,
+        force_transcode=force_transcode,
     )
     try:
         raise_if_cancelled(should_cancel, total=1)
@@ -259,6 +317,8 @@ def transfer_tracks(
     should_cancel: CancelCheck | None = None,
     device_guid_stems: Collection[str] | None = None,
     on_after_send: AfterSendCallback | None = None,
+    encode_settings: AudioEncodeSettings | None = None,
+    resolve_encode_settings: EncodeSettingsResolver | None = None,
 ) -> int:
     """Transfer many tracks with dual-slot convert/send pipeline.
 
@@ -278,6 +338,9 @@ def transfer_tracks(
 
     *device_guid_stems*: GUIDs already on the device (durable index); matching
     tracks skip both transcode and send.
+
+    *resolve_encode_settings*: optional per-track encode recipe (e.g. audiobook
+    override). When set, wins over the batch-level *encode_settings*.
 
     *should_cancel*: when true between tracks, remaining items are skipped and
     :class:`~mtpmanager.app.cancellation.JobCancelled` is raised (the track
@@ -345,14 +408,25 @@ def transfer_tracks(
                 guid=guid_hint,
                 already_on_device=True,
             )
+        track_encode = _resolve_encode_settings(
+            track,
+            encode_settings=encode_settings,
+            resolve_encode_settings=resolve_encode_settings,
+        )
+        track_fmt = (
+            track_encode.file_extension()
+            if track_encode is not None
+            else target_format
+        )
         return prepare_track(
             track,
-            target_format=target_format,
+            target_format=track_fmt,
             transcoder=transcoder,
             slot=slot,
             on_track_status=on_track_status,
             device_formats=device_formats,
             should_cancel=should_cancel,
+            encode_settings=track_encode,
         )
 
     def _live_total() -> int:

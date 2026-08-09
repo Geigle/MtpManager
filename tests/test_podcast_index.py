@@ -10,9 +10,14 @@ from datetime import datetime
 
 from mtpmanager.app.podcast_ops import (
     pick_new_not_on_device,
+    podcast_episode_title,
+    podcast_episode_tracknumber,
+    pub_date_to_yyyymmdd,
     upsert_scheduled_day_playlist,
 )
+from mtpmanager.domain.models import TrackMetadata
 from mtpmanager.infra.playlists import get_playlist_by_name
+from mtpmanager.domain.audio_encode import get_preset
 from mtpmanager.infra.podcast_index import (
     create_or_update_podcast,
     delete_podcast,
@@ -25,8 +30,10 @@ from mtpmanager.infra.podcast_index import (
     list_podcasts,
     normalize_feed_url,
     set_episode_local_path,
+    set_podcast_audio_encode,
     set_podcast_auto_last_run,
     set_podcast_auto_settings,
+    set_podcast_playback_speed,
     upsert_episodes,
 )
 
@@ -36,6 +43,86 @@ class PodcastIndexTests(unittest.TestCase):
         self.assertEqual(
             normalize_feed_url("HTTPS://Example.COM/feed/"),
             "https://example.com/feed",
+        )
+
+    def test_pub_date_tracknumber_yyyymmdd(self) -> None:
+        self.assertEqual(pub_date_to_yyyymmdd("2026-08-08"), "20260808")
+        self.assertEqual(
+            pub_date_to_yyyymmdd("2026-08-08T12:00:00Z"), "20260808"
+        )
+        self.assertEqual(pub_date_to_yyyymmdd(""), "")
+        from mtpmanager.infra.podcast_index import PodcastEpisode
+
+        ep = PodcastEpisode(
+            id=1,
+            podcast_id=1,
+            guid="a" * 32,
+            feed_guid="x",
+            pub_date="2026-08-08",
+            episode_index=3,
+        )
+        self.assertEqual(
+            podcast_episode_tracknumber(ep, use_date=True), "20260808"
+        )
+        self.assertEqual(
+            podcast_episode_tracknumber(ep, use_date=False), "3"
+        )
+        meta = TrackMetadata(tracknumber="20260808")
+        self.assertEqual(meta.tracknumber_int(), 20260808)
+        # MTP c_ushort: pack date ordinal, invert so newer → smaller track #.
+        ordinal = (2026 - 2000) * 512 + 8 * 32 + 8
+        packed = meta.tracknumber_for_mtp()
+        self.assertLessEqual(packed, 0xFFFF)
+        self.assertEqual(packed, 0xFFFF - ordinal)
+        older = TrackMetadata(tracknumber="20250101").tracknumber_for_mtp()
+        newer = TrackMetadata(tracknumber="20260808").tracknumber_for_mtp()
+        self.assertLess(newer, older)
+
+    def test_pub_date_title_prefix(self) -> None:
+        from mtpmanager.infra.podcast_index import PodcastEpisode
+
+        ep = PodcastEpisode(
+            id=1,
+            podcast_id=1,
+            guid="a" * 32,
+            feed_guid="x",
+            title="Morning Brief",
+            pub_date="2026-08-08",
+            episode_index=3,
+        )
+        self.assertEqual(
+            podcast_episode_title(ep, use_date=True),
+            "20260808 Morning Brief",
+        )
+        self.assertEqual(
+            podcast_episode_title(ep, use_date=False),
+            "Morning Brief",
+        )
+        # Already prefixed: do not double-prefix.
+        ep2 = PodcastEpisode(
+            id=2,
+            podcast_id=1,
+            guid="b" * 32,
+            feed_guid="y",
+            title="20260808 Morning Brief",
+            pub_date="2026-08-08",
+        )
+        self.assertEqual(
+            podcast_episode_title(ep2, use_date=True),
+            "20260808 Morning Brief",
+        )
+        # No date → bare title.
+        ep3 = PodcastEpisode(
+            id=3,
+            podcast_id=1,
+            guid="c" * 32,
+            feed_guid="z",
+            title="No Date Ep",
+            pub_date="",
+        )
+        self.assertEqual(
+            podcast_episode_title(ep3, use_date=True),
+            "No Date Ep",
         )
 
     def test_crud_and_episodes(self) -> None:
@@ -111,6 +198,35 @@ class PodcastIndexTests(unittest.TestCase):
             self.assertTrue(delete_podcast(p.id, path=db))
             self.assertIsNone(get_podcast(p.id, path=db))
             self.assertEqual(list_episodes(p.id, path=db), [])
+
+    def test_per_show_audio_encode(self) -> None:
+        preset = get_preset("mp3_cbr_64")
+        assert preset is not None
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "library_index.db"
+            p = create_or_update_podcast(
+                feed_url="https://example.com/rpg",
+                title="RPG Show",
+                path=db,
+            )
+            self.assertIsNone(p.audio_encode)
+            self.assertEqual(p.playback_speed, 1.0)
+            updated = set_podcast_audio_encode(p.id, preset.settings, path=db)
+            assert updated is not None
+            self.assertIsNotNone(updated.audio_encode)
+            self.assertEqual(updated.audio_encode.preset_id, "mp3_cbr_64")
+            again = get_podcast(p.id, path=db)
+            assert again is not None and again.audio_encode is not None
+            self.assertEqual(again.audio_encode.bitrate_kbps, 64)
+            cleared = set_podcast_audio_encode(p.id, None, path=db)
+            assert cleared is not None
+            self.assertIsNone(cleared.audio_encode)
+            sped = set_podcast_playback_speed(p.id, 1.5, path=db)
+            assert sped is not None
+            self.assertEqual(sped.playback_speed, 1.5)
+            reloaded = get_podcast(p.id, path=db)
+            assert reloaded is not None
+            self.assertEqual(reloaded.playback_speed, 1.5)
 
     def test_auto_settings_and_retrieved_at(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

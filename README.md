@@ -13,7 +13,7 @@ I want to use an old Zen Vision:M, but it's MTP-only, which is a lovecraftian ho
 | **Transfer** | FLAC/ALAC/WAV/… → device format via **ffmpeg**; dual modes: **Stable** (`mtp-sendtr` subprocess) and **Experimental** (in-process PyMTP); skip-if-present by GUID; batch progress, cancel, resume |
 | **Device** | Connect / inventory cache; Music / Video / Audiobooks / Podcasts (ZENcast) views; pull to library or any folder; optional embedded-tag recovery when MTP tags are empty; Send Video; folder layout discovered by name (Music, ZENcast, …) |
 | **Playlists** | Host M3U playlists in the index; Playlists tab; sync tracks and recreate playlists on-device (Experimental) |
-| **Podcasts** | RSS subscribe, episode list (video episodes highlighted), download, sync to ZENcast (audio by default; optional video sync with XviD on ZEN Vision:M), local playback; scheduled full sync (Library → Podcast Settings) |
+| **Podcasts** | RSS subscribe, episode list (video episodes highlighted), download, sync to ZENcast (audio by default; optional video sync with XviD on ZEN Vision:M), local playback; scheduled full sync (Config → Podcast Settings) |
 | **Playback** | Local listen via **ffplay** (library tracks, albums/artists, playlists, podcast episodes) with bottom-bar controls |
 | **Selection** | Left panel shows scrollable context for the current library / device / podcast selection |
 

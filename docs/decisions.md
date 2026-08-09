@@ -213,3 +213,17 @@ Debriefs remain the forensic narrative; this file is what we keep doing.
 **Consequences:** Heuristic demos can false-positive; user edits full map flags before package or reduced map before restore. Video filetypes prefer ZEN Video folder parent when original parent is unknown.
 
 **Source:** `infra/retail_package.py`, `app/retail_ops.py`; `tests/test_retail_package.py`.
+
+---
+
+## D16 — Transcode temps are audio-only (never remux cover art)
+
+**Context:** ffmpeg’s default stream map copies FLAC/MP4 **attached pictures** into convert outputs as a second stream. Low-bitrate presets then sound compressed but stay multi‑MB; MTP bitrate tags look absurd; ZEN Vision:M can take on the order of **a minute** before playback starts on fat objects. Device cover art is already handled by abstract MTP albums (D15), not track-embedded images.
+
+**Decision:** Every `FFmpegTranscoder.convert` / `extract_audio` recipe forces **audio-only** mapping: `-map 0:a:0`, `-vn`/`-sn`/`-dn`, and strip global metadata/chapters (`-map_metadata -1`, `-map_chapters -1`). Codec bitrate/VBR options apply only to that audio stream. Do not rely on extension-only outputs without an explicit map.
+
+**Rationale:** Temp files exist solely to send playable audio under the remote contract. Host library art and D15 album samples are separate; stuffing pixels into the track file wastes device storage and hurts DAP open latency.
+
+**Consequences:** Objects sent before the fix keep bloat until deleted and re-synced. Convert temps will not carry ID3 APIC from the source (MTP tags still come from host `TrackMetadata`). Changing ffmpeg option maps without preserving audio-only is a regression class — see the debrief.
+
+**Source:** [debrief-ffmpeg-cover-art-bloat.md](./debrief-ffmpeg-cover-art-bloat.md); `infra/ffmpeg_transcode.py` (`_audio_only_map_options`); `tests/test_audio_encode.py`.

@@ -5,16 +5,25 @@ from __future__ import annotations
 import json
 import logging
 import os
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 
+from mtpmanager.domain.audio_encode import (
+    ALL_AUDIO_SEND_FORMATS,
+    AudioEncodeSettings,
+    clamp_settings_for_format,
+    default_audio_encode_settings,
+    get_preset,
+    settings_from_legacy_format,
+)
 from mtpmanager.infra.app_paths import default_data_dir
 
 logger = logging.getLogger(__name__)
 
 CONFIG_FILENAME = "config.json"
 CONFIG_VERSION = 1
-VALID_SEND_FORMATS = frozenset({"mp3", "wma", "wav"})
+# All formats the app can encode; device profiles may restrict further in UI.
+VALID_SEND_FORMATS = frozenset(ALL_AUDIO_SEND_FORMATS)
 DEFAULT_SEND_FORMAT = "mp3"
 
 # Audio→still-video (ZVM ZENcast). Proven on device: 2 fps · 128×96 (~4:3).
@@ -23,7 +32,7 @@ DEFAULT_AUDIO_PODCAST_STILL_FPS = 2.0
 DEFAULT_AUDIO_PODCAST_STILL_WIDTH = 128
 DEFAULT_AUDIO_PODCAST_STILL_HEIGHT = 96
 
-# Automatic podcast full-sync schedule (Library → Podcast Settings…).
+# Automatic podcast full-sync schedule (Config → Podcast Settings…).
 WEEKDAY_KEYS = ("mon", "tue", "wed", "thu", "fri")
 ALL_DAY_KEYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 DEFAULT_PODCAST_SCHEDULE_TIME = "06:30"
@@ -116,6 +125,16 @@ class AppConfig:
     """User preferences loaded from disk."""
 
     send_format: str = DEFAULT_SEND_FORMAT
+    # Full encode recipe (bitrate, VBR, channels, …). Drives ffmpeg convert.
+    # *send_format* is kept in sync with audio_encode.format for older readers.
+    audio_encode: AudioEncodeSettings | None = None
+    # When set, overrides *audio_encode* for Audiobooks-tab tracks only
+    # (genre Audiobook). None → use the global recipe for those tracks too.
+    audiobook_audio_encode: AudioEncodeSettings | None = None
+    # When set, overrides *audio_encode* for podcast episodes (genre Podcast).
+    # Per-show overrides in the podcasts table take precedence when present.
+    # None → use the global Config recipe for podcasts too.
+    podcast_audio_encode: AudioEncodeSettings | None = None
     # When True, transfers use mtp-sendtr (Stable). Default is PyMTP (Experimental).
     stable_mode: bool = False
     # After Experimental (PyMTP) music sync: create/update MTP album objects and
@@ -156,6 +175,10 @@ class AppConfig:
     # 1–N most recent new episodes per show per full sync.
     podcast_max_new_per_show: int = DEFAULT_PODCAST_MAX_NEW_PER_SHOW
     podcast_auto_sync_to_device: bool = True
+    # Experimental: MTP track # = 0xFFFF − packed(YYYYMMDD) so newest first.
+    podcast_tracknumber_as_date: bool = False
+    # Experimental: prefix episode Title with YYYYMMDD for readable dates.
+    podcast_title_date_prefix: bool = False
     # Last completed full sync (UTC ISO + local calendar date for catch-up).
     podcast_last_full_sync_at: str = ""
     podcast_last_full_sync_local_date: str = ""
@@ -164,8 +187,110 @@ class AppConfig:
     def normalized_send_format(self) -> str:
         fmt = (self.send_format or DEFAULT_SEND_FORMAT).lower().lstrip(".")
         if fmt not in VALID_SEND_FORMATS:
+            # audio_encode may still be authoritative
+            if self.audio_encode is not None:
+                fmt = self.audio_encode.normalized_format()
+                if fmt in VALID_SEND_FORMATS:
+                    return fmt
             return DEFAULT_SEND_FORMAT
         return fmt
+
+    def resolved_audio_encode(self) -> AudioEncodeSettings:
+        """Concrete encode settings (never None)."""
+        if self.audio_encode is not None:
+            s = clamp_settings_for_format(self.audio_encode)
+            # Keep format aligned with send_format when they drift.
+            if s.normalized_format() != self.normalized_send_format():
+                # Prefer audio_encode as source of truth if present.
+                return s
+            return s
+        return settings_from_legacy_format(self.normalized_send_format())
+
+    def uses_audiobook_encode_override(self) -> bool:
+        """True when a dedicated audiobook encode recipe is stored."""
+        return self.audiobook_audio_encode is not None
+
+    def uses_podcast_encode_override(self) -> bool:
+        """True when a dedicated default podcast encode recipe is stored."""
+        return self.podcast_audio_encode is not None
+
+    def resolved_audiobook_audio_encode(self) -> AudioEncodeSettings:
+        """Encode recipe for Audiobooks-tab tracks (override or global)."""
+        if self.audiobook_audio_encode is not None:
+            return clamp_settings_for_format(self.audiobook_audio_encode)
+        return self.resolved_audio_encode()
+
+    def resolved_podcast_audio_encode(
+        self,
+        *,
+        per_show: AudioEncodeSettings | None = None,
+    ) -> AudioEncodeSettings:
+        """Encode recipe for podcast episodes.
+
+        Precedence: *per_show* (subscription override) → ``podcast_audio_encode``
+        → global Config ``audio_encode``.
+        """
+        if per_show is not None:
+            return clamp_settings_for_format(per_show)
+        if self.podcast_audio_encode is not None:
+            return clamp_settings_for_format(self.podcast_audio_encode)
+        return self.resolved_audio_encode()
+
+    def resolved_audio_encode_for_track(
+        self,
+        track: object,
+        *,
+        podcast_per_show: AudioEncodeSettings | None = None,
+    ) -> AudioEncodeSettings:
+        """Pick encode recipe by track genre (audiobook / podcast / music).
+
+        *track* should be a :class:`~mtpmanager.domain.models.Track` (or any
+        object with ``meta.genre``).
+
+        *podcast_per_show*: optional per-subscription override when the track
+        is a podcast episode; ignored for non-podcast tracks.
+        """
+        from mtpmanager.domain.library import is_audiobook_track
+
+        try:
+            if is_audiobook_track(track):  # type: ignore[arg-type]
+                return self.resolved_audiobook_audio_encode()
+        except Exception:
+            pass
+        try:
+            meta = getattr(track, "meta", None)
+            genre = (getattr(meta, "genre", None) or "").strip().casefold()
+            if genre == "podcast":
+                return self.resolved_podcast_audio_encode(
+                    per_show=podcast_per_show
+                )
+        except Exception:
+            pass
+        return self.resolved_audio_encode()
+
+    def apply_audio_encode(self, settings: AudioEncodeSettings) -> None:
+        """Set encode recipe and mirror format into *send_format*."""
+        s = clamp_settings_for_format(settings)
+        self.audio_encode = s
+        self.send_format = s.normalized_format()
+
+    def apply_audiobook_audio_encode(
+        self, settings: AudioEncodeSettings | None
+    ) -> None:
+        """Set or clear the audiobook-only encode override (None = use global)."""
+        if settings is None:
+            self.audiobook_audio_encode = None
+            return
+        self.audiobook_audio_encode = clamp_settings_for_format(settings)
+
+    def apply_podcast_audio_encode(
+        self, settings: AudioEncodeSettings | None
+    ) -> None:
+        """Set or clear the default podcast encode override (None = use global)."""
+        if settings is None:
+            self.podcast_audio_encode = None
+            return
+        self.podcast_audio_encode = clamp_settings_for_format(settings)
 
     def active_mode(self) -> str:
         """Return ``\"stable\"`` or ``\"experimental\"``."""
@@ -175,6 +300,35 @@ class AppConfig:
 def config_path(*, data_dir: Path | None = None) -> Path:
     base = data_dir if data_dir is not None else default_data_dir()
     return base / CONFIG_FILENAME
+
+
+def default_speech_audio_encode_settings() -> AudioEncodeSettings:
+    """Sensible speech-oriented default (audiobooks / talk podcasts)."""
+    preset = get_preset("mp3_cbr_32_mono")
+    if preset is not None:
+        return clamp_settings_for_format(preset.settings)
+    return clamp_settings_for_format(
+        AudioEncodeSettings(
+            format="mp3",
+            preset_id="mp3_cbr_32_mono",
+            rate_control="cbr",
+            bitrate_kbps=32,
+            vbr_quality=None,
+            sample_rate=22050,
+            channels=1,
+            label="MP3 32 kbps CBR mono",
+        )
+    )
+
+
+def default_audiobook_audio_encode_settings() -> AudioEncodeSettings:
+    """Sensible speech-oriented default when enabling the audiobook override."""
+    return default_speech_audio_encode_settings()
+
+
+def default_podcast_audio_encode_settings() -> AudioEncodeSettings:
+    """Sensible speech-oriented default when enabling the podcast override."""
+    return default_speech_audio_encode_settings()
 
 
 def _as_bool(value: object, default: bool = False) -> bool:
@@ -202,6 +356,22 @@ def load_app_config(*, path: Path | None = None) -> AppConfig:
     fmt = raw.get("send_format", DEFAULT_SEND_FORMAT)
     if not isinstance(fmt, str):
         fmt = DEFAULT_SEND_FORMAT
+    audio_raw = raw.get("audio_encode")
+    if isinstance(audio_raw, dict):
+        audio_enc = AudioEncodeSettings.from_dict(audio_raw)
+    else:
+        # Legacy configs only had send_format.
+        audio_enc = settings_from_legacy_format(fmt)
+    ab_raw = raw.get("audiobook_audio_encode")
+    if isinstance(ab_raw, dict):
+        ab_enc: AudioEncodeSettings | None = AudioEncodeSettings.from_dict(ab_raw)
+    else:
+        ab_enc = None
+    pod_raw = raw.get("podcast_audio_encode")
+    if isinstance(pod_raw, dict):
+        pod_enc: AudioEncodeSettings | None = AudioEncodeSettings.from_dict(pod_raw)
+    else:
+        pod_enc = None
     artist = _as_bool(raw.get("store_tracks_in_artist_folder"), False)
     album = _as_bool(raw.get("store_tracks_in_album_folder"), False)
     # Album folders only make sense under artist folders.
@@ -209,6 +379,9 @@ def load_app_config(*, path: Path | None = None) -> AppConfig:
         album = False
     cfg = AppConfig(
         send_format=fmt,
+        audio_encode=audio_enc,
+        audiobook_audio_encode=ab_enc,
+        podcast_audio_encode=pod_enc,
         stable_mode=_as_bool(raw.get("stable_mode"), False),
         sync_album_art=_as_bool(raw.get("sync_album_art"), True),
         enable_experimental_tools=_as_bool(
@@ -252,6 +425,16 @@ def load_app_config(*, path: Path | None = None) -> AppConfig:
         podcast_auto_sync_to_device=_as_bool(
             raw.get("podcast_auto_sync_to_device"), True
         ),
+        podcast_tracknumber_as_date=_as_bool(
+            raw.get("podcast_tracknumber_as_date"), False
+        ),
+        # Split from the old combined flag: missing key + track-date on →
+        # keep title prefix on so existing configs do not lose the prefix.
+        podcast_title_date_prefix=(
+            _as_bool(raw.get("podcast_title_date_prefix"), False)
+            if "podcast_title_date_prefix" in raw
+            else _as_bool(raw.get("podcast_tracknumber_as_date"), False)
+        ),
         podcast_last_full_sync_at=str(
             raw.get("podcast_last_full_sync_at") or ""
         ).strip(),
@@ -266,7 +449,21 @@ def load_app_config(*, path: Path | None = None) -> AppConfig:
     )
     cfg.audio_podcast_still_width = sw
     cfg.audio_podcast_still_height = sh
+    # Prefer audio_encode.format when present.
+    if cfg.audio_encode is not None:
+        cfg.audio_encode = clamp_settings_for_format(cfg.audio_encode)
+        cfg.send_format = cfg.audio_encode.normalized_format()
     cfg.send_format = cfg.normalized_send_format()
+    if cfg.audio_encode is None:
+        cfg.audio_encode = settings_from_legacy_format(cfg.send_format)
+    if cfg.audiobook_audio_encode is not None:
+        cfg.audiobook_audio_encode = clamp_settings_for_format(
+            cfg.audiobook_audio_encode
+        )
+    if cfg.podcast_audio_encode is not None:
+        cfg.podcast_audio_encode = clamp_settings_for_format(
+            cfg.podcast_audio_encode
+        )
     return cfg
 
 
@@ -276,9 +473,11 @@ def save_app_config(config: AppConfig, *, path: Path | None = None) -> Path:
     dest.parent.mkdir(parents=True, exist_ok=True)
     artist = bool(config.store_tracks_in_artist_folder)
     album = bool(config.store_tracks_in_album_folder) and artist
-    payload = {
+    encode = config.resolved_audio_encode()
+    payload: dict = {
         "version": CONFIG_VERSION,
-        "send_format": config.normalized_send_format(),
+        "send_format": encode.normalized_format(),
+        "audio_encode": encode.to_dict(),
         "stable_mode": bool(config.stable_mode),
         "sync_album_art": bool(config.sync_album_art),
         "enable_experimental_tools": bool(config.enable_experimental_tools),
@@ -318,6 +517,8 @@ def save_app_config(config: AppConfig, *, path: Path | None = None) -> Path:
             config.podcast_max_new_per_show
         ),
         "podcast_auto_sync_to_device": bool(config.podcast_auto_sync_to_device),
+        "podcast_tracknumber_as_date": bool(config.podcast_tracknumber_as_date),
+        "podcast_title_date_prefix": bool(config.podcast_title_date_prefix),
         "podcast_last_full_sync_at": str(
             config.podcast_last_full_sync_at or ""
         ).strip(),
@@ -325,6 +526,14 @@ def save_app_config(config: AppConfig, *, path: Path | None = None) -> Path:
             config.podcast_last_full_sync_local_date or ""
         ).strip()[:10],
     }
+    if config.audiobook_audio_encode is not None:
+        payload["audiobook_audio_encode"] = clamp_settings_for_format(
+            config.audiobook_audio_encode
+        ).to_dict()
+    if config.podcast_audio_encode is not None:
+        payload["podcast_audio_encode"] = clamp_settings_for_format(
+            config.podcast_audio_encode
+        ).to_dict()
     text = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
     tmp = dest.with_suffix(dest.suffix + ".tmp")
     tmp.write_text(text, encoding="utf-8")

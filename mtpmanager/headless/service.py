@@ -210,6 +210,17 @@ class HeadlessService:
             "library_roots": roots,
             "mode": cfg.active_mode(),
             "send_format": cfg.normalized_send_format(),
+            "audio_encode": cfg.resolved_audio_encode().to_dict(),
+            "audiobook_audio_encode": (
+                cfg.audiobook_audio_encode.to_dict()
+                if cfg.audiobook_audio_encode is not None
+                else None
+            ),
+            "podcast_audio_encode": (
+                cfg.podcast_audio_encode.to_dict()
+                if cfg.podcast_audio_encode is not None
+                else None
+            ),
             "ffmpeg": ffmpeg,
             "ffprobe": ffprobe,
             "mtp_sendtr": mtp_sendtr,
@@ -1256,6 +1267,8 @@ class HeadlessService:
         batch_size: int,
         quiet_s: float,
         statuses: list[dict[str, str]],
+        encode_settings=None,
+        resolve_encode_settings=None,
     ) -> tuple[int, int, AgentResult | None]:
         """Send tracks, optionally batched with PyMTP reconnect-on-fatal.
 
@@ -1288,6 +1301,8 @@ class HeadlessService:
                 on_track_status=on_status,
                 on_after_send=on_after,
                 stop_on_fatal=True,
+                encode_settings=encode_settings,
+                resolve_encode_settings=resolve_encode_settings,
             )
             return int(n), 0, None
 
@@ -1326,6 +1341,8 @@ class HeadlessService:
                         on_track_status=_batch_status,
                         on_after_send=on_after,
                         stop_on_fatal=True,
+                        encode_settings=encode_settings,
+                        resolve_encode_settings=resolve_encode_settings,
                     )
                     succeeded += int(n)
                     i += batch_n
@@ -1435,7 +1452,45 @@ class HeadlessService:
                 exit_code=ExitCode.USAGE,
             )
 
-        target_format = cfg.normalized_send_format()
+        encode_settings = cfg.resolved_audio_encode()
+        target_format = encode_settings.normalized_format()
+
+        def resolve_encode_for_track(track: Track):
+            from dataclasses import replace
+
+            from mtpmanager.domain.audio_encode import normalize_playback_speed
+
+            per_show = None
+            speed = 1.0
+            genre = (
+                (track.meta.genre if track and track.meta else "") or ""
+            ).strip().casefold()
+            if genre == "podcast" and track.guid:
+                try:
+                    from mtpmanager.infra.podcast_index import (
+                        get_episode_by_guid,
+                        get_podcast,
+                    )
+
+                    ep = get_episode_by_guid(track.guid)
+                    if ep is not None:
+                        show = get_podcast(int(ep.podcast_id))
+                        if show is not None:
+                            per_show = show.audio_encode
+                            speed = normalize_playback_speed(
+                                show.playback_speed
+                            )
+                except Exception:
+                    logger.debug(
+                        "headless podcast encode lookup failed", exc_info=True
+                    )
+            settings = cfg.resolved_audio_encode_for_track(
+                track, podcast_per_show=per_show
+            )
+            if abs(speed - 1.0) >= 0.01:
+                settings = replace(settings, playback_speed=speed)
+            return settings
+
         device_formats = set(ZEN_VISION_M.supported_audio_formats) | set(
             GENERIC.supported_audio_formats
         )
@@ -1560,6 +1615,8 @@ class HeadlessService:
                     batch_size=effective_batch,
                     quiet_s=quiet_s,
                     statuses=statuses,
+                    encode_settings=encode_settings,
+                    resolve_encode_settings=resolve_encode_for_track,
                 )
                 if early is not None:
                     early.data = {
