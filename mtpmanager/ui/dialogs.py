@@ -69,6 +69,8 @@ from mtpmanager.ui.chrome import (
     GLYPH_REMOVE,
     int_spinbox,
     make_ttk_scale,
+    monospace_ui_font,
+    secondary_label_kwargs,
     time_of_day_row,
 )
 from mtpmanager.ui.formatting import folder_line
@@ -261,8 +263,7 @@ def show_config_dialog(
             + restrict_note
         ),
         justify=LEFT,
-        wraplength=640,
-        fg="#333",
+        wraplength=640, **secondary_label_kwargs(),
     ).pack(anchor="w", pady=(0, 6))
 
     fmt_row = Frame(tab_presets)
@@ -299,7 +300,7 @@ def show_config_dialog(
     preset_scroll.config(command=preset_list.yview)
 
     preset_blurb = Label(
-        tab_presets, text="", justify=LEFT, wraplength=640, fg="#444", height=2
+        tab_presets, text="", justify=LEFT, wraplength=640, **secondary_label_kwargs(), height=2
     )
     preset_blurb.pack(anchor="w", fill="x", pady=(2, 0))
 
@@ -310,8 +311,7 @@ def show_config_dialog(
             "(off = PyMTP, on = mtp-sendtr)."
         ),
         justify=LEFT,
-        wraplength=640,
-        fg="#666",
+        wraplength=640, **secondary_label_kwargs(),
     ).pack(anchor="w", pady=(6, 0))
 
     shown_presets: list = []
@@ -324,8 +324,7 @@ def show_config_dialog(
             "as custom (overrides the Presets list until you pick a preset again)."
         ),
         justify=LEFT,
-        wraplength=640,
-        fg="#333",
+        wraplength=640, **secondary_label_kwargs(),
     ).pack(anchor="w", pady=(0, 8))
 
     adv = Frame(tab_advanced)
@@ -396,8 +395,7 @@ def show_config_dialog(
     Label(vbr_frame, textvariable=vbr_var, width=4).pack(side=LEFT, padx=(4, 0))
     Label(
         vbr_frame,
-        text="MP3 0=best…9 · Vorbis 0–10",
-        fg="#666",
+        text="MP3 0=best…9 · Vorbis 0–10", **secondary_label_kwargs(),
     ).pack(side=LEFT, padx=(6, 0))
 
     Label(adv, text="Sample rate:", anchor="w").grid(
@@ -449,7 +447,7 @@ def show_config_dialog(
         width=10,
     )
     depth_combo.grid(row=5, column=1, sticky="w", padx=(8, 0), pady=(8, 0))
-    Label(adv, text="(PCM / FLAC)", fg="#666").grid(
+    Label(adv, text="(PCM / FLAC)", **secondary_label_kwargs()).grid(
         row=5, column=2, sticky="w", padx=(4, 0), pady=(8, 0)
     )
 
@@ -481,7 +479,7 @@ def show_config_dialog(
     flac_var.set(str(int(_flac_dbl.get())))
     flac_scale.pack(side=LEFT)
     Label(flac_frame, textvariable=flac_var, width=3).pack(side=LEFT, padx=(4, 0))
-    Label(flac_frame, text="0=fast … 12=smallest", fg="#666").pack(
+    Label(flac_frame, text="0=fast … 12=smallest", **secondary_label_kwargs()).pack(
         side=LEFT, padx=(6, 0)
     )
 
@@ -509,8 +507,7 @@ def show_config_dialog(
             "default because they do not play reliably."
         ),
         justify=LEFT,
-        wraplength=640,
-        fg="#333",
+        wraplength=640, **secondary_label_kwargs(),
     ).pack(anchor="w")
 
     # ---- Footer: active recipe + buttons ----
@@ -525,8 +522,7 @@ def show_config_dialog(
     Label(
         foot,
         textvariable=source_var,
-        anchor="w",
-        fg="#555",
+        anchor="w", **secondary_label_kwargs(),
     ).pack(fill="x")
     Label(
         foot,
@@ -859,7 +855,7 @@ class ManageLibraryDialog:
         self._lb.pack(side=LEFT, fill=BOTH, expand=True)
         scroll.config(command=self._lb.yview)
         try:
-            self._lb.configure(font=("Menlo", 11))
+            self._lb.configure(font=monospace_ui_font(11))
         except Exception:
             try:
                 self._lb.configure(font=("Courier", 11))
@@ -1118,7 +1114,7 @@ class ExclusionsManagerDialog:
         self._lb.pack(side=LEFT, fill=BOTH, expand=True)
         scroll.config(command=self._lb.yview)
         try:
-            self._lb.configure(font=("Menlo", 11))
+            self._lb.configure(font=monospace_ui_font(11))
         except Exception:
             try:
                 self._lb.configure(font=("Courier", 11))
@@ -1667,7 +1663,7 @@ def show_file_list_dialog(parent, files: list) -> None:
     )
     # Prefer monospaced font for aligned columns when available.
     try:
-        lb.configure(font=("Menlo", 11))
+        lb.configure(font=monospace_ui_font(11))
     except Exception:
         try:
             lb.configure(font=("Courier", 11))
@@ -1742,8 +1738,7 @@ def show_track_list_dialog(
         body,
         textvariable=status_var,
         wraplength=820,
-        justify=LEFT,
-        fg="#444",
+        justify=LEFT, **secondary_label_kwargs(),
     ).pack(anchor="w", pady=(2, 0))
 
     list_frame = Frame(body)
@@ -1760,7 +1755,7 @@ def show_track_list_dialog(
         exportselection=False,
     )
     try:
-        lb.configure(font=("Menlo", 11))
+        lb.configure(font=monospace_ui_font(11))
     except Exception:
         try:
             lb.configure(font=("Courier", 11))
@@ -1926,7 +1921,7 @@ def pick_file_entry_dialog(
         exportselection=False,
     )
     try:
-        lb.configure(font=("Menlo", 11))
+        lb.configure(font=monospace_ui_font(11))
     except Exception:
         try:
             lb.configure(font=("Courier", 11))
@@ -2014,7 +2009,7 @@ def show_file_info_dialog(parent, entry, *, note: str | None = None) -> None:
         text=file_metadata_summary(entry),
         justify=LEFT,
         anchor="w",
-        font=("Menlo", 11),
+        font=monospace_ui_font(11),
     ).pack(anchor="w")
     if note:
         Label(
@@ -2022,8 +2017,7 @@ def show_file_info_dialog(parent, entry, *, note: str | None = None) -> None:
             text=note,
             justify=LEFT,
             anchor="w",
-            wraplength=420,
-            fg="#555555",
+            wraplength=420, **secondary_label_kwargs(),
         ).pack(anchor="w", pady=(10, 0))
     Button(body, text="Close", width=10, command=dlg.destroy).pack(
         anchor="e", pady=(12, 0)
@@ -2076,7 +2070,7 @@ def show_track_info_dialog(
         width=56,
         height=24,
         wrap="word",
-        font=("Menlo", 11),
+        font=monospace_ui_font(11),
         yscrollcommand=yscroll.set,
         relief="flat",
         borderwidth=0,
@@ -2409,8 +2403,7 @@ def _pack_encode_override_section(
             parent,
             text=blurb,
             justify=LEFT,
-            wraplength=440,
-            fg="#333",
+            wraplength=440, **secondary_label_kwargs(),
         ).pack(anchor="w", pady=(0, 6))
 
     override_var = BooleanVar(value=bool(use_override))
@@ -2752,8 +2745,7 @@ def show_podcast_settings_dialog(
             body,
             text=status_line,
             justify=LEFT,
-            wraplength=440,
-            fg="#444",
+            wraplength=440, **secondary_label_kwargs(),
         ).pack(anchor="w", pady=(6, 10))
 
     # ---- Podcast encode (default for all shows; overrides Config) ----
@@ -2782,8 +2774,7 @@ def show_podcast_settings_dialog(
             body,
             text=f"Formats limited by {who}: {names}.",
             justify=LEFT,
-            wraplength=440,
-            fg="#555",
+            wraplength=440, **secondary_label_kwargs(),
         ).pack(anchor="w", pady=(2, 0))
 
     result: list[PodcastSettingsResult | None] = [None]
@@ -2926,8 +2917,7 @@ def show_audiobook_encode_dialog(
             body,
             text=f"Formats limited by {who}: {names}.",
             justify=LEFT,
-            wraplength=420,
-            fg="#555",
+            wraplength=420, **secondary_label_kwargs(),
         ).pack(anchor="w", pady=(4, 0))
 
     result: list[AudiobookEncodeResult | None] = [None]
@@ -3013,8 +3003,7 @@ def show_podcast_show_encode_dialog(
             f"episodes use: {inherit}."
         ),
         justify=LEFT,
-        wraplength=420,
-        fg="#333",
+        wraplength=420, **secondary_label_kwargs(),
     ).pack(anchor="w", pady=(0, 8))
 
     override_var, get_settings = _pack_encode_override_section(
@@ -3043,8 +3032,7 @@ def show_podcast_show_encode_dialog(
             f"({PLAYBACK_SPEED_MIN:g}×–{PLAYBACK_SPEED_MAX:g}×). 1.0× is normal."
         ),
         justify=LEFT,
-        wraplength=420,
-        fg="#333",
+        wraplength=420, **secondary_label_kwargs(),
     ).pack(anchor="w", pady=(0, 4))
     speed_row = Frame(body)
     speed_row.pack(fill="x", pady=(0, 4))
@@ -3080,8 +3068,7 @@ def show_podcast_show_encode_dialog(
             body,
             text=f"Formats limited by {who}: {names}.",
             justify=LEFT,
-            wraplength=420,
-            fg="#555",
+            wraplength=420, **secondary_label_kwargs(),
         ).pack(anchor="w", pady=(4, 0))
 
     result: list[PodcastShowEncodeResult | None] = [None]
@@ -3171,8 +3158,7 @@ def show_shrink_encode_dialog(
             + (f"\n\n{track_label}" if track_label else "")
         ),
         justify=LEFT,
-        wraplength=420,
-        fg="#333",
+        wraplength=420, **secondary_label_kwargs(),
     ).pack(anchor="w", pady=(0, 8))
 
     name_var = StringVar(value=ladder[idx0].display_name)
@@ -3201,8 +3187,8 @@ def show_shrink_encode_dialog(
     on_slide()
     tick = Frame(body)
     tick.pack(fill="x")
-    Label(tick, text="More compression", fg="#555").pack(side=LEFT)
-    Label(tick, text="Higher quality", fg="#555").pack(side=RIGHT)
+    Label(tick, text="More compression", **secondary_label_kwargs()).pack(side=LEFT)
+    Label(tick, text="Higher quality", **secondary_label_kwargs()).pack(side=RIGHT)
 
     result: list[ShrinkEncodeResult | None] = [None]
 

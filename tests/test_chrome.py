@@ -5,6 +5,8 @@ from __future__ import annotations
 import unittest
 from tkinter import Tk
 
+import sys
+
 from mtpmanager.ui.chrome import (
     GLYPH_ADD,
     GLYPH_DISMISS,
@@ -17,10 +19,17 @@ from mtpmanager.ui.chrome import (
     apply_chrome_baseline,
     flat_frame,
     make_ttk_scale,
+    reveal_in_file_manager_label,
+    secondary_label_kwargs,
     snap_scale_value,
     time_of_day_row,
 )
-from mtpmanager.ui.window import MainWindow
+from mtpmanager.ui.window import (
+    CTX_PODCAST_REVEAL_DOWNLOAD,
+    STABLE_MODE_CAPTION,
+    STABLE_MODE_HELP,
+    MainWindow,
+)
 
 
 class ChromeBaselineTests(unittest.TestCase):
@@ -121,6 +130,34 @@ class ChromeBaselineTests(unittest.TestCase):
         self.assertEqual(getter2(), "00:05")
         frame3, getter3 = time_of_day_row(self.root, initial_hhmm="12:00")
         self.assertEqual(getter3(), "12:00")
+
+    def test_phase4a_stable_mode_short_caption_and_about(self) -> None:
+        self.assertLess(len(STABLE_MODE_CAPTION), len(STABLE_MODE_HELP))
+        self.assertIn("mtp-sendtr", STABLE_MODE_CAPTION)
+        win = MainWindow(self.root)
+        win.apply_mode_ui("stable")
+        self.root.update_idletasks()
+        self.assertEqual(win.lbl_device_caption.cget("text"), STABLE_MODE_CAPTION)
+        self.assertEqual(win.btn_stable_mode_about.winfo_manager(), "pack")
+        win.apply_mode_ui("experimental")
+        self.root.update_idletasks()
+        self.assertEqual(win.btn_stable_mode_about.winfo_manager(), "")
+
+    def test_phase4a_reveal_wording_platform(self) -> None:
+        label = reveal_in_file_manager_label(download=True)
+        self.assertEqual(CTX_PODCAST_REVEAL_DOWNLOAD, label)
+        if sys.platform == "darwin":
+            self.assertIn("Finder", label)
+        else:
+            self.assertNotIn("Finder", label)
+
+    def test_phase4a_secondary_label_dark_safe(self) -> None:
+        kw = secondary_label_kwargs()
+        if sys.platform == "darwin":
+            self.assertEqual(kw.get("fg"), "systemSecondaryLabelColor")
+        else:
+            # No hard-coded light-only gray — inherit theme default.
+            self.assertEqual(kw, {})
 
 
 if __name__ == "__main__":

@@ -282,3 +282,21 @@ Debriefs remain the forensic narrative; this file is what we keep doing.
 **Consequences:** Context-menu shortcut strings may still say ⌥↑ / Alt+↑ (keyboard), while toolbar buttons say Up/Dn. Dialog primary buttons may remain classic `Button` until a later dialog chrome pass.
 
 **Source:** [ui-visual-pass.md](./ui-visual-pass.md); `ui/chrome.py`, `ui/window.py`, `ui/dialogs.py`.
+
+---
+
+## D20 — macOS blend: system secondary text, platform reveal, Stable Mode About
+
+**Context:** Dialog helper prose used light-only hex grays (`#333`–`#666`) that fail in dark Aqua (O12). Podcast reveal menus said “Finder” on every OS (O13). Stable Mode filled the Device panel with a multi-paragraph help wall (O9).
+
+**Decision (UI visual pass phase 4a):**
+
+1. **Secondary dialog labels** use `secondary_label_kwargs()` — on Darwin `fg=systemSecondaryLabelColor`; elsewhere omit *fg* (theme default).
+2. **Reveal actions** use `reveal_in_file_manager_label()` (Finder / Explorer / File Manager by platform). `CTX_PODCAST_REVEAL_DOWNLOAD` is set at import from that helper.
+3. **Stable Mode panel** shows a short caption (`STABLE_MODE_CAPTION`) plus **About Stable Mode…** (`messagebox` with full `STABLE_MODE_HELP`); device art remains the experimental-mode identity.
+
+**Rationale:** Track macOS appearance without inventing a theme engine; keep Linux wording honest until 4b/4c.
+
+**Consequences:** Transfer/playing row colors (O8) unchanged. Hover tips still use explicit light-panel colors (required for help-window chrome). KDE/GNOME theme picking remains phase 4b/4c.
+
+**Source:** [ui-visual-pass.md](./ui-visual-pass.md); `ui/chrome.py`, `ui/window.py`, `ui/dialogs.py`.

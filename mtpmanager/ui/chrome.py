@@ -1,4 +1,4 @@
-"""Main-window chrome + control grammar (UI visual pass phases 1–3).
+"""Main-window chrome + control grammar (UI visual pass phases 1–4a).
 
 **Control stack (O1):** Interactive chrome prefers **ttk** (Button, Entry,
 Scrollbar, Notebook, Treeview, Combobox, Progressbar, Scale, Separator).
@@ -7,23 +7,17 @@ Scrollbar, Notebook, Treeview, Combobox, Progressbar, Scale, Separator).
 
 **Tree row heights (O11):** ``Thumb.Treeview`` vs ``Compact.Treeview``.
 
-**Control grammar (O5–O7, phase 3):**
+**Control grammar (O5–O7, phase 3):** see glyph constants and
+:func:`make_ttk_scale` / :func:`time_of_day_row`.
 
-| Role | Style / widget | Label / pattern |
-|------|----------------|-----------------|
-| Add / remove | ``Compact.TButton`` | ASCII ``+`` / ``-`` |
-| Dismiss / clear | ``Compact.TButton`` | ASCII ``x`` |
-| Move up / down | ``Compact.TButton`` | Short English ``Up`` / ``Dn`` |
-| Refresh | ``Tool.TButton`` | ``Refresh`` (not Unicode arrows) |
-| Primary / tool | ``Tool.TButton`` | Short English (Play, Cancel, Sync…) |
-| Continuous value | **``ttk.Scale`` only** | via :func:`make_ttk_scale` |
-| Integer spin | ``ttk.Spinbox`` when available | else Entry |
-| Time of day | Combobox hour + minute + AM/PM | :func:`time_of_day_row` |
+**macOS blend (phase 4a):** secondary dialog text uses system label colors
+when available (:func:`secondary_label_kwargs`); reveal wording is
+platform-specific (:func:`reveal_in_file_manager_label`).
 
 **Still classic tk (documented exceptions):**
 
 - ``Menu``; ``Text`` / ``Listbox`` (dialogs); ``Label`` + ``PhotoImage``;
-  ``_HoverTip``; many dialog ``Button``/``Checkbutton`` shells (phase 4+).
+  ``_HoverTip``; many dialog ``Button``/``Checkbutton`` shells.
 
 See ``docs/ui-visual-pass.md``.
 """
@@ -288,3 +282,46 @@ def int_spinbox(
     except Exception:
         logger.debug("ttk.Spinbox unavailable; using Entry", exc_info=True)
         return ttk.Entry(parent, textvariable=textvariable, width=int(width))
+
+
+# --- Phase 4a: platform wording + dark-safe secondary text -----------------
+
+
+def secondary_label_fg() -> str | None:
+    """Foreground for secondary/helper prose, or None for theme default.
+
+    On macOS Aqua, ``systemSecondaryLabelColor`` tracks light/dark appearance.
+    Hard-coded ``#333``/``#666`` break dark mode (O12). Elsewhere omit *fg*
+    so classic Labels inherit the system text color.
+    """
+    if sys.platform == "darwin":
+        return "systemSecondaryLabelColor"
+    return None
+
+
+def secondary_label_kwargs() -> dict[str, str]:
+    """Kwargs to splat into ``Label(...)`` for secondary prose."""
+    fg = secondary_label_fg()
+    return {"fg": fg} if fg else {}
+
+
+def reveal_in_file_manager_label(*, download: bool = False) -> str:
+    """User-visible “reveal path” action (O13 — no Finder wording on Linux)."""
+    if download:
+        if sys.platform == "darwin":
+            return "Reveal Download in Finder"
+        if sys.platform == "win32":
+            return "Reveal Download in Explorer"
+        return "Show Download in File Manager"
+    if sys.platform == "darwin":
+        return "Reveal in Finder"
+    if sys.platform == "win32":
+        return "Reveal in Explorer"
+    return "Show in File Manager"
+
+
+def monospace_ui_font(size: int = 11) -> tuple[str, int]:
+    """Preferred monospaced UI font: Menlo on macOS, else TkFixedFont family."""
+    if sys.platform == "darwin":
+        return ("Menlo", int(size))
+    return ("TkFixedFont", int(size))

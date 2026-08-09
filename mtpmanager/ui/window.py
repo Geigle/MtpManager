@@ -51,6 +51,7 @@ from mtpmanager.ui.chrome import (
     apply_chrome_baseline,
     flat_frame,
     h_separator,
+    reveal_in_file_manager_label,
     v_separator,
 )
 
@@ -65,7 +66,7 @@ _DEVICE_CATEGORY_LABELS = (
 
 Mode = Literal["stable", "experimental"]
 
-# Shown in the left panel when Config → Stable Mode is checked.
+# Full help for About Stable Mode… (dialog). Short caption stays in the panel.
 STABLE_MODE_HELP = (
     "Stable Mode is on.\n\n"
     "Transfers use mtp-sendtr (one subprocess per track) "
@@ -75,6 +76,11 @@ STABLE_MODE_HELP = (
     "• PyMTP session is closed so mtp-sendtr can claim the player\n\n"
     "Uncheck Config → Stable Mode to return to PyMTP "
     "(device graphic, Connect, and in-process send)."
+)
+# Phase 4a / O9: short left-panel caption (not the full help wall).
+STABLE_MODE_CAPTION = (
+    "Transfers use mtp-sendtr (one process per track). "
+    "Device tools and auto-connect are off."
 )
 
 EXPERIMENTAL_HINT = (
@@ -160,7 +166,7 @@ CTX_PODCAST_ENCODE = "Encode Settings…"
 CTX_PODCAST_EPISODE_SYNC = "Sync Episodes Now"
 CTX_PODCAST_PLAY_EPISODE = "Play This Episode"
 CTX_PODCAST_PLAY_EPISODES = "Play These Episodes"
-CTX_PODCAST_REVEAL_DOWNLOAD = "Reveal Download in Finder"
+CTX_PODCAST_REVEAL_DOWNLOAD = reveal_in_file_manager_label(download=True)
 # Labels updated dynamically with today's day-playlist name.
 CTX_PODCAST_ADD_TO_DAY_PLAYLIST = "Add This Episode to Day Playlist"
 CTX_PODCAST_REMOVE_FROM_DAY_PLAYLIST = "Remove This Episode from Day Playlist"
@@ -895,6 +901,13 @@ class MainWindow:
             justify=LEFT,
         )
         self.lbl_device_caption.pack(padx=6, pady=(4, 0), anchor="w")
+        # Phase 4a / O9: About… for full Stable Mode help (not a text wall).
+        self.btn_stable_mode_about = ttk.Button(
+            self.device_panel,
+            text="About Stable Mode…",
+            style=STYLE_BTN_TOOL,
+            command=self._show_stable_mode_about,
+        )
         # Fixed-height slot so profile art cannot grow the device panel.
         self.device_graphic_slot = flat_frame(
             self.device_panel, height=_DEVICE_GRAPHIC_HEIGHT
@@ -1724,6 +1737,19 @@ class MainWindow:
     def active_mode(self) -> Mode:
         return self._mode
 
+    def _show_stable_mode_about(self) -> None:
+        """Modal with full Stable Mode help (panel shows a short caption only)."""
+        from tkinter import messagebox
+
+        try:
+            messagebox.showinfo(
+                "Stable Mode",
+                STABLE_MODE_HELP,
+                parent=self.root,
+            )
+        except Exception:
+            pass
+
     def apply_mode_ui(self, mode: Mode) -> None:
         """Refresh device subframe + Device menu for the active transfer mode.
 
@@ -1735,13 +1761,23 @@ class MainWindow:
         self.var_stable_mode.set(stable)
         if stable:
             self.lbl_device_title.configure(text="Stable Mode")
-            self.lbl_device_caption.configure(text=STABLE_MODE_HELP)
+            self.lbl_device_caption.configure(text=STABLE_MODE_CAPTION)
             self.lbl_device_graphic.configure(image="")
             if self.device_graphic_slot.winfo_ismapped():
                 self.device_graphic_slot.pack_forget()
+            try:
+                self.btn_stable_mode_about.pack(
+                    padx=6, pady=(6, 8), anchor="w"
+                )
+            except Exception:
+                pass
         else:
             self.lbl_device_title.configure(text="Device")
             self.lbl_device_caption.configure(text=self._device_caption)
+            try:
+                self.btn_stable_mode_about.pack_forget()
+            except Exception:
+                pass
             if self._device_photo is not None:
                 self.lbl_device_graphic.configure(image=self._device_photo)
             if not self.device_graphic_slot.winfo_ismapped():

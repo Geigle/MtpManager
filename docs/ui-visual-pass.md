@@ -2,7 +2,7 @@
 
 **Purpose:** Capture the visual-element survey outcomes so a later implementation pass does not rediscover layout, control grammar, or Linux desktop blend work. **No send-path or MTP invariants change here** — UI chrome only (`mtpmanager/ui/`).
 
-**Status:** Phases **1–3 done**. Phase 4 (platform blend) still backlog.
+**Status:** Phases **1–3 and 4a (macOS) done**. Phases 4b/4c (KDE/GNOME) still backlog.
 
 **Related code:** `mtpmanager/ui/window.py`, `dialogs.py`, light styling via Treeview tags and `_HoverTip`. No design-token module yet.
 
@@ -123,29 +123,31 @@ Full classification lives in the conversation survey; this doc only tracks work 
 
 ---
 
-## Phase 4a — §7.4 macOS (primary test environment)
+## Phase 4a — §7.4 macOS (primary test environment) — **DONE**
 
 **When:** After phases 1–3.
 
-**Already good (preserve):**
+**Already good (preserved):**
 
 - Native menubar; Control-click / Option reorder bindings
 - `_HoverTip` Mac help style + explicit dark-safe tip colors
-- Menlo monospace preference; transient modals
+- Menlo / `monospace_ui_font`; transient modals
+- Flat chrome (phase 1) + ttk Aqua default
 
-**Prioritize on macOS:**
+**Shipped on macOS:**
 
 | Item | Note |
 |------|------|
-| Flat chrome after O4 | Matches modern Aqua content windows more than sunken wells |
-| `ttk` + Aqua where available | Reduces classic raised-button look |
-| Dark-safe dialog prose | Kill fixed `#333`–`#666` (O12); tip colors already careful |
-| Finder wording only on Darwin | O13 |
-| Stable Mode copy (O9) | Short caption + dialog vs text wall in Device slot |
-| Playing / transfer colors (O8) | Optional later; less urgent than chrome/controls |
-| Search field affordance | Clear `×` already; optional polish only |
+| Flat chrome + ttk Aqua | From phases 1–3 |
+| Dark-safe dialog prose (O12) | `secondary_label_kwargs()` → `systemSecondaryLabelColor` on Darwin; no hard `#333`–`#666` |
+| Finder wording (O13) | `reveal_in_file_manager_label()` — Finder only on Darwin |
+| Stable Mode (O9) | Short `STABLE_MODE_CAPTION` + **About Stable Mode…** dialog |
+| Playing / transfer colors (O8) | Deferred (optional) |
+| Search clear | Already `x` (phase 3) |
 
-**Verify:** Homebrew Python 3.13 + Tk ([PLATFORMS.md](../PLATFORMS.md)); light and dark appearance if tip/dialog colors change.
+**Verify:** Homebrew Python 3.13 + Tk ([PLATFORMS.md](../PLATFORMS.md)); light and dark appearance for dialog secondary labels and tips.
+
+**ADR:** [D20](./decisions.md).
 
 ---
 
@@ -313,3 +315,4 @@ Do **not** fold visual chrome into `domain/` or transport paths. Prefer durable 
 | 2026-08-08 | **Phase 1 shipped:** flat main frames + separators; ttk main interactive stack; D17; `ui/chrome.py`. Dialogs deferred. |
 | 2026-08-08 | **Phase 2 shipped:** Podcasts P4 toolbar + show Treeview master–detail; Device combobox strip (no nested notebook); O11 Thumb/Compact Treeview styles. |
 | 2026-08-08 | **Phase 3 shipped:** control grammar (ASCII glyphs, Up/Dn, Refresh); time comboboxes; ttk.Scale only; D19. |
+| 2026-08-08 | **Phase 4a shipped:** system secondary labels; platform reveal wording; Stable Mode short caption + About…; D20. |
