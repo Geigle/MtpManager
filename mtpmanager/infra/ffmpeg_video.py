@@ -1,7 +1,7 @@
 """ffmpeg video encode for device-specific Send Video profiles.
 
-Uses stock ffmpeg ``mpeg4`` + ``-vtag XVID`` (no libxvid). Progress comes from
-python-ffmpeg ``Progress`` events when a duration is known.
+Uses stock ffmpeg ``mpeg4`` + ``-vtag XVID`` (no libxvid). Progress is parsed
+from ffmpeg stderr ``time=`` lines (safe UTF-8 replace decode).
 """
 
 from __future__ import annotations
@@ -14,11 +14,11 @@ import shutil
 import subprocess
 import tempfile
 from collections.abc import Callable
-from datetime import timedelta
 
-from ffmpeg import FFmpeg, Progress
+from ffmpeg import FFmpeg
 
 from mtpmanager.domain.device_profile import VideoEncodePreset, VideoEncodeProfile
+from mtpmanager.infra.ffmpeg_exec import run_ffmpeg_builder
 
 logger = logging.getLogger(__name__)
 
@@ -349,17 +349,20 @@ def convert_video_for_profile(
 
     ff = FFmpeg().option("y").input(src_path).output(dest_path, out_opts)
 
-    def _on_prog(p: Progress) -> None:
+    # ffmpeg status lines: time=00:01:23.45  (ASCII; safe after replace decode)
+    _time_re = re.compile(r"time=(\d+):(\d+):(\d+(?:\.\d+)?)")
+
+    def _on_stderr_line(line: str) -> None:
         if on_progress is None:
             return
-        t = p.time
-        if isinstance(t, timedelta):
-            done = max(0.0, t.total_seconds())
-        else:
-            try:
-                done = float(t or 0)
-            except (TypeError, ValueError):
-                done = 0.0
+        m = _time_re.search(line)
+        if not m:
+            return
+        try:
+            h, mi, sec = int(m.group(1)), int(m.group(2)), float(m.group(3))
+            done = h * 3600 + mi * 60 + sec
+        except (TypeError, ValueError):
+            return
         total = duration if duration > 0 else 0.0
         if total > 0:
             done = min(done, total)
@@ -368,9 +371,13 @@ def convert_video_for_profile(
         except Exception:
             logger.debug("video on_progress failed", exc_info=True)
 
-    ff.on("progress", _on_prog)
     try:
-        ff.execute()
+        # Safe stderr decode — python-ffmpeg execute() raises UnicodeDecodeError
+        # on truncated ID3 dumps in ffmpeg metadata output.
+        run_ffmpeg_builder(
+            ff,
+            on_stderr_line=_on_stderr_line if on_progress else None,
+        )
     except Exception as exc:
         logger.error("Video ffmpeg failed src=%s: %s", src_path, exc)
         cleanup_video_temp(dest_path)

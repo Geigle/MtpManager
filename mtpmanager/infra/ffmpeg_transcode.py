@@ -16,6 +16,7 @@ from mtpmanager.domain.audio_encode import (
     clamp_settings_for_format,
 )
 from mtpmanager.domain.library import is_format
+from mtpmanager.infra.ffmpeg_exec import run_ffmpeg_builder
 
 logger = logging.getLogger(__name__)
 
@@ -202,7 +203,14 @@ class FFmpegTranscoder:
             {k: v for k, v in output_details.items() if k not in ()},
         )
         try:
-            FFmpeg().input(src_path).output(output_file, output_details).execute()
+            # -y: overwrite cleaned slot path; never use python-ffmpeg execute()
+            # (strict UTF-8 stderr chokes on truncated ID3/USLT dumps).
+            run_ffmpeg_builder(
+                FFmpeg()
+                .option("y")
+                .input(src_path)
+                .output(output_file, output_details)
+            )
         except Exception as e:
             # Older ffmpeg builds may reject map_chapters / optional map syntax.
             logger.warning(
@@ -219,7 +227,12 @@ class FFmpegTranscoder:
             try:
                 if os.path.exists(output_file):
                     self.cleanup(output_file)
-                FFmpeg().input(src_path).output(output_file, retry).execute()
+                run_ffmpeg_builder(
+                    FFmpeg()
+                    .option("y")
+                    .input(src_path)
+                    .output(output_file, retry)
+                )
             except Exception as e2:
                 logger.error("FFMPEG FAILED: %s", e2)
                 raise
@@ -264,7 +277,12 @@ class FFmpegTranscoder:
             s.summary_line() if s is not None else target_format,
         )
         try:
-            FFmpeg().input(src_path).output(dest_path, output_details).execute()
+            run_ffmpeg_builder(
+                FFmpeg()
+                .option("y")
+                .input(src_path)
+                .output(dest_path, output_details)
+            )
         except Exception as e:
             logger.error("FFMPEG audio extract failed: %s", e)
             raise
