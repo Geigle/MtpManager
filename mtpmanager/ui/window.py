@@ -1128,26 +1128,17 @@ class MainWindow:
             "status", width=90, minwidth=70, stretch=False
         )
 
-        # Playlists tab: combobox + toolbar + flat track list.
-        pl_toolbar = Frame(self.playlists_tab)
-        pl_toolbar.pack(side=TOP, fill=X, padx=4, pady=(4, 2))
+        # Playlists tab: Podcasts-style master–detail (list Treeview + tracks).
+        # Intentional twin of Podcasts presentation — see docs/ui-visual-pass.md.
+        pl_outer = flat_frame(self.playlists_tab)
+        pl_outer.pack(fill=BOTH, expand=True, padx=4, pady=4)
+
+        # Toolbar: compact actions + status (picker is the master list below).
+        pl_toolbar = flat_frame(pl_outer)
+        pl_toolbar.pack(side=TOP, fill=X, pady=(0, 2))
         Label(pl_toolbar, text="Playlist:").pack(side=LEFT, padx=(2, 4))
+        # Hidden StringVar kept for call sites that set/get the current name.
         self.var_playlist_choice = StringVar(value="")
-        self.playlist_combo = ttk.Combobox(
-            pl_toolbar,
-            textvariable=self.var_playlist_choice,
-            state="disabled",
-            width=36,
-        )
-        self.playlist_combo.pack(side=LEFT, padx=2)
-        self.btn_playlist_rename = ttk.Button(
-            pl_toolbar,
-            text="Rename…",
-            width=9,
-            style=STYLE_BTN_TOOL,
-            state=DISABLED,
-        )
-        self.btn_playlist_rename.pack(side=LEFT, padx=2)
         self.btn_playlist_new = ttk.Button(
             pl_toolbar, text=GLYPH_ADD, width=3, style=STYLE_BTN_COMPACT
         )
@@ -1160,6 +1151,14 @@ class MainWindow:
             state=DISABLED,
         )
         self.btn_playlist_delete.pack(side=LEFT, padx=2)
+        self.btn_playlist_rename = ttk.Button(
+            pl_toolbar,
+            text="Rename…",
+            width=9,
+            style=STYLE_BTN_TOOL,
+            state=DISABLED,
+        )
+        self.btn_playlist_rename.pack(side=LEFT, padx=2)
         self.btn_playlist_sync = ttk.Button(
             pl_toolbar,
             text="Sync playlist to device",
@@ -1186,7 +1185,41 @@ class MainWindow:
         self.lbl_playlist_status = Label(pl_toolbar, text="", anchor="w")
         self.lbl_playlist_status.pack(side=LEFT, fill=X, expand=True, padx=6)
 
-        pl_tree_frame = Frame(self.playlists_tab)
+        # Master: host playlists (compact Treeview — not Combobox).
+        pl_list_header = flat_frame(pl_outer)
+        pl_list_header.pack(side=TOP, fill=X, pady=(4, 2))
+        Label(
+            pl_list_header, text="Playlists", font=("", 11, "bold"), anchor="w"
+        ).pack(side=LEFT)
+        pl_list_frame = flat_frame(pl_outer)
+        pl_list_frame.pack(side=TOP, fill=BOTH, expand=False)
+        pl_list_scroll = ttk.Scrollbar(pl_list_frame)
+        pl_list_scroll.pack(side=RIGHT, fill=Y)
+        self.playlist_list_tree = ttk.Treeview(
+            pl_list_frame,
+            columns=("name",),
+            show="headings",
+            selectmode="browse",
+            height=8,
+            style=STYLE_TREE_COMPACT,
+            yscrollcommand=pl_list_scroll.set,
+        )
+        self.playlist_list_tree.pack(side=LEFT, fill=BOTH, expand=True)
+        pl_list_scroll.config(command=self.playlist_list_tree.yview)
+        self.playlist_list_tree.heading("name", text="Name", anchor="w")
+        self.playlist_list_tree.column("name", width=400, minwidth=120, stretch=True)
+        # Back-compat alias for older mental model ("combo" picker).
+        self.playlist_combo = self.playlist_list_tree
+
+        # Detail: tracks for the selected playlist.
+        pl_tracks_header = flat_frame(pl_outer)
+        pl_tracks_header.pack(side=TOP, fill=X, pady=(8, 2))
+        self.lbl_playlist_tracks = Label(
+            pl_tracks_header, text="Tracks", font=("", 11, "bold"), anchor="w"
+        )
+        self.lbl_playlist_tracks.pack(side=LEFT, fill=X, expand=True)
+
+        pl_tree_frame = flat_frame(pl_outer)
         pl_tree_frame.pack(side=TOP, fill=BOTH, expand=True)
 
         # Device tab (phase 2 / O3): category combobox strip + one content frame
@@ -1239,26 +1272,14 @@ class MainWindow:
         dp_tree_frame = Frame(self.device_podcasts_tab)
         dp_tree_frame.pack(fill=BOTH, expand=True)
 
-        # Device → Playlists: same chrome as host Playlists (combo + toolbar + flat list).
-        dpl_toolbar = Frame(self.device_playlists_tab)
-        dpl_toolbar.pack(side=TOP, fill=X, padx=4, pady=(4, 2))
+        # Device → Playlists: same master–detail chrome as host Playlists.
+        dpl_outer = flat_frame(self.device_playlists_tab)
+        dpl_outer.pack(fill=BOTH, expand=True, padx=4, pady=4)
+
+        dpl_toolbar = flat_frame(dpl_outer)
+        dpl_toolbar.pack(side=TOP, fill=X, pady=(0, 2))
         Label(dpl_toolbar, text="Playlist:").pack(side=LEFT, padx=(2, 4))
         self.var_device_playlist_choice = StringVar(value="")
-        self.device_playlist_combo = ttk.Combobox(
-            dpl_toolbar,
-            textvariable=self.var_device_playlist_choice,
-            state="disabled",
-            width=36,
-        )
-        self.device_playlist_combo.pack(side=LEFT, padx=2)
-        self.btn_device_playlist_rename = ttk.Button(
-            dpl_toolbar,
-            text="Rename…",
-            width=9,
-            style=STYLE_BTN_TOOL,
-            state=DISABLED,
-        )
-        self.btn_device_playlist_rename.pack(side=LEFT, padx=2)
         self.btn_device_playlist_new = ttk.Button(
             dpl_toolbar,
             text=GLYPH_ADD,
@@ -1275,6 +1296,14 @@ class MainWindow:
             state=DISABLED,
         )
         self.btn_device_playlist_delete.pack(side=LEFT, padx=2)
+        self.btn_device_playlist_rename = ttk.Button(
+            dpl_toolbar,
+            text="Rename…",
+            width=9,
+            style=STYLE_BTN_TOOL,
+            state=DISABLED,
+        )
+        self.btn_device_playlist_rename.pack(side=LEFT, padx=2)
         self.btn_device_playlist_refresh = ttk.Button(
             dpl_toolbar,
             text="Refresh from device",
@@ -1312,7 +1341,43 @@ class MainWindow:
             side=LEFT, fill=X, expand=True, padx=6
         )
 
-        dpl_tree_frame = Frame(self.device_playlists_tab)
+        dpl_list_header = flat_frame(dpl_outer)
+        dpl_list_header.pack(side=TOP, fill=X, pady=(4, 2))
+        Label(
+            dpl_list_header,
+            text="On-device playlists",
+            font=("", 11, "bold"),
+            anchor="w",
+        ).pack(side=LEFT)
+        dpl_list_frame = flat_frame(dpl_outer)
+        dpl_list_frame.pack(side=TOP, fill=BOTH, expand=False)
+        dpl_list_scroll = ttk.Scrollbar(dpl_list_frame)
+        dpl_list_scroll.pack(side=RIGHT, fill=Y)
+        self.device_playlist_list_tree = ttk.Treeview(
+            dpl_list_frame,
+            columns=("name",),
+            show="headings",
+            selectmode="browse",
+            height=8,
+            style=STYLE_TREE_COMPACT,
+            yscrollcommand=dpl_list_scroll.set,
+        )
+        self.device_playlist_list_tree.pack(side=LEFT, fill=BOTH, expand=True)
+        dpl_list_scroll.config(command=self.device_playlist_list_tree.yview)
+        self.device_playlist_list_tree.heading("name", text="Name", anchor="w")
+        self.device_playlist_list_tree.column(
+            "name", width=400, minwidth=120, stretch=True
+        )
+        self.device_playlist_combo = self.device_playlist_list_tree
+
+        dpl_tracks_header = flat_frame(dpl_outer)
+        dpl_tracks_header.pack(side=TOP, fill=X, pady=(8, 2))
+        self.lbl_device_playlist_tracks = Label(
+            dpl_tracks_header, text="Tracks", font=("", 11, "bold"), anchor="w"
+        )
+        self.lbl_device_playlist_tracks.pack(side=LEFT, fill=X, expand=True)
+
+        dpl_tree_frame = flat_frame(dpl_outer)
         dpl_tree_frame.pack(side=TOP, fill=BOTH, expand=True)
 
         yscroll = ttk.Scrollbar(tree_frame)
@@ -2485,6 +2550,7 @@ class MainWindow:
         self,
         *,
         on_combo_selected=None,
+        on_list_selected=None,
         on_new=None,
         on_delete=None,
         on_rename=None,
@@ -2497,9 +2563,11 @@ class MainWindow:
         on_play_track=None,
     ) -> None:
         """Wire Playlists tab toolbar + context menu."""
-        if on_combo_selected is not None:
-            self.playlist_combo.bind(
-                "<<ComboboxSelected>>", lambda _e: on_combo_selected()
+        # on_list_selected is preferred; on_combo_selected kept as alias.
+        select_cb = on_list_selected if on_list_selected is not None else on_combo_selected
+        if select_cb is not None:
+            self.playlist_list_tree.bind(
+                "<<TreeviewSelect>>", lambda _e: select_cb()
             )
         if on_new is not None:
             self.btn_playlist_new.configure(command=on_new)
@@ -2567,26 +2635,67 @@ class MainWindow:
         names: list[str],
         *,
         selected: str = "",
+        ids: list[int] | None = None,
     ) -> None:
-        """Refresh playlist dropdown options and selection."""
+        """Refresh host playlist master list and selection.
+
+        *names* are display labels. Optional *ids* (same length) become Treeview
+        iids ``pln:{id}``; otherwise iids are ``pln:i:{index}``.
+        """
         values = list(names or [])
+        tree = self.playlist_list_tree
+        for iid in tree.get_children(""):
+            tree.delete(iid)
         if not values:
-            self.playlist_combo.configure(values=[], state="disabled")
             self.var_playlist_choice.set("")
             self.btn_playlist_rename.configure(state=DISABLED)
             self.btn_playlist_delete.configure(state=DISABLED)
             self.btn_playlist_sync.configure(state=DISABLED)
             self.btn_playlist_move_up.configure(state=DISABLED)
             self.btn_playlist_move_down.configure(state=DISABLED)
+            try:
+                self.lbl_playlist_tracks.configure(text="Tracks")
+            except Exception:
+                pass
             return
-        self.playlist_combo.configure(values=values, state="readonly")
+        id_list = list(ids) if ids is not None else []
+        for i, name in enumerate(values):
+            if i < len(id_list) and id_list[i] is not None:
+                iid = f"pln:{int(id_list[i])}"
+            else:
+                iid = f"pln:i:{i}"
+            tree.insert("", "end", iid=iid, values=(name,))
         pick = selected if selected in values else values[0]
         self.var_playlist_choice.set(pick)
+        # Select matching row by name (or first).
+        pick_iid = ""
+        for iid in tree.get_children(""):
+            try:
+                vals = tree.item(iid, "values")
+            except Exception:
+                vals = ()
+            if vals and str(vals[0]) == pick:
+                pick_iid = iid
+                break
+        if not pick_iid:
+            kids = tree.get_children("")
+            pick_iid = kids[0] if kids else ""
+        if pick_iid:
+            try:
+                tree.selection_set(pick_iid)
+                tree.focus(pick_iid)
+                tree.see(pick_iid)
+            except Exception:
+                pass
         self.btn_playlist_rename.configure(state=NORMAL)
         self.btn_playlist_delete.configure(state=NORMAL)
         self.btn_playlist_sync.configure(state=NORMAL)
         self.btn_playlist_move_up.configure(state=NORMAL)
         self.btn_playlist_move_down.configure(state=NORMAL)
+        try:
+            self.lbl_playlist_tracks.configure(text=f"Tracks — {pick}")
+        except Exception:
+            pass
 
     def clear_playlist_tree(self) -> None:
         tree = self.playlist_tree
@@ -2616,6 +2725,7 @@ class MainWindow:
         self,
         *,
         on_combo_selected=None,
+        on_list_selected=None,
         on_new=None,
         on_delete=None,
         on_rename=None,
@@ -2629,9 +2739,10 @@ class MainWindow:
         on_play_track=None,
     ) -> None:
         """Wire Device → Playlists toolbar + context menu."""
-        if on_combo_selected is not None:
-            self.device_playlist_combo.bind(
-                "<<ComboboxSelected>>", lambda _e: on_combo_selected()
+        select_cb = on_list_selected if on_list_selected is not None else on_combo_selected
+        if select_cb is not None:
+            self.device_playlist_list_tree.bind(
+                "<<TreeviewSelect>>", lambda _e: select_cb()
             )
         if on_new is not None:
             self.btn_device_playlist_new.configure(command=on_new)
@@ -2756,9 +2867,13 @@ class MainWindow:
         *,
         selected: str = "",
         interactive: bool = True,
+        playlist_ids: list[int] | None = None,
     ) -> None:
-        """Refresh Device → Playlists dropdown options and selection."""
+        """Refresh Device → Playlists master list and selection."""
         values = list(names or [])
+        tree = self.device_playlist_list_tree
+        for iid in tree.get_children(""):
+            tree.delete(iid)
         # Always allow Refresh when a session can list playlists.
         refresh_state = NORMAL if interactive else DISABLED
         self.btn_device_playlist_refresh.configure(state=refresh_state)
@@ -2766,25 +2881,55 @@ class MainWindow:
             state=NORMAL if interactive else DISABLED
         )
         if not values:
-            self.device_playlist_combo.configure(values=[], state="disabled")
             self.var_device_playlist_choice.set("")
             self.btn_device_playlist_rename.configure(state=DISABLED)
             self.btn_device_playlist_delete.configure(state=DISABLED)
             self.btn_device_playlist_recreate.configure(state=DISABLED)
             self.btn_device_playlist_move_up.configure(state=DISABLED)
             self.btn_device_playlist_move_down.configure(state=DISABLED)
+            try:
+                self.lbl_device_playlist_tracks.configure(text="Tracks")
+            except Exception:
+                pass
             return
-        self.device_playlist_combo.configure(
-            values=values, state="readonly" if interactive else "disabled"
-        )
+        id_list = list(playlist_ids) if playlist_ids is not None else []
+        for i, name in enumerate(values):
+            if i < len(id_list) and id_list[i] is not None:
+                iid = f"dpln:{int(id_list[i])}"
+            else:
+                iid = f"dpln:i:{i}"
+            tree.insert("", "end", iid=iid, values=(name,))
         pick = selected if selected in values else values[0]
         self.var_device_playlist_choice.set(pick)
+        pick_iid = ""
+        for iid in tree.get_children(""):
+            try:
+                vals = tree.item(iid, "values")
+            except Exception:
+                vals = ()
+            if vals and str(vals[0]) == pick:
+                pick_iid = iid
+                break
+        if not pick_iid:
+            kids = tree.get_children("")
+            pick_iid = kids[0] if kids else ""
+        if pick_iid:
+            try:
+                tree.selection_set(pick_iid)
+                tree.focus(pick_iid)
+                tree.see(pick_iid)
+            except Exception:
+                pass
         btn_state = NORMAL if interactive else DISABLED
         self.btn_device_playlist_rename.configure(state=btn_state)
         self.btn_device_playlist_delete.configure(state=btn_state)
         self.btn_device_playlist_recreate.configure(state=btn_state)
         self.btn_device_playlist_move_up.configure(state=btn_state)
         self.btn_device_playlist_move_down.configure(state=btn_state)
+        try:
+            self.lbl_device_playlist_tracks.configure(text=f"Tracks — {pick}")
+        except Exception:
+            pass
 
     def clear_device_playlist_tree(self) -> None:
         tree = self.device_playlist_tree

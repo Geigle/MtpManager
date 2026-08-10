@@ -79,6 +79,26 @@ class ChromeBaselineTests(unittest.TestCase):
             str(win.podcast_episode_tree.cget("style")), STYLE_TREE_COMPACT
         )
 
+    def test_playlists_master_detail_like_podcasts(self) -> None:
+        """Host + Device Playlists use list Treeview + tracks (not Combobox)."""
+        win = MainWindow(self.root)
+        self.assertEqual(win.playlist_list_tree.winfo_class(), "Treeview")
+        self.assertIs(win.playlist_combo, win.playlist_list_tree)
+        self.assertEqual(str(win.playlist_list_tree.cget("style")), STYLE_TREE_COMPACT)
+        self.assertEqual(str(win.playlist_tree.cget("style")), STYLE_TREE_COMPACT)
+        self.assertEqual(win.device_playlist_list_tree.winfo_class(), "Treeview")
+        self.assertIs(win.device_playlist_combo, win.device_playlist_list_tree)
+        win.set_playlist_combo_values(
+            ["A", "B"], selected="B", ids=[10, 20]
+        )
+        self.assertEqual(win.var_playlist_choice.get(), "B")
+        self.assertIn("pln:20", win.playlist_list_tree.selection())
+        win.set_device_playlist_combo_values(
+            ["Dev"], selected="Dev", interactive=True, playlist_ids=[99]
+        )
+        self.assertEqual(win.var_device_playlist_choice.get(), "Dev")
+        self.assertIn("dpln:99", win.device_playlist_list_tree.selection())
+
     def test_phase2_device_subview_is_not_nested_notebook(self) -> None:
         win = MainWindow(self.root)
         self.assertEqual(type(win.device_notebook).__name__, "_DeviceSubviewNotebook")

@@ -85,9 +85,14 @@ Full classification lives in the conversation survey; this doc only tracks work 
 
 **O2 — Host Podcasts (shipped):**
 
-- **P4-like toolbar:** `Show:` + `+` `−` `↻` · Sync Latest · More Episodes · status (same grammar as Playlists).
-- **Master–detail (documented exception):** subscriptions `Treeview` + episodes `Treeview` (not a pure artist/album hierarchy like Music). This is the **only** intentional master–detail media tab.
+- **P4-like toolbar:** `Show:` + `+` `−` `↻` · Sync Latest · More Episodes · status.
+- **Master–detail:** subscriptions `Treeview` + episodes `Treeview` (not a pure artist/album hierarchy like Music).
 - Subscriptions no longer use classic `Listbox`; iid `ps:{id}` selection in the controller.
+
+**Playlists (aligned to Podcasts presentation):**
+
+- Host and Device → Playlists use the **same master–detail** chrome as Podcasts: compact list `Treeview` (`pln:{id}` / `dpln:{id}`) + detail tracks tree; no Combobox picker.
+- Toolbars keep P4 actions (`+` `−` Rename / Sync or Refresh / Up / Dn + status). `var_playlist_choice` / `var_device_playlist_choice` remain as name mirrors for existing call sites.
 
 **O3 — Device category strip (shipped):**
 
@@ -95,7 +100,7 @@ Full classification lives in the conversation survey; this doc only tracks work 
 - **On device:** readonly combobox (Music / Video / Audiobooks / Podcasts / Playlists) + one packed content frame.
 - `device_notebook` remains a thin shim (`_DeviceSubviewNotebook`) so `.select()` / `.select(frame)` call sites keep working.
 
-**P3 / P4:** Host and device Playlists toolbars stay twins. No fourth list widget style on the main window.
+**P3 / P4:** Host and device Playlists stay twins (master–detail + shared toolbar grammar). No fourth list widget style on the main window.
 
 **O11 (shipped with phase 2):**
 
@@ -316,3 +321,4 @@ Do **not** fold visual chrome into `domain/` or transport paths. Prefer durable 
 | 2026-08-08 | **Phase 2 shipped:** Podcasts P4 toolbar + show Treeview master–detail; Device combobox strip (no nested notebook); O11 Thumb/Compact Treeview styles. |
 | 2026-08-08 | **Phase 3 shipped:** control grammar (ASCII glyphs, Up/Dn, Refresh); time comboboxes; ttk.Scale only; D19. |
 | 2026-08-08 | **Phase 4a shipped:** system secondary labels; platform reveal wording; Stable Mode short caption + About…; D20. |
+| 2026-08-08 | **Playlists master–detail:** host + Device → Playlists match Podcasts presentation (list Treeview + tracks; combobox picker removed). |
