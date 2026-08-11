@@ -1,4 +1,8 @@
-"""Tk layout only — widgets and packing."""
+"""Tk layout only — widgets and packing.
+
+Main-window chrome baseline (phase 1): flat frames + ttk interactive
+controls via ``mtpmanager.ui.chrome``. See ``docs/ui-visual-pass.md``.
+"""
 
 from __future__ import annotations
 
@@ -12,7 +16,6 @@ from tkinter import (
     BOTH,
     BOTTOM,
     BooleanVar,
-    Button,
     DISABLED,
     DoubleVar,
     END,
@@ -23,13 +26,10 @@ from tkinter import (
     WORD,
     X,
     Y,
-    Entry,
     Frame,
     Label,
-    Listbox,
     Menu,
     PhotoImage,
-    Scrollbar,
     StringVar,
     Text,
     Tk,
@@ -37,9 +37,36 @@ from tkinter import (
     ttk,
 )
 
+from mtpmanager.ui.chrome import (
+    GLYPH_ADD,
+    GLYPH_DISMISS,
+    GLYPH_REMOVE,
+    LABEL_MOVE_DOWN,
+    LABEL_MOVE_UP,
+    LABEL_REFRESH,
+    STYLE_BTN_COMPACT,
+    STYLE_BTN_TOOL,
+    STYLE_TREE_COMPACT,
+    STYLE_TREE_THUMB,
+    apply_chrome_baseline,
+    flat_frame,
+    h_separator,
+    reveal_in_file_manager_label,
+    v_separator,
+)
+
+# Device tab category labels (phase 2: combobox strip, not nested Notebook).
+_DEVICE_CATEGORY_LABELS = (
+    "Music",
+    "Video",
+    "Audiobooks",
+    "Podcasts",
+    "Playlists",
+)
+
 Mode = Literal["stable", "experimental"]
 
-# Shown in the left panel when Config → Stable Mode is checked.
+# Full help for About Stable Mode… (dialog). Short caption stays in the panel.
 STABLE_MODE_HELP = (
     "Stable Mode is on.\n\n"
     "Transfers use mtp-sendtr (one subprocess per track) "
@@ -49,6 +76,11 @@ STABLE_MODE_HELP = (
     "• PyMTP session is closed so mtp-sendtr can claim the player\n\n"
     "Uncheck Config → Stable Mode to return to PyMTP "
     "(device graphic, Connect, and in-process send)."
+)
+# Phase 4a / O9: short left-panel caption (not the full help wall).
+STABLE_MODE_CAPTION = (
+    "Transfers use mtp-sendtr (one process per track). "
+    "Device tools and auto-connect are off."
 )
 
 EXPERIMENTAL_HINT = (
@@ -134,7 +166,7 @@ CTX_PODCAST_ENCODE = "Encode Settings…"
 CTX_PODCAST_EPISODE_SYNC = "Sync Episodes Now"
 CTX_PODCAST_PLAY_EPISODE = "Play This Episode"
 CTX_PODCAST_PLAY_EPISODES = "Play These Episodes"
-CTX_PODCAST_REVEAL_DOWNLOAD = "Reveal Download in Finder"
+CTX_PODCAST_REVEAL_DOWNLOAD = reveal_in_file_manager_label(download=True)
 # Labels updated dynamically with today's day-playlist name.
 CTX_PODCAST_ADD_TO_DAY_PLAYLIST = "Add This Episode to Day Playlist"
 CTX_PODCAST_REMOVE_FROM_DAY_PLAYLIST = "Remove This Episode from Day Playlist"
@@ -454,13 +486,35 @@ class _HoverTip:
                 pass
 
 
+class _DeviceSubviewNotebook:
+    """Notebook-like API over a single visible Device category frame (phase 2).
+
+    Call sites use ``device_notebook.select()`` / ``select(frame)`` the same way
+    as ``ttk.Notebook``. The UI is a combobox strip, not nested tabs.
+    """
+
+    def __init__(self, window: "MainWindow") -> None:
+        self._win = window
+
+    def select(self, tab_id=None):
+        if tab_id is None:
+            frame = getattr(self._win, "_device_subview_frame", None)
+            return str(frame) if frame is not None else ""
+        self._win.show_device_subview(tab_id)
+        return None
+
+
 class MainWindow:
     def __init__(self, root: Tk | None = None):
         self.root = root or Tk()
         self.root.title("MTP Manager")
         self.root.geometry("1000x600")
-        self.root["borderwidth"] = 1
-        self.root["relief"] = "sunken"
+        # Flat chrome (phase 1): no sunken root well — see ui/chrome.py / D17.
+        try:
+            self.root.configure(borderwidth=0, highlightthickness=0)
+        except Exception:
+            pass
+        self._style = apply_chrome_baseline(self.root)
 
         # Menubar: Library | Transfer | Device | View | Config
         self.menubar = Menu(self.root)
@@ -654,9 +708,9 @@ class MainWindow:
 
         self._prepare_device_context_menu = None
 
-        # Status toolbar: path + fuzzy search + track count.
-        library_toolbar = Frame(self.root, borderwidth=1, relief="sunken")
-        library_toolbar.pack(side=TOP, fill=X, padx=2, pady=2)
+        # Status toolbar: path + fuzzy search + track count (flat strip).
+        library_toolbar = flat_frame(self.root)
+        library_toolbar.pack(side=TOP, fill=X, padx=4, pady=(4, 2))
         self.library_toolbar = library_toolbar
 
         Label(library_toolbar, text="Library:").pack(side=LEFT, padx=(6, 2), pady=4)
@@ -671,7 +725,7 @@ class MainWindow:
 
         Label(library_toolbar, text="Search:").pack(side=LEFT, padx=(8, 2), pady=4)
         self.var_library_search = StringVar(value="")
-        self.entry_library_search = Entry(
+        self.entry_library_search = ttk.Entry(
             library_toolbar,
             textvariable=self.var_library_search,
             width=22,
@@ -684,8 +738,12 @@ class MainWindow:
             "Example: artist:nightwish ocean\n"
             "⌘F / Ctrl+F focus · Esc clear"
         )
-        self.btn_library_search_clear = Button(
-            library_toolbar, text="×", width=2, state=DISABLED
+        self.btn_library_search_clear = ttk.Button(
+            library_toolbar,
+            text=GLYPH_DISMISS,
+            width=2,
+            style=STYLE_BTN_COMPACT,
+            state=DISABLED,
         )
         self.btn_library_search_clear.pack(side=LEFT, padx=(0, 4), pady=2)
         self._on_library_search_change = None
@@ -694,16 +752,16 @@ class MainWindow:
         self.lbl_library_count = Label(library_toolbar, text="0 tracks")
         self.lbl_library_count.pack(side=LEFT, padx=(4, 8), pady=4)
 
+        h_separator(self.root).pack(side=TOP, fill=X)
+
         # Pack bottom bar *before* the expanding body so it always keeps a
         # visible strip (Tk expand can otherwise starve a late BOTTOM pack).
-        bottomframe = Frame(self.root)
-        bottomframe["borderwidth"] = 1
-        bottomframe["relief"] = "sunken"
+        bottomframe = flat_frame(self.root)
         bottomframe.pack(side=BOTTOM, fill=X)
         self.bottomframe = bottomframe
 
         # Playback controls (hidden unless playing or View → always show).
-        self.playback_row = Frame(bottomframe)
+        self.playback_row = flat_frame(bottomframe)
         self._playback_row_visible = False
         self._playback_always_show = False
         self._playback_session_active = False
@@ -721,14 +779,26 @@ class MainWindow:
         self._playback_title_offset = 0
         self._playback_marquee_after_id: str | None = None
 
-        self.btn_playback_prev = Button(
-            self.playback_row, text="Prev", width=5, state=DISABLED
+        self.btn_playback_prev = ttk.Button(
+            self.playback_row,
+            text="Prev",
+            width=5,
+            style=STYLE_BTN_TOOL,
+            state=DISABLED,
         )
-        self.btn_playback_play = Button(
-            self.playback_row, text="Play", width=6, state=DISABLED
+        self.btn_playback_play = ttk.Button(
+            self.playback_row,
+            text="Play",
+            width=6,
+            style=STYLE_BTN_TOOL,
+            state=DISABLED,
         )
-        self.btn_playback_next = Button(
-            self.playback_row, text="Next", width=5, state=DISABLED
+        self.btn_playback_next = ttk.Button(
+            self.playback_row,
+            text="Next",
+            width=5,
+            style=STYLE_BTN_TOOL,
+            state=DISABLED,
         )
         self.var_playback_scrub = DoubleVar(value=0.0)
         self.playback_scrub = ttk.Scale(
@@ -748,8 +818,11 @@ class MainWindow:
             anchor="w",
             width=_PLAYBACK_TITLE_WIDTH,
         )
-        self.btn_playback_close = Button(
-            self.playback_row, text="×", width=3
+        self.btn_playback_close = ttk.Button(
+            self.playback_row,
+            text=GLYPH_DISMISS,
+            width=3,
+            style=STYLE_BTN_COMPACT,
         )
         # Layout: [Prev] [Play] [Next] [title] [====scrub====] [time] [×]
         self.btn_playback_prev.pack(side=LEFT, padx=(4, 2), pady=4)
@@ -776,12 +849,13 @@ class MainWindow:
         self.lbl_progress_status.pack(side=TOP, fill=X, padx=8, pady=(4, 0))
 
         # Progress + Cancel (always mapped; Cancel enabled only while a job runs).
-        self.progress_row = Frame(bottomframe)
+        self.progress_row = flat_frame(bottomframe)
         self.progress_row.pack(side=TOP, fill=X, padx=4, pady=(2, 4))
-        self.btn_cancel_job = Button(
+        self.btn_cancel_job = ttk.Button(
             self.progress_row,
             text="Cancel",
             width=12,
+            style=STYLE_BTN_TOOL,
             state=DISABLED,
         )
         # Pack Cancel first on the right so the progress bar cannot cover it.
@@ -789,25 +863,26 @@ class MainWindow:
         self.progress = ttk.Progressbar(self.progress_row, length=200)
         self.progress.pack(side=LEFT, fill=X, expand=True, padx=(2, 0), pady=2)
 
-        body = Frame(self.root)
+        # Hairline above the bottom strip (after bottomframe so it sits above it).
+        h_separator(self.root).pack(side=BOTTOM, fill=X)
+
+        body = flat_frame(self.root)
         body.pack(side=TOP, fill=BOTH, expand=True)
 
         # Fixed-width left column: context (selection) + device subframes.
-        leftframe = Frame(body, width=_LEFT_PANEL_WIDTH)
-        leftframe["borderwidth"] = 1
-        leftframe["relief"] = "sunken"
+        leftframe = flat_frame(body, width=_LEFT_PANEL_WIDTH)
         leftframe.pack(side=LEFT, fill=Y)
         leftframe.pack_propagate(False)
         self.leftframe = leftframe
 
-        rightframe = Frame(body)
-        rightframe["borderwidth"] = 1
-        rightframe["relief"] = "sunken"
+        v_separator(body).pack(side=LEFT, fill=Y)
+
+        rightframe = flat_frame(body)
         rightframe.pack(side=RIGHT, fill=BOTH, expand=True)
 
         # --- Device subframe: fixed height, locked to bottom of leftframe ---
         # Pack BOTTOM first so Selection fills the remaining space above.
-        self.device_panel = Frame(
+        self.device_panel = flat_frame(
             leftframe, width=_LEFT_PANEL_WIDTH - 6, height=_DEVICE_PANEL_HEIGHT
         )
         self.device_panel.pack(side=BOTTOM, fill=X, padx=3, pady=(2, 6))
@@ -826,8 +901,15 @@ class MainWindow:
             justify=LEFT,
         )
         self.lbl_device_caption.pack(padx=6, pady=(4, 0), anchor="w")
+        # Phase 4a / O9: About… for full Stable Mode help (not a text wall).
+        self.btn_stable_mode_about = ttk.Button(
+            self.device_panel,
+            text="About Stable Mode…",
+            style=STYLE_BTN_TOOL,
+            command=self._show_stable_mode_about,
+        )
         # Fixed-height slot so profile art cannot grow the device panel.
-        self.device_graphic_slot = Frame(
+        self.device_graphic_slot = flat_frame(
             self.device_panel, height=_DEVICE_GRAPHIC_HEIGHT
         )
         self.device_graphic_slot.pack(padx=6, pady=6, fill=X)
@@ -841,7 +923,7 @@ class MainWindow:
 
         # --- Context subframe: startup hint, then selection metadata ---
         # Fills all space above the bottom-locked device panel.
-        self.context_panel = Frame(leftframe)
+        self.context_panel = flat_frame(leftframe)
         self.context_panel.pack(
             side=TOP, fill=BOTH, expand=True, padx=3, pady=(6, 2)
         )
@@ -855,11 +937,11 @@ class MainWindow:
         self._context_detail = ""
         self._context_path = ""
         # Scrollable body: long podcast descriptions / multi-line selection text.
-        self.context_body = Frame(self.context_panel)
+        self.context_body = flat_frame(self.context_panel)
         self.context_body.pack(
             side=TOP, fill=BOTH, expand=True, padx=4, pady=(4, 0)
         )
-        self.context_scroll = Scrollbar(self.context_body)
+        self.context_scroll = ttk.Scrollbar(self.context_body)
         self.context_scroll.pack(side=RIGHT, fill=Y)
         self.txt_context_detail = Text(
             self.context_body,
@@ -928,68 +1010,101 @@ class MainWindow:
         ab_tree_frame = Frame(self.audiobooksLibrary_tab)
         ab_tree_frame.pack(fill=BOTH, expand=True)
 
-        # Podcasts tab: subscriptions + episodes + Sync Latest.
+        # Podcasts tab (phase 2 / O2): P4-like toolbar + master–detail
+        # (shows Treeview + episodes Treeview). Intentional exception to pure
+        # P3 hierarchy — see docs/ui-visual-pass.md.
         # Full-sync schedule: Config → Podcast Settings…
         # TODO(follow-up): OPML import/export
-        pod_outer = Frame(self.podcastsLibrary_tab)
+        pod_outer = flat_frame(self.podcastsLibrary_tab)
         pod_outer.pack(fill=BOTH, expand=True, padx=4, pady=4)
 
-        pod_top = Frame(pod_outer)
-        pod_top.pack(side=TOP, fill=BOTH, expand=True)
-        Label(pod_top, text="Subscriptions", font=("", 11, "bold")).pack(
-            anchor="w", pady=(0, 2)
+        # Toolbar mirrors Playlists (P4): compact actions + status.
+        pod_toolbar = flat_frame(pod_outer)
+        pod_toolbar.pack(side=TOP, fill=X, pady=(0, 2))
+        Label(pod_toolbar, text="Show:").pack(side=LEFT, padx=(2, 4))
+        self.btn_podcast_add = ttk.Button(
+            pod_toolbar, text=GLYPH_ADD, width=3, style=STYLE_BTN_COMPACT
         )
-        pod_sub_row = Frame(pod_top)
-        pod_sub_row.pack(side=TOP, fill=BOTH, expand=True)
-        pod_sub_list_frame = Frame(pod_sub_row)
-        pod_sub_list_frame.pack(side=LEFT, fill=BOTH, expand=True)
-        pod_sub_scroll = Scrollbar(pod_sub_list_frame)
+        self.btn_podcast_add.pack(side=LEFT, padx=2)
+        self.btn_podcast_remove = ttk.Button(
+            pod_toolbar,
+            text=GLYPH_REMOVE,
+            width=3,
+            style=STYLE_BTN_COMPACT,
+            state=DISABLED,
+        )
+        self.btn_podcast_remove.pack(side=LEFT, padx=2)
+        # Manual re-fetch of selected show feed(s) for new episodes.
+        self.btn_podcast_refresh = ttk.Button(
+            pod_toolbar,
+            text=LABEL_REFRESH,
+            style=STYLE_BTN_TOOL,
+            state=DISABLED,
+        )
+        self.btn_podcast_refresh.pack(side=LEFT, padx=2)
+        self.btn_podcast_sync_latest = ttk.Button(
+            pod_toolbar,
+            text="Sync Latest",
+            style=STYLE_BTN_TOOL,
+            state=DISABLED,
+        )
+        self.btn_podcast_sync_latest.pack(side=LEFT, padx=(8, 2))
+        self.btn_podcast_more = ttk.Button(
+            pod_toolbar,
+            text="More Episodes",
+            style=STYLE_BTN_TOOL,
+            state=DISABLED,
+        )
+        self.btn_podcast_more.pack(side=LEFT, padx=2)
+        self.lbl_podcast_status = Label(pod_toolbar, text="", anchor="w")
+        self.lbl_podcast_status.pack(side=LEFT, fill=X, expand=True, padx=6)
+
+        # Master: subscriptions (compact Treeview — not Listbox).
+        pod_sub_header = flat_frame(pod_outer)
+        pod_sub_header.pack(side=TOP, fill=X, pady=(4, 2))
+        Label(
+            pod_sub_header, text="Subscriptions", font=("", 11, "bold"), anchor="w"
+        ).pack(side=LEFT)
+        pod_sub_frame = flat_frame(pod_outer)
+        pod_sub_frame.pack(side=TOP, fill=BOTH, expand=False)
+        pod_sub_scroll = ttk.Scrollbar(pod_sub_frame)
         pod_sub_scroll.pack(side=RIGHT, fill=Y)
-        self.podcast_show_list = Listbox(
-            pod_sub_list_frame,
-            height=8,
+        self.podcast_show_tree = ttk.Treeview(
+            pod_sub_frame,
+            columns=("show",),
+            show="headings",
             selectmode="extended",
-            exportselection=False,
+            height=8,
+            style=STYLE_TREE_COMPACT,
             yscrollcommand=pod_sub_scroll.set,
         )
-        self.podcast_show_list.pack(side=LEFT, fill=BOTH, expand=True)
-        pod_sub_scroll.config(command=self.podcast_show_list.yview)
-        pod_sub_btns = Frame(pod_sub_row)
-        pod_sub_btns.pack(side=LEFT, fill=Y, padx=(6, 0))
-        self.btn_podcast_add = Button(pod_sub_btns, text="+", width=3)
-        self.btn_podcast_add.pack(side=TOP, pady=(0, 4))
-        self.btn_podcast_remove = Button(
-            pod_sub_btns, text="−", width=3, state=DISABLED
-        )
-        self.btn_podcast_remove.pack(side=TOP, pady=(0, 4))
-        # Manual re-fetch of selected show feed(s) for new episodes.
-        self.btn_podcast_refresh = Button(
-            pod_sub_btns, text="↻", width=3, state=DISABLED
-        )
-        self.btn_podcast_refresh.pack(side=TOP)
+        self.podcast_show_tree.pack(side=LEFT, fill=BOTH, expand=True)
+        pod_sub_scroll.config(command=self.podcast_show_tree.yview)
+        self.podcast_show_tree.heading("show", text="Show", anchor="w")
+        self.podcast_show_tree.column("show", width=400, minwidth=120, stretch=True)
+        # Back-compat alias (older call sites / mental model: "list").
+        self.podcast_show_list = self.podcast_show_tree
 
-        pod_ep_header = Frame(pod_outer)
+        # Detail: episodes for the selected show(s).
+        pod_ep_header = flat_frame(pod_outer)
         pod_ep_header.pack(side=TOP, fill=X, pady=(8, 2))
         self.lbl_podcast_episodes = Label(
             pod_ep_header, text="Episodes", font=("", 11, "bold"), anchor="w"
         )
         self.lbl_podcast_episodes.pack(side=LEFT, fill=X, expand=True)
-        self.btn_podcast_more = Button(
-            pod_ep_header, text="More Episodes", state=DISABLED
-        )
-        self.btn_podcast_more.pack(side=RIGHT)
 
-        pod_ep_frame = Frame(pod_outer)
+        pod_ep_frame = flat_frame(pod_outer)
         pod_ep_frame.pack(side=TOP, fill=BOTH, expand=True)
-        pod_ep_yscroll = Scrollbar(pod_ep_frame)
+        pod_ep_yscroll = ttk.Scrollbar(pod_ep_frame)
         pod_ep_yscroll.pack(side=RIGHT, fill=Y)
-        pod_ep_xscroll = Scrollbar(pod_ep_frame, orient="horizontal")
+        pod_ep_xscroll = ttk.Scrollbar(pod_ep_frame, orient="horizontal")
         pod_ep_xscroll.pack(side=BOTTOM, fill=X)
         self.podcast_episode_tree = ttk.Treeview(
             pod_ep_frame,
             columns=("date", "title", "duration", "status"),
             show="headings",
             selectmode="extended",
+            style=STYLE_TREE_COMPACT,
             yscrollcommand=pod_ep_yscroll.set,
             xscrollcommand=pod_ep_xscroll.set,
         )
@@ -1013,69 +1128,137 @@ class MainWindow:
             "status", width=90, minwidth=70, stretch=False
         )
 
-        pod_bottom = Frame(pod_outer)
-        pod_bottom.pack(side=TOP, fill=X, pady=(8, 0))
-        self.btn_podcast_sync_latest = Button(
-            pod_bottom, text="Sync Latest", state=DISABLED
-        )
-        self.btn_podcast_sync_latest.pack(side=LEFT)
-        self.lbl_podcast_status = Label(pod_bottom, text="", anchor="w")
-        self.lbl_podcast_status.pack(side=LEFT, fill=X, expand=True, padx=8)
+        # Playlists tab: Podcasts-style master–detail (list Treeview + tracks).
+        # Intentional twin of Podcasts presentation — see docs/ui-visual-pass.md.
+        pl_outer = flat_frame(self.playlists_tab)
+        pl_outer.pack(fill=BOTH, expand=True, padx=4, pady=4)
 
-        # Playlists tab: combobox + toolbar + flat track list.
-        pl_toolbar = Frame(self.playlists_tab)
-        pl_toolbar.pack(side=TOP, fill=X, padx=4, pady=(4, 2))
+        # Toolbar: compact actions + status (picker is the master list below).
+        pl_toolbar = flat_frame(pl_outer)
+        pl_toolbar.pack(side=TOP, fill=X, pady=(0, 2))
         Label(pl_toolbar, text="Playlist:").pack(side=LEFT, padx=(2, 4))
+        # Hidden StringVar kept for call sites that set/get the current name.
         self.var_playlist_choice = StringVar(value="")
-        self.playlist_combo = ttk.Combobox(
-            pl_toolbar,
-            textvariable=self.var_playlist_choice,
-            state="disabled",
-            width=36,
+        self.btn_playlist_new = ttk.Button(
+            pl_toolbar, text=GLYPH_ADD, width=3, style=STYLE_BTN_COMPACT
         )
-        self.playlist_combo.pack(side=LEFT, padx=2)
-        self.btn_playlist_rename = Button(
-            pl_toolbar, text="Rename…", width=9, state=DISABLED
-        )
-        self.btn_playlist_rename.pack(side=LEFT, padx=2)
-        self.btn_playlist_new = Button(pl_toolbar, text="+", width=3)
         self.btn_playlist_new.pack(side=LEFT, padx=2)
-        self.btn_playlist_delete = Button(
-            pl_toolbar, text="−", width=3, state=DISABLED
+        self.btn_playlist_delete = ttk.Button(
+            pl_toolbar,
+            text=GLYPH_REMOVE,
+            width=3,
+            style=STYLE_BTN_COMPACT,
+            state=DISABLED,
         )
         self.btn_playlist_delete.pack(side=LEFT, padx=2)
-        self.btn_playlist_sync = Button(
-            pl_toolbar, text="Sync playlist to device", state=DISABLED
+        self.btn_playlist_rename = ttk.Button(
+            pl_toolbar,
+            text="Rename…",
+            width=9,
+            style=STYLE_BTN_TOOL,
+            state=DISABLED,
+        )
+        self.btn_playlist_rename.pack(side=LEFT, padx=2)
+        self.btn_playlist_sync = ttk.Button(
+            pl_toolbar,
+            text="Sync playlist to device",
+            style=STYLE_BTN_TOOL,
+            state=DISABLED,
         )
         self.btn_playlist_sync.pack(side=LEFT, padx=(8, 2))
-        self.btn_playlist_move_up = Button(
-            pl_toolbar, text="↑", width=3, state=DISABLED
+        self.btn_playlist_move_up = ttk.Button(
+            pl_toolbar,
+            text=LABEL_MOVE_UP,
+            width=3,
+            style=STYLE_BTN_COMPACT,
+            state=DISABLED,
         )
         self.btn_playlist_move_up.pack(side=LEFT, padx=(8, 1))
-        self.btn_playlist_move_down = Button(
-            pl_toolbar, text="↓", width=3, state=DISABLED
+        self.btn_playlist_move_down = ttk.Button(
+            pl_toolbar,
+            text=LABEL_MOVE_DOWN,
+            width=3,
+            style=STYLE_BTN_COMPACT,
+            state=DISABLED,
         )
         self.btn_playlist_move_down.pack(side=LEFT, padx=1)
         self.lbl_playlist_status = Label(pl_toolbar, text="", anchor="w")
         self.lbl_playlist_status.pack(side=LEFT, fill=X, expand=True, padx=6)
 
-        pl_tree_frame = Frame(self.playlists_tab)
+        # Master: host playlists (compact Treeview — not Combobox).
+        pl_list_header = flat_frame(pl_outer)
+        pl_list_header.pack(side=TOP, fill=X, pady=(4, 2))
+        Label(
+            pl_list_header, text="Playlists", font=("", 11, "bold"), anchor="w"
+        ).pack(side=LEFT)
+        pl_list_frame = flat_frame(pl_outer)
+        pl_list_frame.pack(side=TOP, fill=BOTH, expand=False)
+        pl_list_scroll = ttk.Scrollbar(pl_list_frame)
+        pl_list_scroll.pack(side=RIGHT, fill=Y)
+        self.playlist_list_tree = ttk.Treeview(
+            pl_list_frame,
+            columns=("name",),
+            show="headings",
+            selectmode="browse",
+            height=8,
+            style=STYLE_TREE_COMPACT,
+            yscrollcommand=pl_list_scroll.set,
+        )
+        self.playlist_list_tree.pack(side=LEFT, fill=BOTH, expand=True)
+        pl_list_scroll.config(command=self.playlist_list_tree.yview)
+        self.playlist_list_tree.heading("name", text="Name", anchor="w")
+        self.playlist_list_tree.column("name", width=400, minwidth=120, stretch=True)
+        # Back-compat alias for older mental model ("combo" picker).
+        self.playlist_combo = self.playlist_list_tree
+
+        # Detail: tracks for the selected playlist.
+        pl_tracks_header = flat_frame(pl_outer)
+        pl_tracks_header.pack(side=TOP, fill=X, pady=(8, 2))
+        self.lbl_playlist_tracks = Label(
+            pl_tracks_header, text="Tracks", font=("", 11, "bold"), anchor="w"
+        )
+        self.lbl_playlist_tracks.pack(side=LEFT, fill=X, expand=True)
+
+        pl_tree_frame = flat_frame(pl_outer)
         pl_tree_frame.pack(side=TOP, fill=BOTH, expand=True)
 
-        # Device tab: nested notebook by media category.
-        self.device_notebook = ttk.Notebook(self.device_tab)
-        self.device_notebook.pack(side=TOP, fill=BOTH, expand=True)
+        # Device tab (phase 2 / O3): category combobox strip + one content frame
+        # (no nested Notebook competing with the outer media tabs).
+        dev_cat_bar = flat_frame(self.device_tab)
+        dev_cat_bar.pack(side=TOP, fill=X, padx=4, pady=(4, 2))
+        Label(dev_cat_bar, text="On device:").pack(side=LEFT, padx=(2, 4))
+        self.var_device_category = StringVar(value=_DEVICE_CATEGORY_LABELS[0])
+        self.device_category_combo = ttk.Combobox(
+            dev_cat_bar,
+            textvariable=self.var_device_category,
+            values=list(_DEVICE_CATEGORY_LABELS),
+            state="readonly",
+            width=14,
+        )
+        self.device_category_combo.pack(side=LEFT, padx=2)
+        self.device_category_combo.bind(
+            "<<ComboboxSelected>>", self._on_device_category_combo, add="+"
+        )
 
-        self.device_music_tab = Frame(self.device_notebook)
-        self.device_video_tab = Frame(self.device_notebook)
-        self.device_audiobooks_tab = Frame(self.device_notebook)
-        self.device_podcasts_tab = Frame(self.device_notebook)
-        self.device_playlists_tab = Frame(self.device_notebook)
-        self.device_notebook.add(self.device_music_tab, text="Music")
-        self.device_notebook.add(self.device_video_tab, text="Video")
-        self.device_notebook.add(self.device_audiobooks_tab, text="Audiobooks")
-        self.device_notebook.add(self.device_podcasts_tab, text="Podcasts")
-        self.device_notebook.add(self.device_playlists_tab, text="Playlists")
+        self.device_content = flat_frame(self.device_tab)
+        self.device_content.pack(side=TOP, fill=BOTH, expand=True)
+
+        self.device_music_tab = flat_frame(self.device_content)
+        self.device_video_tab = flat_frame(self.device_content)
+        self.device_audiobooks_tab = flat_frame(self.device_content)
+        self.device_podcasts_tab = flat_frame(self.device_content)
+        self.device_playlists_tab = flat_frame(self.device_content)
+        self._device_subview_by_label = {
+            "Music": self.device_music_tab,
+            "Video": self.device_video_tab,
+            "Audiobooks": self.device_audiobooks_tab,
+            "Podcasts": self.device_podcasts_tab,
+            "Playlists": self.device_playlists_tab,
+        }
+        self._device_subview_frame = self.device_music_tab
+        # Notebook-compatible shim: .select() / .select(frame) for call sites.
+        self.device_notebook = _DeviceSubviewNotebook(self)
+        self.device_music_tab.pack(fill=BOTH, expand=True)
 
         d_tree_frame = Frame(self.device_music_tab)
         d_tree_frame.pack(fill=BOTH, expand=True)
@@ -1089,44 +1272,66 @@ class MainWindow:
         dp_tree_frame = Frame(self.device_podcasts_tab)
         dp_tree_frame.pack(fill=BOTH, expand=True)
 
-        # Device → Playlists: same chrome as host Playlists (combo + toolbar + flat list).
-        dpl_toolbar = Frame(self.device_playlists_tab)
-        dpl_toolbar.pack(side=TOP, fill=X, padx=4, pady=(4, 2))
+        # Device → Playlists: same master–detail chrome as host Playlists.
+        dpl_outer = flat_frame(self.device_playlists_tab)
+        dpl_outer.pack(fill=BOTH, expand=True, padx=4, pady=4)
+
+        dpl_toolbar = flat_frame(dpl_outer)
+        dpl_toolbar.pack(side=TOP, fill=X, pady=(0, 2))
         Label(dpl_toolbar, text="Playlist:").pack(side=LEFT, padx=(2, 4))
         self.var_device_playlist_choice = StringVar(value="")
-        self.device_playlist_combo = ttk.Combobox(
+        self.btn_device_playlist_new = ttk.Button(
             dpl_toolbar,
-            textvariable=self.var_device_playlist_choice,
-            state="disabled",
-            width=36,
-        )
-        self.device_playlist_combo.pack(side=LEFT, padx=2)
-        self.btn_device_playlist_rename = Button(
-            dpl_toolbar, text="Rename…", width=9, state=DISABLED
-        )
-        self.btn_device_playlist_rename.pack(side=LEFT, padx=2)
-        self.btn_device_playlist_new = Button(
-            dpl_toolbar, text="+", width=3, state=DISABLED
+            text=GLYPH_ADD,
+            width=3,
+            style=STYLE_BTN_COMPACT,
+            state=DISABLED,
         )
         self.btn_device_playlist_new.pack(side=LEFT, padx=2)
-        self.btn_device_playlist_delete = Button(
-            dpl_toolbar, text="−", width=3, state=DISABLED
+        self.btn_device_playlist_delete = ttk.Button(
+            dpl_toolbar,
+            text=GLYPH_REMOVE,
+            width=3,
+            style=STYLE_BTN_COMPACT,
+            state=DISABLED,
         )
         self.btn_device_playlist_delete.pack(side=LEFT, padx=2)
-        self.btn_device_playlist_refresh = Button(
-            dpl_toolbar, text="Refresh from device", state=DISABLED
+        self.btn_device_playlist_rename = ttk.Button(
+            dpl_toolbar,
+            text="Rename…",
+            width=9,
+            style=STYLE_BTN_TOOL,
+            state=DISABLED,
+        )
+        self.btn_device_playlist_rename.pack(side=LEFT, padx=2)
+        self.btn_device_playlist_refresh = ttk.Button(
+            dpl_toolbar,
+            text="Refresh from device",
+            style=STYLE_BTN_TOOL,
+            state=DISABLED,
         )
         self.btn_device_playlist_refresh.pack(side=LEFT, padx=(8, 2))
-        self.btn_device_playlist_recreate = Button(
-            dpl_toolbar, text="Recreate locally…", state=DISABLED
+        self.btn_device_playlist_recreate = ttk.Button(
+            dpl_toolbar,
+            text="Recreate locally…",
+            style=STYLE_BTN_TOOL,
+            state=DISABLED,
         )
         self.btn_device_playlist_recreate.pack(side=LEFT, padx=2)
-        self.btn_device_playlist_move_up = Button(
-            dpl_toolbar, text="↑", width=3, state=DISABLED
+        self.btn_device_playlist_move_up = ttk.Button(
+            dpl_toolbar,
+            text=LABEL_MOVE_UP,
+            width=3,
+            style=STYLE_BTN_COMPACT,
+            state=DISABLED,
         )
         self.btn_device_playlist_move_up.pack(side=LEFT, padx=(8, 1))
-        self.btn_device_playlist_move_down = Button(
-            dpl_toolbar, text="↓", width=3, state=DISABLED
+        self.btn_device_playlist_move_down = ttk.Button(
+            dpl_toolbar,
+            text=LABEL_MOVE_DOWN,
+            width=3,
+            style=STYLE_BTN_COMPACT,
+            state=DISABLED,
         )
         self.btn_device_playlist_move_down.pack(side=LEFT, padx=1)
         self.lbl_device_playlist_status = Label(
@@ -1136,12 +1341,48 @@ class MainWindow:
             side=LEFT, fill=X, expand=True, padx=6
         )
 
-        dpl_tree_frame = Frame(self.device_playlists_tab)
+        dpl_list_header = flat_frame(dpl_outer)
+        dpl_list_header.pack(side=TOP, fill=X, pady=(4, 2))
+        Label(
+            dpl_list_header,
+            text="On-device playlists",
+            font=("", 11, "bold"),
+            anchor="w",
+        ).pack(side=LEFT)
+        dpl_list_frame = flat_frame(dpl_outer)
+        dpl_list_frame.pack(side=TOP, fill=BOTH, expand=False)
+        dpl_list_scroll = ttk.Scrollbar(dpl_list_frame)
+        dpl_list_scroll.pack(side=RIGHT, fill=Y)
+        self.device_playlist_list_tree = ttk.Treeview(
+            dpl_list_frame,
+            columns=("name",),
+            show="headings",
+            selectmode="browse",
+            height=8,
+            style=STYLE_TREE_COMPACT,
+            yscrollcommand=dpl_list_scroll.set,
+        )
+        self.device_playlist_list_tree.pack(side=LEFT, fill=BOTH, expand=True)
+        dpl_list_scroll.config(command=self.device_playlist_list_tree.yview)
+        self.device_playlist_list_tree.heading("name", text="Name", anchor="w")
+        self.device_playlist_list_tree.column(
+            "name", width=400, minwidth=120, stretch=True
+        )
+        self.device_playlist_combo = self.device_playlist_list_tree
+
+        dpl_tracks_header = flat_frame(dpl_outer)
+        dpl_tracks_header.pack(side=TOP, fill=X, pady=(8, 2))
+        self.lbl_device_playlist_tracks = Label(
+            dpl_tracks_header, text="Tracks", font=("", 11, "bold"), anchor="w"
+        )
+        self.lbl_device_playlist_tracks.pack(side=LEFT, fill=X, expand=True)
+
+        dpl_tree_frame = flat_frame(dpl_outer)
         dpl_tree_frame.pack(side=TOP, fill=BOTH, expand=True)
 
-        yscroll = Scrollbar(tree_frame)
+        yscroll = ttk.Scrollbar(tree_frame)
         yscroll.pack(side=RIGHT, fill=Y)
-        xscroll = Scrollbar(tree_frame, orient="horizontal")
+        xscroll = ttk.Scrollbar(tree_frame, orient="horizontal")
         xscroll.pack(side=BOTTOM, fill=X)
 
         self.tree = ttk.Treeview(
@@ -1150,6 +1391,7 @@ class MainWindow:
             show="tree headings",
             # extended: Shift+click range, Ctrl/Cmd+click toggle multi-select.
             selectmode="extended",
+            style=STYLE_TREE_THUMB,
             yscrollcommand=yscroll.set,
             xscrollcommand=xscroll.set,
         )
@@ -1170,9 +1412,15 @@ class MainWindow:
 
         self._thumb_size = DEFAULT_THUMB_SIZE
         self._tree_rowheight = max(DEFAULT_THUMB_SIZE + 8, 52)
-        style = ttk.Style(self.root)
+        self._compact_tree_rowheight = 28
+        # O11: Thumb.Treeview for art rows; Compact for flat lists.
+        self._style = apply_chrome_baseline(
+            self.root,
+            compact_tree_rowheight=self._compact_tree_rowheight,
+            thumb_tree_rowheight=self._tree_rowheight,
+        )
         try:
-            style.configure("Treeview", rowheight=self._tree_rowheight)
+            self.tree.configure(style=STYLE_TREE_THUMB)
         except Exception:
             pass
 
@@ -1190,9 +1438,9 @@ class MainWindow:
         self.tree.column("year", width=56, minwidth=40, stretch=False)
 
         # Device music tree (same columns/grouping as the library tree).
-        d_yscroll = Scrollbar(d_tree_frame)
+        d_yscroll = ttk.Scrollbar(d_tree_frame)
         d_yscroll.pack(side=RIGHT, fill=Y)
-        d_xscroll = Scrollbar(d_tree_frame, orient="horizontal")
+        d_xscroll = ttk.Scrollbar(d_tree_frame, orient="horizontal")
         d_xscroll.pack(side=BOTTOM, fill=X)
 
         self.device_tree = ttk.Treeview(
@@ -1200,6 +1448,7 @@ class MainWindow:
             columns=TREE_COLS,
             show="tree headings",
             selectmode="extended",
+            style=STYLE_TREE_THUMB,
             yscrollcommand=d_yscroll.set,
             xscrollcommand=d_xscroll.set,
         )
@@ -1224,9 +1473,9 @@ class MainWindow:
         self.device_tree.column("year", width=56, minwidth=40, stretch=False)
 
         # Device video tree (same columns; grouped by Video / TV folder).
-        dv_yscroll = Scrollbar(dv_tree_frame)
+        dv_yscroll = ttk.Scrollbar(dv_tree_frame)
         dv_yscroll.pack(side=RIGHT, fill=Y)
-        dv_xscroll = Scrollbar(dv_tree_frame, orient="horizontal")
+        dv_xscroll = ttk.Scrollbar(dv_tree_frame, orient="horizontal")
         dv_xscroll.pack(side=BOTTOM, fill=X)
 
         self.device_video_tree = ttk.Treeview(
@@ -1234,6 +1483,7 @@ class MainWindow:
             columns=TREE_COLS,
             show="tree headings",
             selectmode="extended",
+            style=STYLE_TREE_THUMB,
             yscrollcommand=dv_yscroll.set,
             xscrollcommand=dv_xscroll.set,
         )
@@ -1258,9 +1508,9 @@ class MainWindow:
         self.device_video_tree.column("year", width=56, minwidth=40, stretch=False)
 
         # Library video tree: folder → files; title column only (filename).
-        vl_yscroll = Scrollbar(vl_tree_frame)
+        vl_yscroll = ttk.Scrollbar(vl_tree_frame)
         vl_yscroll.pack(side=RIGHT, fill=Y)
-        vl_xscroll = Scrollbar(vl_tree_frame, orient="horizontal")
+        vl_xscroll = ttk.Scrollbar(vl_tree_frame, orient="horizontal")
         vl_xscroll.pack(side=BOTTOM, fill=X)
 
         self.videos_tree = ttk.Treeview(
@@ -1268,6 +1518,7 @@ class MainWindow:
             columns=("title",),
             show="tree headings",
             selectmode="extended",
+            style=STYLE_TREE_THUMB,
             yscrollcommand=vl_yscroll.set,
             xscrollcommand=vl_xscroll.set,
         )
@@ -1286,9 +1537,9 @@ class MainWindow:
         self.videos_tree.column("title", width=420, minwidth=120, stretch=True)
 
         # Library audiobooks tree (same columns; Author → Album - Year grouping).
-        ab_yscroll = Scrollbar(ab_tree_frame)
+        ab_yscroll = ttk.Scrollbar(ab_tree_frame)
         ab_yscroll.pack(side=RIGHT, fill=Y)
-        ab_xscroll = Scrollbar(ab_tree_frame, orient="horizontal")
+        ab_xscroll = ttk.Scrollbar(ab_tree_frame, orient="horizontal")
         ab_xscroll.pack(side=BOTTOM, fill=X)
 
         self.audiobooks_tree = ttk.Treeview(
@@ -1296,6 +1547,7 @@ class MainWindow:
             columns=TREE_COLS,
             show="tree headings",
             selectmode="extended",
+            style=STYLE_TREE_THUMB,
             yscrollcommand=ab_yscroll.set,
             xscrollcommand=ab_xscroll.set,
         )
@@ -1320,9 +1572,9 @@ class MainWindow:
         self.audiobooks_tree.column("year", width=56, minwidth=40, stretch=False)
 
         # Playlists tab tree (flat ordered list; same columns as Music).
-        pl_yscroll = Scrollbar(pl_tree_frame)
+        pl_yscroll = ttk.Scrollbar(pl_tree_frame)
         pl_yscroll.pack(side=RIGHT, fill=Y)
-        pl_xscroll = Scrollbar(pl_tree_frame, orient="horizontal")
+        pl_xscroll = ttk.Scrollbar(pl_tree_frame, orient="horizontal")
         pl_xscroll.pack(side=BOTTOM, fill=X)
 
         self.playlist_tree = ttk.Treeview(
@@ -1330,6 +1582,7 @@ class MainWindow:
             columns=TREE_COLS,
             show="tree headings",
             selectmode="extended",
+            style=STYLE_TREE_COMPACT,
             yscrollcommand=pl_yscroll.set,
             xscrollcommand=pl_xscroll.set,
         )
@@ -1362,9 +1615,9 @@ class MainWindow:
         )
 
         # Device audiobooks tree (same columns/grouping as library audiobooks).
-        dab_yscroll = Scrollbar(dab_tree_frame)
+        dab_yscroll = ttk.Scrollbar(dab_tree_frame)
         dab_yscroll.pack(side=RIGHT, fill=Y)
-        dab_xscroll = Scrollbar(dab_tree_frame, orient="horizontal")
+        dab_xscroll = ttk.Scrollbar(dab_tree_frame, orient="horizontal")
         dab_xscroll.pack(side=BOTTOM, fill=X)
 
         self.device_audiobooks_tree = ttk.Treeview(
@@ -1372,6 +1625,7 @@ class MainWindow:
             columns=TREE_COLS,
             show="tree headings",
             selectmode="extended",
+            style=STYLE_TREE_THUMB,
             yscrollcommand=dab_yscroll.set,
             xscrollcommand=dab_xscroll.set,
         )
@@ -1400,9 +1654,9 @@ class MainWindow:
         )
 
         # Device podcasts tree (ZENcast / show folder → episodes; audio + video).
-        dp_yscroll = Scrollbar(dp_tree_frame)
+        dp_yscroll = ttk.Scrollbar(dp_tree_frame)
         dp_yscroll.pack(side=RIGHT, fill=Y)
-        dp_xscroll = Scrollbar(dp_tree_frame, orient="horizontal")
+        dp_xscroll = ttk.Scrollbar(dp_tree_frame, orient="horizontal")
         dp_xscroll.pack(side=BOTTOM, fill=X)
 
         self.device_podcasts_tree = ttk.Treeview(
@@ -1410,6 +1664,7 @@ class MainWindow:
             columns=TREE_COLS,
             show="tree headings",
             selectmode="extended",
+            style=STYLE_TREE_COMPACT,
             yscrollcommand=dp_yscroll.set,
             xscrollcommand=dp_xscroll.set,
         )
@@ -1438,9 +1693,9 @@ class MainWindow:
         )
 
         # Device → Playlists tree (flat ordered list; same columns as host Playlists).
-        dpl_yscroll = Scrollbar(dpl_tree_frame)
+        dpl_yscroll = ttk.Scrollbar(dpl_tree_frame)
         dpl_yscroll.pack(side=RIGHT, fill=Y)
-        dpl_xscroll = Scrollbar(dpl_tree_frame, orient="horizontal")
+        dpl_xscroll = ttk.Scrollbar(dpl_tree_frame, orient="horizontal")
         dpl_xscroll.pack(side=BOTTOM, fill=X)
 
         self.device_playlist_tree = ttk.Treeview(
@@ -1448,6 +1703,7 @@ class MainWindow:
             columns=TREE_COLS,
             show="tree headings",
             selectmode="extended",
+            style=STYLE_TREE_COMPACT,
             yscrollcommand=dpl_yscroll.set,
             xscrollcommand=dpl_xscroll.set,
         )
@@ -1546,6 +1802,19 @@ class MainWindow:
     def active_mode(self) -> Mode:
         return self._mode
 
+    def _show_stable_mode_about(self) -> None:
+        """Modal with full Stable Mode help (panel shows a short caption only)."""
+        from tkinter import messagebox
+
+        try:
+            messagebox.showinfo(
+                "Stable Mode",
+                STABLE_MODE_HELP,
+                parent=self.root,
+            )
+        except Exception:
+            pass
+
     def apply_mode_ui(self, mode: Mode) -> None:
         """Refresh device subframe + Device menu for the active transfer mode.
 
@@ -1557,13 +1826,23 @@ class MainWindow:
         self.var_stable_mode.set(stable)
         if stable:
             self.lbl_device_title.configure(text="Stable Mode")
-            self.lbl_device_caption.configure(text=STABLE_MODE_HELP)
+            self.lbl_device_caption.configure(text=STABLE_MODE_CAPTION)
             self.lbl_device_graphic.configure(image="")
             if self.device_graphic_slot.winfo_ismapped():
                 self.device_graphic_slot.pack_forget()
+            try:
+                self.btn_stable_mode_about.pack(
+                    padx=6, pady=(6, 8), anchor="w"
+                )
+            except Exception:
+                pass
         else:
             self.lbl_device_title.configure(text="Device")
             self.lbl_device_caption.configure(text=self._device_caption)
+            try:
+                self.btn_stable_mode_about.pack_forget()
+            except Exception:
+                pass
             if self._device_photo is not None:
                 self.lbl_device_graphic.configure(image=self._device_photo)
             if not self.device_graphic_slot.winfo_ismapped():
@@ -1883,8 +2162,8 @@ class MainWindow:
         if on_sync_latest is not None:
             self.btn_podcast_sync_latest.configure(command=on_sync_latest)
         if on_show_select is not None:
-            self.podcast_show_list.bind(
-                "<<ListboxSelect>>", lambda _e: on_show_select()
+            self.podcast_show_tree.bind(
+                "<<TreeviewSelect>>", lambda _e: on_show_select()
             )
         if on_episode_select is not None:
             self.podcast_episode_tree.bind(
@@ -1946,11 +2225,14 @@ class MainWindow:
 
     def popup_podcast_show_context(self, event) -> str | None:
         try:
-            idx = self.podcast_show_list.nearest(event.y)
-            if idx >= 0:
-                if idx not in self.podcast_show_list.curselection():
-                    self.podcast_show_list.selection_clear(0, END)
-                    self.podcast_show_list.selection_set(idx)
+            row = self.podcast_show_tree.identify_row(event.y)
+            if row:
+                if row not in self.podcast_show_tree.selection():
+                    self.podcast_show_tree.selection_set(row)
+                try:
+                    self.podcast_show_tree.event_generate("<<TreeviewSelect>>")
+                except Exception:
+                    pass
             self.menu_podcast_show_ctx.tk_popup(event.x_root, event.y_root)
         finally:
             try:
@@ -2268,6 +2550,7 @@ class MainWindow:
         self,
         *,
         on_combo_selected=None,
+        on_list_selected=None,
         on_new=None,
         on_delete=None,
         on_rename=None,
@@ -2280,9 +2563,11 @@ class MainWindow:
         on_play_track=None,
     ) -> None:
         """Wire Playlists tab toolbar + context menu."""
-        if on_combo_selected is not None:
-            self.playlist_combo.bind(
-                "<<ComboboxSelected>>", lambda _e: on_combo_selected()
+        # on_list_selected is preferred; on_combo_selected kept as alias.
+        select_cb = on_list_selected if on_list_selected is not None else on_combo_selected
+        if select_cb is not None:
+            self.playlist_list_tree.bind(
+                "<<TreeviewSelect>>", lambda _e: select_cb()
             )
         if on_new is not None:
             self.btn_playlist_new.configure(command=on_new)
@@ -2350,26 +2635,67 @@ class MainWindow:
         names: list[str],
         *,
         selected: str = "",
+        ids: list[int] | None = None,
     ) -> None:
-        """Refresh playlist dropdown options and selection."""
+        """Refresh host playlist master list and selection.
+
+        *names* are display labels. Optional *ids* (same length) become Treeview
+        iids ``pln:{id}``; otherwise iids are ``pln:i:{index}``.
+        """
         values = list(names or [])
+        tree = self.playlist_list_tree
+        for iid in tree.get_children(""):
+            tree.delete(iid)
         if not values:
-            self.playlist_combo.configure(values=[], state="disabled")
             self.var_playlist_choice.set("")
             self.btn_playlist_rename.configure(state=DISABLED)
             self.btn_playlist_delete.configure(state=DISABLED)
             self.btn_playlist_sync.configure(state=DISABLED)
             self.btn_playlist_move_up.configure(state=DISABLED)
             self.btn_playlist_move_down.configure(state=DISABLED)
+            try:
+                self.lbl_playlist_tracks.configure(text="Tracks")
+            except Exception:
+                pass
             return
-        self.playlist_combo.configure(values=values, state="readonly")
+        id_list = list(ids) if ids is not None else []
+        for i, name in enumerate(values):
+            if i < len(id_list) and id_list[i] is not None:
+                iid = f"pln:{int(id_list[i])}"
+            else:
+                iid = f"pln:i:{i}"
+            tree.insert("", "end", iid=iid, values=(name,))
         pick = selected if selected in values else values[0]
         self.var_playlist_choice.set(pick)
+        # Select matching row by name (or first).
+        pick_iid = ""
+        for iid in tree.get_children(""):
+            try:
+                vals = tree.item(iid, "values")
+            except Exception:
+                vals = ()
+            if vals and str(vals[0]) == pick:
+                pick_iid = iid
+                break
+        if not pick_iid:
+            kids = tree.get_children("")
+            pick_iid = kids[0] if kids else ""
+        if pick_iid:
+            try:
+                tree.selection_set(pick_iid)
+                tree.focus(pick_iid)
+                tree.see(pick_iid)
+            except Exception:
+                pass
         self.btn_playlist_rename.configure(state=NORMAL)
         self.btn_playlist_delete.configure(state=NORMAL)
         self.btn_playlist_sync.configure(state=NORMAL)
         self.btn_playlist_move_up.configure(state=NORMAL)
         self.btn_playlist_move_down.configure(state=NORMAL)
+        try:
+            self.lbl_playlist_tracks.configure(text=f"Tracks — {pick}")
+        except Exception:
+            pass
 
     def clear_playlist_tree(self) -> None:
         tree = self.playlist_tree
@@ -2399,6 +2725,7 @@ class MainWindow:
         self,
         *,
         on_combo_selected=None,
+        on_list_selected=None,
         on_new=None,
         on_delete=None,
         on_rename=None,
@@ -2412,9 +2739,10 @@ class MainWindow:
         on_play_track=None,
     ) -> None:
         """Wire Device → Playlists toolbar + context menu."""
-        if on_combo_selected is not None:
-            self.device_playlist_combo.bind(
-                "<<ComboboxSelected>>", lambda _e: on_combo_selected()
+        select_cb = on_list_selected if on_list_selected is not None else on_combo_selected
+        if select_cb is not None:
+            self.device_playlist_list_tree.bind(
+                "<<TreeviewSelect>>", lambda _e: select_cb()
             )
         if on_new is not None:
             self.btn_device_playlist_new.configure(command=on_new)
@@ -2474,12 +2802,64 @@ class MainWindow:
             )
 
     def show_device_playlists_tab(self) -> None:
-        """Select Device → Playlists nested notebook tab."""
+        """Select Device tab and the Playlists category subview."""
         try:
             self.media_notebook.select(self.device_tab)
-            self.device_notebook.select(self.device_playlists_tab)
+            self.show_device_subview(self.device_playlists_tab)
         except Exception:
             pass
+
+    def _on_device_category_combo(self, _event=None) -> None:
+        label = (self.var_device_category.get() or "").strip()
+        frame = self._device_subview_by_label.get(label)
+        if frame is not None:
+            self.show_device_subview(frame)
+
+    def show_device_subview(self, tab_id) -> None:
+        """Show one Device category frame (Music / Video / … / Playlists).
+
+        *tab_id* may be a frame widget or ``str(frame)`` (Notebook-compatible).
+        """
+        frames = list(self._device_subview_by_label.values())
+        target = None
+        if tab_id is None:
+            return
+        if not isinstance(tab_id, str):
+            target = tab_id
+        else:
+            for f in frames:
+                if str(f) == tab_id:
+                    target = f
+                    break
+            if target is None:
+                # Label form ("Playlists") from combobox or tests.
+                target = self._device_subview_by_label.get(tab_id)
+        if target is None or target not in frames:
+            return
+        for f in frames:
+            try:
+                if f is not target and f.winfo_ismapped():
+                    f.pack_forget()
+            except Exception:
+                pass
+        try:
+            if not target.winfo_ismapped():
+                target.pack(fill=BOTH, expand=True)
+        except Exception:
+            try:
+                target.pack(fill=BOTH, expand=True)
+            except Exception:
+                pass
+        self._device_subview_frame = target
+        # Keep combobox label in sync.
+        for label, frame in self._device_subview_by_label.items():
+            if frame is target:
+                try:
+                    if self.var_device_category.get() != label:
+                        self.var_device_category.set(label)
+                except Exception:
+                    pass
+                break
 
     def set_device_playlist_combo_values(
         self,
@@ -2487,9 +2867,13 @@ class MainWindow:
         *,
         selected: str = "",
         interactive: bool = True,
+        playlist_ids: list[int] | None = None,
     ) -> None:
-        """Refresh Device → Playlists dropdown options and selection."""
+        """Refresh Device → Playlists master list and selection."""
         values = list(names or [])
+        tree = self.device_playlist_list_tree
+        for iid in tree.get_children(""):
+            tree.delete(iid)
         # Always allow Refresh when a session can list playlists.
         refresh_state = NORMAL if interactive else DISABLED
         self.btn_device_playlist_refresh.configure(state=refresh_state)
@@ -2497,25 +2881,55 @@ class MainWindow:
             state=NORMAL if interactive else DISABLED
         )
         if not values:
-            self.device_playlist_combo.configure(values=[], state="disabled")
             self.var_device_playlist_choice.set("")
             self.btn_device_playlist_rename.configure(state=DISABLED)
             self.btn_device_playlist_delete.configure(state=DISABLED)
             self.btn_device_playlist_recreate.configure(state=DISABLED)
             self.btn_device_playlist_move_up.configure(state=DISABLED)
             self.btn_device_playlist_move_down.configure(state=DISABLED)
+            try:
+                self.lbl_device_playlist_tracks.configure(text="Tracks")
+            except Exception:
+                pass
             return
-        self.device_playlist_combo.configure(
-            values=values, state="readonly" if interactive else "disabled"
-        )
+        id_list = list(playlist_ids) if playlist_ids is not None else []
+        for i, name in enumerate(values):
+            if i < len(id_list) and id_list[i] is not None:
+                iid = f"dpln:{int(id_list[i])}"
+            else:
+                iid = f"dpln:i:{i}"
+            tree.insert("", "end", iid=iid, values=(name,))
         pick = selected if selected in values else values[0]
         self.var_device_playlist_choice.set(pick)
+        pick_iid = ""
+        for iid in tree.get_children(""):
+            try:
+                vals = tree.item(iid, "values")
+            except Exception:
+                vals = ()
+            if vals and str(vals[0]) == pick:
+                pick_iid = iid
+                break
+        if not pick_iid:
+            kids = tree.get_children("")
+            pick_iid = kids[0] if kids else ""
+        if pick_iid:
+            try:
+                tree.selection_set(pick_iid)
+                tree.focus(pick_iid)
+                tree.see(pick_iid)
+            except Exception:
+                pass
         btn_state = NORMAL if interactive else DISABLED
         self.btn_device_playlist_rename.configure(state=btn_state)
         self.btn_device_playlist_delete.configure(state=btn_state)
         self.btn_device_playlist_recreate.configure(state=btn_state)
         self.btn_device_playlist_move_up.configure(state=btn_state)
         self.btn_device_playlist_move_down.configure(state=btn_state)
+        try:
+            self.lbl_device_playlist_tracks.configure(text=f"Tracks — {pick}")
+        except Exception:
+            pass
 
     def clear_device_playlist_tree(self) -> None:
         tree = self.device_playlist_tree
@@ -3155,18 +3569,20 @@ class MainWindow:
         )
 
     def active_device_tree(self):
-        """Treeview for the selected device media tab."""
+        """Treeview for the selected device media category."""
         try:
-            current = self.device_notebook.select()
+            current = self._device_subview_frame
         except Exception:
             return self.device_tree
         try:
-            if current == str(self.device_video_tab):
+            if current is self.device_video_tab:
                 return self.device_video_tree
-            if current == str(self.device_audiobooks_tab):
+            if current is self.device_audiobooks_tab:
                 return self.device_audiobooks_tree
-            if current == str(self.device_podcasts_tab):
+            if current is self.device_podcasts_tab:
                 return self.device_podcasts_tree
+            if current is self.device_playlists_tab:
+                return self.device_playlist_tree
         except Exception:
             pass
         return self.device_tree

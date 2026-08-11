@@ -44,6 +44,7 @@ This folder is the **design and incident** map. For run instructions, logs, and 
 | [basename-limit-evidence.md](./basename-limit-evidence.md) | Why `MAX_REMOTE_BASENAME=56`: external vs empirical evidence; long on-device names |
 | [transfer-and-modes.md](./transfer-and-modes.md) | Scan → transcode → send; Stable vs Experimental; batch abort; tests |
 | [library-search.md](./library-search.md) | Toolbar fuzzy search: flat results, field keywords (`artist:`, `album:`, …), debug scores |
+| [ui-visual-pass.md](./ui-visual-pass.md) | UI chrome backlog: phases 1–3 (shared), 4a macOS first, 4b/4c KDE/GNOME later |
 | [pymtp-binding-hazards.md](./pymtp-binding-hazards.md) | Living catalog: PyMTP breakage patterns, confirmed fixes, predicted next failures |
 | [libmtp-api-coverage.md](./libmtp-api-coverage.md) | libmtp vs stock pymtp vs MtpManager: what is implemented, stubbed, or unbound |
 | [debrief-zen-track-send-failure.md](./debrief-zen-track-send-failure.md) | Incident: CMD 99% finalize, hang, batch abort (forensic detail) |
@@ -67,3 +68,4 @@ This folder is the **design and incident** map. For run instructions, logs, and 
 | Which libmtp ops are we missing? | [libmtp-api-coverage.md](./libmtp-api-coverage.md) |
 | How is transport chosen? | [architecture.md](./architecture.md); `AppController._transport` |
 | How do I run tests / the app? | [README.md](../README.md), [PLATFORMS.md](../PLATFORMS.md) |
+| UI visual polish order / KDE vs GNOME notes? | [ui-visual-pass.md](./ui-visual-pass.md) |

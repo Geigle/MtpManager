@@ -227,3 +227,76 @@ Debriefs remain the forensic narrative; this file is what we keep doing.
 **Consequences:** Objects sent before the fix keep bloat until deleted and re-synced. Convert temps will not carry ID3 APIC from the source (MTP tags still come from host `TrackMetadata`). Changing ffmpeg option maps without preserving audio-only is a regression class — see the debrief.
 
 **Source:** [debrief-ffmpeg-cover-art-bloat.md](./debrief-ffmpeg-cover-art-bloat.md); `infra/ffmpeg_transcode.py` (`_audio_only_map_options`); `tests/test_audio_encode.py`.
+
+---
+
+## D17 — Main-window chrome: flat frames + ttk interactive stack
+
+**Context:** The main window mixed classic Motif-like sunken `Frame` wells (root, toolbar, left/right, bottom) with selective `ttk` (Notebook, Treeview, Combobox, Progressbar, Scale) and classic `Button`/`Entry`/`Scrollbar` in the same strips — high visual complexity and a poor base for macOS / KDE / GNOME polish.
+
+**Decision (UI visual pass phase 1):**
+
+1. **Frame language:** Main layout regions are **flat** (`borderwidth=0`, no sunken relief). Hairline `ttk.Separator` marks toolbar↔body, sidebar↔content, and body↔bottom.
+2. **Control stack:** Main-window **interactive** controls prefer **ttk** (`Button`, `Entry`, `Scrollbar`, plus existing Notebook/Treeview/Combobox/Progressbar/Scale). Shared setup lives in `mtpmanager/ui/chrome.py` (`apply_chrome_baseline`, `flat_frame`, separators). Platform theme still defaults (Aqua on macOS); Linux desktop themes are phase 4b/4c.
+3. **Documented classic-tk exceptions:** `Menu`; `Text` / `Listbox`; `Label` (including `PhotoImage` device graphic); custom `_HoverTip`; **dialogs** in `dialogs.py` (not rewritten in phase 1).
+
+**Rationale:** One chrome language so later OS blend is palette/theme, not undoing nested MDI wells. ttk on interactive strips removes the dual-skin look without a Qt/GTK rewrite.
+
+**Consequences:** Controllers keep using `configure(state=DISABLED|NORMAL)` (works on ttk). Dialogs still look classic until a later phase. Glyph vs text button grammar is phase 3 (`docs/ui-visual-pass.md`).
+
+**Source:** [ui-visual-pass.md](./ui-visual-pass.md); `mtpmanager/ui/chrome.py`, `mtpmanager/ui/window.py`.
+
+---
+
+## D18 — Podcasts master–detail + Device category strip (not nested tabs)
+
+**Context:** Host Podcasts used a classic `Listbox` + vertical glyph column + episode table (O2), while Device nested a second `ttk.Notebook` of Music/Video/… under the outer media notebook (O3). Global Treeview rowheight for album art made playlist/episode rows needlessly tall (O11).
+
+**Decision (UI visual pass phase 2):**
+
+1. **Podcasts:** One **P4-like** horizontal toolbar; subscriptions and episodes are both **`ttk.Treeview`** (compact style). Layout stays **master–detail** (show list above episode table) as the **only** intentional exception to pure hierarchical media trees (P3).
+2. **Device:** Replace the nested notebook with an **“On device:”** combobox + single content frame. Keep a Notebook-compatible shim (`device_notebook.select`) for existing call sites.
+3. **Tree density:** `Thumb.Treeview` vs `Compact.Treeview` named styles in `ui/chrome.py`.
+
+**Rationale:** Shallower Device navigation and one list widget language on Podcasts without forcing podcasts into artist/album hierarchy they do not have. Dense lists where art is absent.
+
+**Consequences:** Controller podcast selection uses Treeview iids `ps:{id}` (not Listbox indices). Device UI tests should use `show_device_subview` / combobox, not nested tab geometry.
+
+**Source:** [ui-visual-pass.md](./ui-visual-pass.md); `ui/window.py`, `ui/controllers.py`, `ui/chrome.py`.
+
+---
+
+## D19 — Control grammar: ASCII compact glyphs, combobox time, ttk.Scale only
+
+**Context:** Toolbars mixed Unicode `×` `−` `↻` `↑` `↓` `▲` `▼` with English transport labels (O5). Podcast Settings used a large custom hour/min/AM·PM spinner grid (O6). Encode/shrink dialogs used classic `tk.Scale` while playback scrubber used `ttk.Scale` (O7).
+
+**Decision (UI visual pass phase 3):**
+
+1. **Compact actions** use ASCII `+` / `-` / `x`; reorder uses short English `Up` / `Dn`; refresh uses the word **Refresh** (not a circular arrow). Constants live in `mtpmanager/ui/chrome.py`.
+2. **Tool / primary actions** stay short English on `Tool.TButton` (Play, Cancel, Sync Latest, …).
+3. **Time of day** is hour + minute + AM/PM **readonly comboboxes** (`time_of_day_row`); max-episodes uses **`ttk.Spinbox`** (Entry fallback).
+4. **Continuous values** use **`ttk.Scale` only**, via `make_ttk_scale` (resolution snap). No classic `tk.Scale` in app UI.
+
+**Rationale:** One grammar, portable fonts on Linux, less custom chrome. Matches phase 1 ttk interactive stack.
+
+**Consequences:** Context-menu shortcut strings may still say ⌥↑ / Alt+↑ (keyboard), while toolbar buttons say Up/Dn. Dialog primary buttons may remain classic `Button` until a later dialog chrome pass.
+
+**Source:** [ui-visual-pass.md](./ui-visual-pass.md); `ui/chrome.py`, `ui/window.py`, `ui/dialogs.py`.
+
+---
+
+## D20 — macOS blend: system secondary text, platform reveal, Stable Mode About
+
+**Context:** Dialog helper prose used light-only hex grays (`#333`–`#666`) that fail in dark Aqua (O12). Podcast reveal menus said “Finder” on every OS (O13). Stable Mode filled the Device panel with a multi-paragraph help wall (O9).
+
+**Decision (UI visual pass phase 4a):**
+
+1. **Secondary dialog labels** use `secondary_label_kwargs()` — on Darwin `fg=systemSecondaryLabelColor`; elsewhere omit *fg* (theme default).
+2. **Reveal actions** use `reveal_in_file_manager_label()` (Finder / Explorer / File Manager by platform). `CTX_PODCAST_REVEAL_DOWNLOAD` is set at import from that helper.
+3. **Stable Mode panel** shows a short caption (`STABLE_MODE_CAPTION`) plus **About Stable Mode…** (`messagebox` with full `STABLE_MODE_HELP`); device art remains the experimental-mode identity.
+
+**Rationale:** Track macOS appearance without inventing a theme engine; keep Linux wording honest until 4b/4c.
+
+**Consequences:** Transfer/playing row colors (O8) unchanged. Hover tips still use explicit light-panel colors (required for help-window chrome). KDE/GNOME theme picking remains phase 4b/4c.
+
+**Source:** [ui-visual-pass.md](./ui-visual-pass.md); `ui/chrome.py`, `ui/window.py`, `ui/dialogs.py`.

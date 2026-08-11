@@ -19,7 +19,10 @@ from mtpmanager.app.cancellation import (
 )
 from mtpmanager.app.transfer_queue import BatchTransferQueue
 from mtpmanager.domain.audio_encode import AudioEncodeSettings
-from mtpmanager.domain.device_profile import needs_transcode
+from mtpmanager.domain.audio_quality import (
+    DeviceCapabilities,
+    decide_action,
+)
 from mtpmanager.domain.models import Track, TrackMetadata
 from mtpmanager.domain.track_id import is_track_guid, new_track_guid
 from mtpmanager.infra.logging_setup import start_transfer_log, stop_transfer_log
@@ -106,14 +109,16 @@ def prepare_track(
 ) -> PreparedTrack:
     """Transcode into *slot* if needed; return path/meta for send (no send yet).
 
-    When *device_formats* is set, sources already in a native device format are
-    sent as-is (no re-encode), even if they differ from *target_format*.
+    Quality policy (:func:`~mtpmanager.domain.audio_quality.decide_action`):
 
-    *encode_settings* (when set) drives bitrate/VBR/channels for the convert;
-    *target_format* should match the settings file extension.
+    - Prefer bit-perfect COPY when the device supports the source codec.
+    - TRANSCODE only for device incompatibility, explicit lower-quality
+      settings (podcast/speech / Shrink), or tempo.
+    - Target settings are clamped so they never claim higher fidelity than
+      the source (no lossy→higher-lossy or lossy→lossless "upgrades").
 
-    *force_transcode*: always run ffmpeg (e.g. Shrink re-encode of an already
-    native MP3 to a lower bitrate).
+    *force_transcode*: request a re-encode (Shrink). Still skips when the
+    recipe would not lower quality on a device-native file.
     """
     raise_if_cancelled(should_cancel)
     if encode_settings is not None:
@@ -127,20 +132,30 @@ def prepare_track(
     force_tempo = bool(
         encode_settings is not None and encode_settings.needs_tempo_filter()
     )
-    if (
-        force_transcode
-        or force_tempo
-        or needs_transcode(
-            src, target_format=target_format, device_formats=device_formats
-        )
-    ):
+    caps = DeviceCapabilities.from_formats(device_formats)
+    decision = decide_action(
+        src,
+        caps,
+        meta=meta,
+        preferred_settings=encode_settings,
+        force_transcode=force_transcode,
+        force_tempo=force_tempo,
+        target_format=target_format,
+    )
+    logger.info("%s", decision.log_line(src))
+
+    if decision.action == "TRANSCODE":
+        out_fmt = decision.target_format or target_format
+        use_settings = decision.settings
         _notify_status(on_track_status, track.path, "transcoding")
+        # force=True: same-container downsizes (speech preset / shrink) must
+        # not be short-circuited by FFmpegTranscoder passthrough.
         src = transcoder.convert(
             src,
-            target_format,
+            out_fmt,
             slot=slot,
-            settings=encode_settings,
-            force=bool(force_transcode or force_tempo),
+            settings=use_settings,
+            force=True,
         )
         cleanup_path = src
         if reread_tags_after_convert:
@@ -148,10 +163,9 @@ def prepare_track(
             meta = _merge_meta_after_convert(meta, converted)
     else:
         logger.info(
-            "Passthrough (no transcode): %s (target=%s device_formats=%s)",
+            "Passthrough (no transcode): %s (%s)",
             src,
-            target_format,
-            sorted(device_formats) if device_formats else None,
+            decision.reason,
         )
 
     guid = track.guid if is_track_guid(track.guid) else new_track_guid()

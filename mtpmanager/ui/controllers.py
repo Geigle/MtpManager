@@ -489,10 +489,10 @@ class AppController:
             ),
         )
         try:
-            w.podcast_show_list.bind(
+            w.podcast_show_tree.bind(
                 "<Button-3>", w.popup_podcast_show_context
             )
-            w.podcast_show_list.bind(
+            w.podcast_show_tree.bind(
                 "<Button-2>", w.popup_podcast_show_context
             )
             w.podcast_episode_tree.bind(
@@ -558,7 +558,7 @@ class AppController:
             on_exclude_group_folder=self.action_exclude_group_folder,
         )
         w.set_playlist_tab_commands(
-            on_combo_selected=self.on_playlist_combo_selected,
+            on_list_selected=self.on_playlist_list_selected,
             on_new=self.on_playlist_new,
             on_delete=self.on_playlist_delete,
             on_rename=self.on_playlist_rename,
@@ -576,7 +576,7 @@ class AppController:
         except Exception:
             pass
         w.set_device_playlist_tab_commands(
-            on_combo_selected=self.on_device_playlist_combo_selected,
+            on_list_selected=self.on_device_playlist_list_selected,
             on_new=self.on_device_playlist_new,
             on_delete=self.on_device_playlist_delete,
             on_rename=self.on_device_playlist_rename,
@@ -1190,9 +1190,10 @@ class AppController:
     def _refresh_podcast_tab(self) -> None:
         shows = list_podcasts()
         self._podcast_ids = [p.id for p in shows]
-        lb = self.win.podcast_show_list
+        tree = self.win.podcast_show_tree
         try:
-            lb.delete(0, "end")
+            for iid in tree.get_children(""):
+                tree.delete(iid)
             for p in shows:
                 label = (p.title or p.feed_url or f"Podcast {p.id}").strip()
                 # Mark shows that have any video episode in the index.
@@ -1214,7 +1215,12 @@ class AppController:
                     sp = 1.0
                 if abs(sp - 1.0) >= 0.01:
                     label = f"{label} {sp:g}×"
-                lb.insert("end", label)
+                tree.insert(
+                    "",
+                    "end",
+                    iid=f"ps:{p.id}",
+                    values=(label,),
+                )
         except Exception:
             logger.debug("refresh podcast list failed", exc_info=True)
         has = bool(shows)
@@ -1236,10 +1242,10 @@ class AppController:
             )
         if self._selected_podcast_id is not None:
             try:
-                idx = self._podcast_ids.index(self._selected_podcast_id)
-                lb.selection_clear(0, "end")
-                lb.selection_set(idx)
-                lb.see(idx)
+                iid = f"ps:{self._selected_podcast_id}"
+                if tree.exists(iid):
+                    tree.selection_set(iid)
+                    tree.see(iid)
             except Exception:
                 pass
             self._load_podcast_episodes(self._selected_podcast_id)
@@ -1310,16 +1316,10 @@ class AppController:
             pass
 
     def on_podcast_show_select(self) -> None:
-        try:
-            sel = self.win.podcast_show_list.curselection()
-        except Exception:
-            sel = ()
-        if not sel:
+        ids = self._selected_podcast_ids()
+        if not ids:
             return
-        idx = int(sel[0])
-        if idx < 0 or idx >= len(self._podcast_ids):
-            return
-        self._selected_podcast_id = self._podcast_ids[idx]
+        self._selected_podcast_id = ids[0]
         self._load_podcast_episodes(self._selected_podcast_id)
         self._refresh_podcast_context_detail()
 
@@ -1491,15 +1491,19 @@ class AppController:
         return out
 
     def _selected_podcast_ids(self) -> list[int]:
+        """Podcast DB ids for the current show Treeview selection."""
+        out: list[int] = []
         try:
-            sel = self.win.podcast_show_list.curselection()
+            sel = self.win.podcast_show_tree.selection()
         except Exception:
             sel = ()
-        out: list[int] = []
-        for idx in sel:
-            i = int(idx)
-            if 0 <= i < len(self._podcast_ids):
-                out.append(self._podcast_ids[i])
+        for iid in sel:
+            s = str(iid)
+            if s.startswith("ps:"):
+                try:
+                    out.append(int(s.split(":", 1)[1]))
+                except ValueError:
+                    continue
         return out
 
     def on_podcast_add(self) -> None:
@@ -4219,16 +4223,32 @@ class AppController:
         self.win.show_playlists_tab()
         self._refresh_playlist_tab()
 
+    def _host_playlist_name_from_list_selection(self) -> str:
+        """Display name for the master list selection (or var fallback)."""
+        try:
+            sel = self.win.playlist_list_tree.selection()
+        except Exception:
+            sel = ()
+        if sel:
+            try:
+                vals = self.win.playlist_list_tree.item(sel[0], "values")
+                if vals:
+                    return str(vals[0]).strip()
+            except Exception:
+                pass
+        return (self.win.var_playlist_choice.get() or "").strip()
+
     def _refresh_playlist_tab(self, *, keep_selection: bool = True) -> None:
-        """Reload playlist dropdown and current tree from the index DB."""
+        """Reload playlist master list and track tree from the index DB."""
         prev_name = ""
         if keep_selection:
-            prev_name = (self.win.var_playlist_choice.get() or "").strip()
+            prev_name = self._host_playlist_name_from_list_selection()
         infos = list_playlists()
         self._playlist_ids_by_name = {p.name: p.id for p in infos}
         names = [p.name for p in infos]
+        ids = [int(p.id) for p in infos]
         selected = prev_name if prev_name in names else (names[0] if names else "")
-        self.win.set_playlist_combo_values(names, selected=selected)
+        self.win.set_playlist_combo_values(names, selected=selected, ids=ids)
         if selected:
             self._load_playlist_by_name(selected)
         else:
@@ -4240,10 +4260,18 @@ class AppController:
             except Exception:
                 pass
 
-    def on_playlist_combo_selected(self) -> None:
-        name = (self.win.var_playlist_choice.get() or "").strip()
+    def on_playlist_list_selected(self) -> None:
+        """Master list selection changed → load tracks."""
+        name = self._host_playlist_name_from_list_selection()
         if name:
+            try:
+                self.win.var_playlist_choice.set(name)
+            except Exception:
+                pass
             self._load_playlist_by_name(name)
+
+    # Alias for older call sites / mental model.
+    on_playlist_combo_selected = on_playlist_list_selected
 
     def _load_playlist_by_name(self, name: str) -> None:
         pid = self._playlist_ids_by_name.get(name)
@@ -4261,6 +4289,7 @@ class AppController:
             self.win.lbl_playlist_status.configure(
                 text=f"{n} track{'s' if n != 1 else ''}"
             )
+            self.win.lbl_playlist_tracks.configure(text=f"Tracks — {pl.name}")
         except Exception:
             pass
 
@@ -4648,9 +4677,7 @@ class AppController:
 
         prev_name = ""
         if keep_selection:
-            prev_name = (
-                self.win.var_device_playlist_choice.get() or ""
-            ).strip()
+            prev_name = self._device_playlist_name_from_list_selection()
 
         if not self._device_io.try_acquire("device-playlists-list"):
             try:
@@ -4820,8 +4847,12 @@ class AppController:
         interactive = self.device.is_connected() and (
             self.win.active_mode() == "experimental"
         )
+        pl_ids = [int(p.playlist_id or 0) for p in ordered]
         self.win.set_device_playlist_combo_values(
-            names, selected=selected, interactive=interactive
+            names,
+            selected=selected,
+            interactive=interactive,
+            playlist_ids=pl_ids,
         )
         if selected:
             self._load_device_playlist_by_name(selected)
@@ -4837,10 +4868,31 @@ class AppController:
             except Exception:
                 pass
 
-    def on_device_playlist_combo_selected(self) -> None:
-        name = (self.win.var_device_playlist_choice.get() or "").strip()
+    def _device_playlist_name_from_list_selection(self) -> str:
+        try:
+            sel = self.win.device_playlist_list_tree.selection()
+        except Exception:
+            sel = ()
+        if sel:
+            try:
+                vals = self.win.device_playlist_list_tree.item(sel[0], "values")
+                if vals:
+                    return str(vals[0]).strip()
+            except Exception:
+                pass
+        return (self.win.var_device_playlist_choice.get() or "").strip()
+
+    def on_device_playlist_list_selected(self) -> None:
+        """Master list selection changed → load on-device playlist tracks."""
+        name = self._device_playlist_name_from_list_selection()
         if name:
+            try:
+                self.win.var_device_playlist_choice.set(name)
+            except Exception:
+                pass
             self._load_device_playlist_by_name(name)
+
+    on_device_playlist_combo_selected = on_device_playlist_list_selected
 
     def _load_device_playlist_by_name(self, name: str) -> None:
         pl = self._device_playlist_by_name.get(name)
@@ -4864,6 +4916,9 @@ class AppController:
             extra = f" · {dead} missing" if dead else ""
             self.win.lbl_device_playlist_status.configure(
                 text=f"{n} track{'s' if n != 1 else ''}{extra}"
+            )
+            self.win.lbl_device_playlist_tracks.configure(
+                text=f"Tracks — {name}"
             )
         except Exception:
             pass

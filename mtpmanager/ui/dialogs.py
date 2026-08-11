@@ -47,7 +47,6 @@ from mtpmanager.domain.audio_encode import (
 )
 from mtpmanager.domain.device_profile import DeviceVideoOptions, VideoEncodePreset
 from mtpmanager.domain.models import DeviceInfo
-from mtpmanager.app.podcast_schedule import components_to_hhmm, hhmm_to_12h
 from mtpmanager.infra.app_config import (
     ALL_DAY_KEYS,
     DEFAULT_PODCAST_SCHEDULE_TIME,
@@ -64,6 +63,15 @@ from mtpmanager.infra.remote_naming import (
     DEFAULT_TV_FOLDER_ID,
     DEFAULT_VIDEO_FOLDER_ID,
     ZEN_VISION_M_FOLDER_IDS,
+)
+from mtpmanager.ui.chrome import (
+    GLYPH_ADD,
+    GLYPH_REMOVE,
+    int_spinbox,
+    make_ttk_scale,
+    monospace_ui_font,
+    secondary_label_kwargs,
+    time_of_day_row,
 )
 from mtpmanager.ui.formatting import folder_line
 
@@ -196,7 +204,7 @@ def show_config_dialog(
 
     *allowed_send_formats*: device-profile restriction (None = unrestricted).
     """
-    from tkinter import Scale, ttk
+    from tkinter import ttk
 
     allowed_tuple = formats_allowed(allowed_send_formats)
     initial_settings = resolve_settings(
@@ -255,8 +263,7 @@ def show_config_dialog(
             + restrict_note
         ),
         justify=LEFT,
-        wraplength=640,
-        fg="#333",
+        wraplength=640, **secondary_label_kwargs(),
     ).pack(anchor="w", pady=(0, 6))
 
     fmt_row = Frame(tab_presets)
@@ -293,7 +300,7 @@ def show_config_dialog(
     preset_scroll.config(command=preset_list.yview)
 
     preset_blurb = Label(
-        tab_presets, text="", justify=LEFT, wraplength=640, fg="#444", height=2
+        tab_presets, text="", justify=LEFT, wraplength=640, **secondary_label_kwargs(), height=2
     )
     preset_blurb.pack(anchor="w", fill="x", pady=(2, 0))
 
@@ -304,8 +311,7 @@ def show_config_dialog(
             "(off = PyMTP, on = mtp-sendtr)."
         ),
         justify=LEFT,
-        wraplength=640,
-        fg="#666",
+        wraplength=640, **secondary_label_kwargs(),
     ).pack(anchor="w", pady=(6, 0))
 
     shown_presets: list = []
@@ -318,8 +324,7 @@ def show_config_dialog(
             "as custom (overrides the Presets list until you pick a preset again)."
         ),
         justify=LEFT,
-        wraplength=640,
-        fg="#333",
+        wraplength=640, **secondary_label_kwargs(),
     ).pack(anchor="w", pady=(0, 8))
 
     adv = Frame(tab_advanced)
@@ -369,28 +374,28 @@ def show_config_dialog(
             )
         )
     )
-    vbr_scale = Scale(
+    def _vbr_label(v: str) -> None:
+        try:
+            f = float(v)
+            vbr_var.set(str(int(f)) if f == int(f) else f"{f:g}")
+        except (TypeError, ValueError):
+            pass
+
+    vbr_scale, _vbr_dbl = make_ttk_scale(
         vbr_frame,
         from_=0,
         to=10,
-        orient="horizontal",
+        value=float(initial_settings.vbr_quality or 2),
         length=260,
         resolution=0.5,
-        showvalue=0,
-        command=lambda v: vbr_var.set(
-            str(int(float(v))) if float(v) == int(float(v)) else f"{float(v):g}"
-        ),
+        command=_vbr_label,
     )
-    try:
-        vbr_scale.set(float(initial_settings.vbr_quality or 2))
-    except Exception:
-        vbr_scale.set(2)
+    _vbr_label(str(_vbr_dbl.get()))
     vbr_scale.pack(side=LEFT)
     Label(vbr_frame, textvariable=vbr_var, width=4).pack(side=LEFT, padx=(4, 0))
     Label(
         vbr_frame,
-        text="MP3 0=best…9 · Vorbis 0–10",
-        fg="#666",
+        text="MP3 0=best…9 · Vorbis 0–10", **secondary_label_kwargs(),
     ).pack(side=LEFT, padx=(6, 0))
 
     Label(adv, text="Sample rate:", anchor="w").grid(
@@ -442,7 +447,7 @@ def show_config_dialog(
         width=10,
     )
     depth_combo.grid(row=5, column=1, sticky="w", padx=(8, 0), pady=(8, 0))
-    Label(adv, text="(PCM / FLAC)", fg="#666").grid(
+    Label(adv, text="(PCM / FLAC)", **secondary_label_kwargs()).grid(
         row=5, column=2, sticky="w", padx=(4, 0), pady=(8, 0)
     )
 
@@ -458,26 +463,23 @@ def show_config_dialog(
             else 5
         )
     )
-    flac_scale = Scale(
+    flac_scale, _flac_dbl = make_ttk_scale(
         flac_frame,
         from_=0,
         to=12,
-        orient="horizontal",
-        length=260,
-        resolution=1,
-        showvalue=0,
-        command=lambda v: flac_var.set(str(int(float(v)))),
-    )
-    flac_scale.set(
-        int(
+        value=float(
             initial_settings.compression_level
             if initial_settings.compression_level is not None
             else 5
-        )
+        ),
+        length=260,
+        resolution=1,
+        command=lambda v: flac_var.set(str(int(float(v)))),
     )
+    flac_var.set(str(int(_flac_dbl.get())))
     flac_scale.pack(side=LEFT)
     Label(flac_frame, textvariable=flac_var, width=3).pack(side=LEFT, padx=(4, 0))
-    Label(flac_frame, text="0=fast … 12=smallest", fg="#666").pack(
+    Label(flac_frame, text="0=fast … 12=smallest", **secondary_label_kwargs()).pack(
         side=LEFT, padx=(6, 0)
     )
 
@@ -505,8 +507,7 @@ def show_config_dialog(
             "default because they do not play reliably."
         ),
         justify=LEFT,
-        wraplength=640,
-        fg="#333",
+        wraplength=640, **secondary_label_kwargs(),
     ).pack(anchor="w")
 
     # ---- Footer: active recipe + buttons ----
@@ -521,8 +522,7 @@ def show_config_dialog(
     Label(
         foot,
         textvariable=source_var,
-        anchor="w",
-        fg="#555",
+        anchor="w", **secondary_label_kwargs(),
     ).pack(fill="x")
     Label(
         foot,
@@ -855,7 +855,7 @@ class ManageLibraryDialog:
         self._lb.pack(side=LEFT, fill=BOTH, expand=True)
         scroll.config(command=self._lb.yview)
         try:
-            self._lb.configure(font=("Menlo", 11))
+            self._lb.configure(font=monospace_ui_font(11))
         except Exception:
             try:
                 self._lb.configure(font=("Courier", 11))
@@ -1114,7 +1114,7 @@ class ExclusionsManagerDialog:
         self._lb.pack(side=LEFT, fill=BOTH, expand=True)
         scroll.config(command=self._lb.yview)
         try:
-            self._lb.configure(font=("Menlo", 11))
+            self._lb.configure(font=monospace_ui_font(11))
         except Exception:
             try:
                 self._lb.configure(font=("Courier", 11))
@@ -1663,7 +1663,7 @@ def show_file_list_dialog(parent, files: list) -> None:
     )
     # Prefer monospaced font for aligned columns when available.
     try:
-        lb.configure(font=("Menlo", 11))
+        lb.configure(font=monospace_ui_font(11))
     except Exception:
         try:
             lb.configure(font=("Courier", 11))
@@ -1738,8 +1738,7 @@ def show_track_list_dialog(
         body,
         textvariable=status_var,
         wraplength=820,
-        justify=LEFT,
-        fg="#444",
+        justify=LEFT, **secondary_label_kwargs(),
     ).pack(anchor="w", pady=(2, 0))
 
     list_frame = Frame(body)
@@ -1756,7 +1755,7 @@ def show_track_list_dialog(
         exportselection=False,
     )
     try:
-        lb.configure(font=("Menlo", 11))
+        lb.configure(font=monospace_ui_font(11))
     except Exception:
         try:
             lb.configure(font=("Courier", 11))
@@ -1922,7 +1921,7 @@ def pick_file_entry_dialog(
         exportselection=False,
     )
     try:
-        lb.configure(font=("Menlo", 11))
+        lb.configure(font=monospace_ui_font(11))
     except Exception:
         try:
             lb.configure(font=("Courier", 11))
@@ -2010,7 +2009,7 @@ def show_file_info_dialog(parent, entry, *, note: str | None = None) -> None:
         text=file_metadata_summary(entry),
         justify=LEFT,
         anchor="w",
-        font=("Menlo", 11),
+        font=monospace_ui_font(11),
     ).pack(anchor="w")
     if note:
         Label(
@@ -2018,8 +2017,7 @@ def show_file_info_dialog(parent, entry, *, note: str | None = None) -> None:
             text=note,
             justify=LEFT,
             anchor="w",
-            wraplength=420,
-            fg="#555555",
+            wraplength=420, **secondary_label_kwargs(),
         ).pack(anchor="w", pady=(10, 0))
     Button(body, text="Close", width=10, command=dlg.destroy).pack(
         anchor="e", pady=(12, 0)
@@ -2072,7 +2070,7 @@ def show_track_info_dialog(
         width=56,
         height=24,
         wrap="word",
-        font=("Menlo", 11),
+        font=monospace_ui_font(11),
         yscrollcommand=yscroll.set,
         relief="flat",
         borderwidth=0,
@@ -2283,9 +2281,11 @@ def ask_add_to_playlist(
         result[0] = None
         dlg.destroy()
 
-    btn_new = Button(btn_row, text="+", width=3, command=on_new)
+    btn_new = Button(btn_row, text=GLYPH_ADD, width=3, command=on_new)
     btn_new.pack(side=LEFT, padx=(0, 4))
-    btn_del = Button(btn_row, text="−", width=3, command=on_delete, state=DISABLED)
+    btn_del = Button(
+        btn_row, text=GLYPH_REMOVE, width=3, command=on_delete, state=DISABLED
+    )
     btn_del.pack(side=LEFT, padx=(0, 8))
     Button(btn_row, text="Cancel", width=10, command=on_cancel).pack(side=RIGHT)
     btn_add = Button(
@@ -2368,119 +2368,11 @@ def _time_spinner_row(
     *,
     initial_hhmm: str,
 ) -> tuple[Frame, Callable[[], str]]:
-    """Hour / minute / AM·PM with ± buttons, keyboard entry, Tab advance.
+    """Hour / minute / AM·PM comboboxes (phase 3 / O6).
 
     Returns (frame, getter) where getter() → normalized HH:MM 24h.
     """
-    hour0, minute0, ampm0 = hhmm_to_12h(initial_hhmm)
-    row = Frame(parent)
-    hour_var = StringVar(value=str(hour0))
-    min_var = StringVar(value=f"{minute0:02d}")
-    ampm_var = StringVar(value=ampm0)
-
-    def _clamp_hour() -> int:
-        try:
-            h = int(str(hour_var.get()).strip() or "12")
-        except ValueError:
-            h = 12
-        h = max(1, min(12, h))
-        hour_var.set(str(h))
-        return h
-
-    def _clamp_min() -> int:
-        raw = str(min_var.get()).strip()
-        try:
-            m = int(raw or "0")
-        except ValueError:
-            m = 0
-        m = max(0, min(59, m))
-        min_var.set(f"{m:02d}")
-        return m
-
-    def bump_hour(delta: int) -> None:
-        h = _clamp_hour()
-        h = ((h - 1 + delta) % 12) + 1
-        hour_var.set(str(h))
-
-    def bump_min(delta: int) -> None:
-        m = _clamp_min()
-        m = (m + delta) % 60
-        min_var.set(f"{m:02d}")
-
-    def toggle_ampm() -> None:
-        cur = str(ampm_var.get()).strip().upper()
-        ampm_var.set("PM" if cur.startswith("A") else "AM")
-
-    def get_hhmm() -> str:
-        return components_to_hhmm(_clamp_hour(), _clamp_min(), ampm_var.get())
-
-    # Hour
-    hour_col = Frame(row)
-    hour_col.pack(side=LEFT)
-    Label(hour_col, text="Hour").pack()
-    Button(hour_col, text="▲", width=3, command=lambda: bump_hour(1)).pack()
-    hour_entry = Entry(hour_col, textvariable=hour_var, width=3, justify="center")
-    hour_entry.pack(pady=2)
-    Button(hour_col, text="▼", width=3, command=lambda: bump_hour(-1)).pack()
-
-    Label(row, text=":", font=("", 14, "bold")).pack(side=LEFT, padx=4, pady=(14, 0))
-
-    # Minute
-    min_col = Frame(row)
-    min_col.pack(side=LEFT)
-    Label(min_col, text="Min").pack()
-    Button(min_col, text="▲", width=3, command=lambda: bump_min(1)).pack()
-    min_entry = Entry(min_col, textvariable=min_var, width=3, justify="center")
-    min_entry.pack(pady=2)
-    Button(min_col, text="▼", width=3, command=lambda: bump_min(-1)).pack()
-
-    # AM/PM
-    ampm_col = Frame(row)
-    ampm_col.pack(side=LEFT, padx=(10, 0))
-    Label(ampm_col, text="AM/PM").pack()
-    Button(ampm_col, text="▲", width=4, command=toggle_ampm).pack()
-    ampm_entry = Entry(
-        ampm_col, textvariable=ampm_var, width=4, justify="center"
-    )
-    ampm_entry.pack(pady=2)
-    Button(ampm_col, text="▼", width=4, command=toggle_ampm).pack()
-
-    def on_hour_return(_e=None) -> str:
-        _clamp_hour()
-        min_entry.focus_set()
-        min_entry.selection_range(0, END)
-        return "break"
-
-    def on_min_return(_e=None) -> str:
-        _clamp_min()
-        ampm_entry.focus_set()
-        ampm_entry.selection_range(0, END)
-        return "break"
-
-    def on_ampm_return(_e=None) -> str:
-        raw = str(ampm_var.get()).strip().upper()
-        if raw.startswith("P"):
-            ampm_var.set("PM")
-        else:
-            ampm_var.set("AM")
-        return "break"
-
-    def on_hour_tab(_e=None) -> str:
-        return on_hour_return()
-
-    def on_min_tab(_e=None) -> str:
-        return on_min_return()
-
-    hour_entry.bind("<Return>", on_hour_return)
-    hour_entry.bind("<Tab>", on_hour_tab)
-    hour_entry.bind("<FocusOut>", lambda _e: _clamp_hour())
-    min_entry.bind("<Return>", on_min_return)
-    min_entry.bind("<Tab>", on_min_tab)
-    min_entry.bind("<FocusOut>", lambda _e: _clamp_min())
-    ampm_entry.bind("<Return>", on_ampm_return)
-    ampm_entry.bind("<FocusOut>", on_ampm_return)
-
-    return row, get_hhmm
+    return time_of_day_row(parent, initial_hhmm=initial_hhmm)
 
 
 def _pack_encode_override_section(
@@ -2511,8 +2403,7 @@ def _pack_encode_override_section(
             parent,
             text=blurb,
             justify=LEFT,
-            wraplength=440,
-            fg="#333",
+            wraplength=440, **secondary_label_kwargs(),
         ).pack(anchor="w", pady=(0, 6))
 
     override_var = BooleanVar(value=bool(use_override))
@@ -2805,21 +2696,14 @@ def show_podcast_settings_dialog(
         text=f"Max new episodes per show (1–{MAX_PODCAST_NEW_PER_SHOW}):",
     ).pack(side=LEFT)
     n_var = StringVar(value=str(n0))
-    n_entry = Entry(n_row, textvariable=n_var, width=4)
-    n_entry.pack(side=LEFT, padx=(8, 0))
-
-    n_btn_col = Frame(n_row)
-    n_btn_col.pack(side=LEFT, padx=(4, 0))
-
-    def bump_n(delta: int) -> None:
-        try:
-            cur = int(str(n_var.get()).strip() or "1")
-        except ValueError:
-            cur = 1
-        n_var.set(str(normalize_max_new_per_show(cur + delta)))
-
-    Button(n_btn_col, text="▲", width=2, command=lambda: bump_n(1)).pack()
-    Button(n_btn_col, text="▼", width=2, command=lambda: bump_n(-1)).pack()
+    n_spin = int_spinbox(
+        n_row,
+        from_=1,
+        to=int(MAX_PODCAST_NEW_PER_SHOW),
+        textvariable=n_var,
+        width=4,
+    )
+    n_spin.pack(side=LEFT, padx=(8, 0))
 
     sync_var = BooleanVar(value=bool(auto_sync_to_device))
     Checkbutton(
@@ -2861,8 +2745,7 @@ def show_podcast_settings_dialog(
             body,
             text=status_line,
             justify=LEFT,
-            wraplength=440,
-            fg="#444",
+            wraplength=440, **secondary_label_kwargs(),
         ).pack(anchor="w", pady=(6, 10))
 
     # ---- Podcast encode (default for all shows; overrides Config) ----
@@ -2891,8 +2774,7 @@ def show_podcast_settings_dialog(
             body,
             text=f"Formats limited by {who}: {names}.",
             justify=LEFT,
-            wraplength=440,
-            fg="#555",
+            wraplength=440, **secondary_label_kwargs(),
         ).pack(anchor="w", pady=(2, 0))
 
     result: list[PodcastSettingsResult | None] = [None]
@@ -3035,8 +2917,7 @@ def show_audiobook_encode_dialog(
             body,
             text=f"Formats limited by {who}: {names}.",
             justify=LEFT,
-            wraplength=420,
-            fg="#555",
+            wraplength=420, **secondary_label_kwargs(),
         ).pack(anchor="w", pady=(4, 0))
 
     result: list[AudiobookEncodeResult | None] = [None]
@@ -3084,7 +2965,7 @@ def show_podcast_show_encode_dialog(
     profile_display_name: str | None = None,
 ) -> PodcastShowEncodeResult | None:
     """Per-show encode override (Podcasts tab context menu). Save → result."""
-    from tkinter import DoubleVar, Scale
+    from tkinter import DoubleVar
 
     title = (show_title or "Podcast").strip() or "Podcast"
     inherit = (inherit_summary or "").strip() or "podcast default / Config"
@@ -3122,8 +3003,7 @@ def show_podcast_show_encode_dialog(
             f"episodes use: {inherit}."
         ),
         justify=LEFT,
-        wraplength=420,
-        fg="#333",
+        wraplength=420, **secondary_label_kwargs(),
     ).pack(anchor="w", pady=(0, 8))
 
     override_var, get_settings = _pack_encode_override_section(
@@ -3152,8 +3032,7 @@ def show_podcast_show_encode_dialog(
             f"({PLAYBACK_SPEED_MIN:g}×–{PLAYBACK_SPEED_MAX:g}×). 1.0× is normal."
         ),
         justify=LEFT,
-        wraplength=420,
-        fg="#333",
+        wraplength=420, **secondary_label_kwargs(),
     ).pack(anchor="w", pady=(0, 4))
     speed_row = Frame(body)
     speed_row.pack(fill="x", pady=(0, 4))
@@ -3168,16 +3047,17 @@ def show_podcast_show_encode_dialog(
             s = 1.0
         speed_label.configure(text=f"{s:g}×")
 
-    Scale(
+    speed_scale, speed_var = make_ttk_scale(
         speed_row,
         from_=PLAYBACK_SPEED_MIN,
         to=PLAYBACK_SPEED_MAX,
-        resolution=0.05,
-        orient="horizontal",
+        value=float(speed0),
         variable=speed_var,
         length=300,
+        resolution=0.05,
         command=_on_speed,
-    ).pack(side=LEFT, fill="x", expand=True)
+    )
+    speed_scale.pack(side=LEFT, fill="x", expand=True)
     _on_speed()
 
     allowed_tuple = formats_allowed(allowed_send_formats)
@@ -3188,8 +3068,7 @@ def show_podcast_show_encode_dialog(
             body,
             text=f"Formats limited by {who}: {names}.",
             justify=LEFT,
-            wraplength=420,
-            fg="#555",
+            wraplength=420, **secondary_label_kwargs(),
         ).pack(anchor="w", pady=(4, 0))
 
     result: list[PodcastShowEncodeResult | None] = [None]
@@ -3248,8 +3127,6 @@ def show_shrink_encode_dialog(
     n_tracks: int = 1,
 ) -> ShrinkEncodeResult | None:
     """Slider over quality presets (low → high). Save → result; Cancel → None."""
-    from tkinter import IntVar, Scale
-
     from mtpmanager.domain.audio_encode import AudioEncodePreset
 
     ladder: list[AudioEncodePreset] = list(presets or [])
@@ -3281,16 +3158,14 @@ def show_shrink_encode_dialog(
             + (f"\n\n{track_label}" if track_label else "")
         ),
         justify=LEFT,
-        wraplength=420,
-        fg="#333",
+        wraplength=420, **secondary_label_kwargs(),
     ).pack(anchor="w", pady=(0, 8))
 
-    idx_var = IntVar(value=idx0)
     name_var = StringVar(value=ladder[idx0].display_name)
 
     def on_slide(_v=None) -> None:
         try:
-            i = int(idx_var.get())
+            i = int(round(float(idx_var.get())))
         except (TypeError, ValueError):
             i = idx0
         i = max(0, min(len(ladder) - 1, i))
@@ -3299,25 +3174,26 @@ def show_shrink_encode_dialog(
     Label(body, textvariable=name_var, anchor="w", font=("", 10, "bold")).pack(
         fill="x", pady=(0, 4)
     )
-    Scale(
+    shrink_scale, idx_var = make_ttk_scale(
         body,
         from_=0,
         to=max(0, len(ladder) - 1),
-        orient="horizontal",
-        variable=idx_var,
+        value=float(idx0),
         length=360,
-        showvalue=False,
+        resolution=1,
         command=on_slide,
-    ).pack(fill="x")
+    )
+    shrink_scale.pack(fill="x")
+    on_slide()
     tick = Frame(body)
     tick.pack(fill="x")
-    Label(tick, text="More compression", fg="#555").pack(side=LEFT)
-    Label(tick, text="Higher quality", fg="#555").pack(side=RIGHT)
+    Label(tick, text="More compression", **secondary_label_kwargs()).pack(side=LEFT)
+    Label(tick, text="Higher quality", **secondary_label_kwargs()).pack(side=RIGHT)
 
     result: list[ShrinkEncodeResult | None] = [None]
 
     def on_ok() -> None:
-        i = max(0, min(len(ladder) - 1, int(idx_var.get())))
+        i = max(0, min(len(ladder) - 1, int(round(float(idx_var.get())))))
         result[0] = ShrinkEncodeResult(audio_encode=ladder[i].settings)
         dlg.destroy()
 
