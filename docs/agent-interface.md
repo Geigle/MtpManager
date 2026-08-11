@@ -71,23 +71,25 @@ File: `device_session.lock` under the data dir.
 | `playlist list` / `playlist show NAME` | Host M3U playlists |
 | `playlist create NAME` | Create empty host playlist |
 | `playlist add NAME --guid … / --path …` | Append tracks (skips existing paths by default) |
-| `playlist replace NAME --guid … / --path …` | Replace membership (no tracks → clear) |
+| `playlist replace NAME --guid … / --path … --confirm` | Replace membership (no tracks → clear). **Requires `--confirm`** (exit 6 without it) |
 | `config get [key]` | Read `config.json` |
 | `device status` | Lock + connection (no open session required) |
+| `device inventory [--limit N]` | **Cached** inventory only (no USB walk, **no lock**). Needs a serial from a prior connect/seed (GUI or future `device refresh-index`) |
 
-### Device (lock + USB)
+### Device (session lock + USB)
 
 | Command | Purpose |
 |---------|---------|
-| `device connect` / `disconnect` | Default PyMTP session (same transport as GUI) |
-| `device info` | Diagnostics |
-| `device inventory [--limit N]` | **Cached** inventory only (no full USB walk) |
+| `device connect` / `disconnect` | Default PyMTP session (same transport as GUI); takes session lock |
+| `device info` | Diagnostics (connected) |
 | `device delete OBJECT_ID --confirm` | Single object delete |
-| `sync --guid … --dry-run` | Plan send/skip |
+| `sync --guid … --dry-run` | Plan send/skip (may use cache for skip-if-present; no write) |
 | `sync --guid … --confirm [--mode …]` | Transfer (default transport = PyMTP) |
 | `sync --playlist NAME --dry-run` | Plan entire host M3U (would-send / would-skip / unresolved) |
 | `sync --playlist NAME --confirm [--push-playlist] [--batch-size N]` | Transfer missing tracks; optional on-device playlist push |
 | `playlist push NAME --confirm` | On-device playlist from host M3U (no track send) |
+
+Host-only commands never need the device lock. `device status` and `device inventory` are safe while the GUI holds the lock (inventory is SQLite cache only).
 
 ### Sync guards
 
@@ -137,9 +139,11 @@ Client config sketch (Cursor / Claude Desktop style):
 }
 ```
 
-Tools mirror `agent tools` names (`library_search`, `sync_tracks`, …). Destructive tools require `confirm: true`.
+Tools mirror `agent tools` names (`library_search`, `sync_tracks`, …). Destructive tools require `confirm: true` (including `playlist_replace`).
 
-**Note:** This is a minimal MCP subset (initialize, tools/list, tools/call). Upgrade to the official Python MCP SDK later if a client needs full protocol features.
+**Note:** This is a minimal MCP subset (initialize, tools/list, tools/call) using **line-delimited** JSON-RPC on stdio (one JSON object per line), not Content-Length framing. Some clients expect the official framing/SDK — verify before relying on auto-connect. Upgrade to the official Python MCP SDK later if a client needs full protocol features.
+
+**Not agent tools:** album-art probe/experiment live only on `HeadlessService` for human/script debugging. They do not appear in `agent tools`, CLI, or MCP.
 
 ## What this is not
 
@@ -149,12 +153,22 @@ Tools mirror `agent tools` names (`library_search`, `sync_tracks`, …). Destruc
 
 ## TODO / backlog
 
-| Item | Notes |
-|------|--------|
-| *(none open for agent CLI)* | `sync --playlist` shipped — see above. Historical notes: [todo-agent-cli.md](./todo-agent-cli.md). |
+Phased PR plan (P0–P3): **[plan-agent-interface-phases.md](./plan-agent-interface-phases.md)**.
+
+| Milestone | Scope |
+|-----------|--------|
+| **A (Phase 0)** | Hide art experiment from agents; docs parity; `playlist_replace` confirm; catalog↔MCP guard test |
+| **B (Phase 1)** | Library scan/roots; config patch; device index refresh; inventory query; host playlist lifecycle |
+| **C (Phase 2)** | Podcasts; pull; tag enrich (**risk docs required**); video; resume job; MCP ergonomics |
+| **D (Phase 3)** | Retail, shrink, delete-all, create-folder, device playlist edit |
+
+Historical shipped item (`sync --playlist`): [todo-agent-cli.md](./todo-agent-cli.md).
+
+**Dev-only (not agent tools):** `HeadlessService` album-art probe/experiment helpers may exist for humans/scripts; they must not appear in `agent tools`, CLI, or MCP (see plan PR 0.1).
 
 ## Related
 
+- [plan-agent-interface-phases.md](./plan-agent-interface-phases.md) — phased PR backlog
 - [architecture.md](./architecture.md) — layers / composition
 - [device-contract.md](./device-contract.md) — send rules
 - [transfer-and-modes.md](./transfer-and-modes.md) — Stable vs Experimental

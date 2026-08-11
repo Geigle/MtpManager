@@ -505,10 +505,11 @@ class HeadlessService:
         *,
         guids: Sequence[str] | None = None,
         paths: Sequence[str] | None = None,
+        confirm: bool = False,
     ) -> AgentResult:
         """Replace host playlist membership with the given tracks (order preserved).
 
-        Passing no guids/paths clears the playlist.
+        Passing no guids/paths clears the playlist. Requires *confirm*.
         """
         clean = (name or "").strip()
         if not clean:
@@ -516,6 +517,13 @@ class HeadlessService:
                 "USAGE",
                 "playlist name is required",
                 exit_code=ExitCode.USAGE,
+            )
+        if not confirm:
+            return fail(
+                "CONFIRM_REQUIRED",
+                "Pass confirm=true to replace or clear playlist membership",
+                exit_code=ExitCode.CONFIRM_REQUIRED,
+                data={"name": clean},
             )
         pl = get_playlist_by_name(clean, path=self._index_path)
         if pl is None:
@@ -718,7 +726,10 @@ class HeadlessService:
             return fail("DEVICE_ERROR", str(e), exit_code=ExitCode.ERROR)
 
     def device_art_probe(self) -> AgentResult:
-        """Probe RepresentativeSample support for common filetypes (Experimental)."""
+        """Probe RepresentativeSample support for common filetypes (dev only).
+
+        Not an agent CLI/MCP tool — call from scripts or an interactive shell.
+        """
         if not self._connected or self._device is None:
             return fail(
                 "NOT_CONNECTED",
@@ -784,6 +795,8 @@ class HeadlessService:
         max_bytes: int = 20 * 1024,
     ) -> AgentResult:
         """Minimum album-art experiment: probe → (optional send track) → sample.
+
+        Dev only — not exposed on agent CLI/MCP. Call from a script or shell.
 
         Steps:
           1. Prepare JPEG from host cover (embedded/sidecar).

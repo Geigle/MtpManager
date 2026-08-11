@@ -1,4 +1,11 @@
-# Agent / CLI backlog
+# Agent / CLI backlog (historical)
+
+**Active plan:** [plan-agent-interface-phases.md](./plan-agent-interface-phases.md)  
+**Operator docs:** [agent-interface.md](./agent-interface.md)
+
+This file keeps shipped-item notes. Do not add new open TODOs here — extend the phased plan instead.
+
+---
 
 ## TODO: `sync --playlist NAME`
 

@@ -38,7 +38,8 @@ This folder is the **design and incident** map. For run instructions, logs, and 
 |-----|---------|
 | [architecture.md](./architecture.md) | System design: layers, package map, composition root, dual-mode wiring, logging, known gaps |
 | [agent-interface.md](./agent-interface.md) | Headless CLI + MCP for coding agents (JSON ops, device lock, dry-run sync) |
-| [todo-agent-cli.md](./todo-agent-cli.md) | Agent/CLI backlog (e.g. `sync --playlist`) |
+| [plan-agent-interface-phases.md](./plan-agent-interface-phases.md) | Phased PR plan to close CLI/MCP gaps (P0–P3) |
+| [todo-agent-cli.md](./todo-agent-cli.md) | Historical agent/CLI notes (`sync --playlist` shipped) |
 | [decisions.md](./decisions.md) | ADR-lite: dual mode, no silent fallback, shared naming, fatal abort, pymtp patches, license, … |
 | [device-contract.md](./device-contract.md) | MTP/ZEN remote path, storage, basename, tags vs filename — **do not rebreak** |
 | [basename-limit-evidence.md](./basename-limit-evidence.md) | Why `MAX_REMOTE_BASENAME=56`: external vs empirical evidence; long on-device names |

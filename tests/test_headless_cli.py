@@ -336,13 +336,18 @@ class PlaylistMutationTests(unittest.TestCase):
             self.assertTrue(shown.ok)
             self.assertEqual(shown.data["track_count"], 2)
 
-            replaced = svc.playlist_replace("Hansi", guids=[g2])
+            gated = svc.playlist_replace("Hansi", guids=[g2], confirm=False)
+            self.assertFalse(gated.ok)
+            self.assertEqual(gated.exit_code, int(ExitCode.CONFIRM_REQUIRED))
+            self.assertEqual(gated.code, "CONFIRM_REQUIRED")
+
+            replaced = svc.playlist_replace("Hansi", guids=[g2], confirm=True)
             self.assertTrue(replaced.ok)
             self.assertEqual(replaced.data["track_count"], 1)
             self.assertEqual(replaced.data["paths"], [str(f2)])
             self.assertEqual(replaced.data["replaced_with"], 1)
 
-            cleared = svc.playlist_replace("Hansi")
+            cleared = svc.playlist_replace("Hansi", confirm=True)
             self.assertTrue(cleared.ok)
             self.assertEqual(cleared.data["track_count"], 0)
 
@@ -397,6 +402,24 @@ class PlaylistMutationTests(unittest.TestCase):
             self.assertEqual(payload2["data"]["added"], 1)
             self.assertEqual(payload2["data"]["track_count"], 1)
 
+            buf_gate = io.StringIO()
+            with redirect_stdout(buf_gate):
+                code_gate = main(
+                    [
+                        "--data-dir",
+                        str(data),
+                        "playlist",
+                        "replace",
+                        "Road Mix",
+                        "--guids",
+                        g,
+                    ]
+                )
+            self.assertEqual(code_gate, int(ExitCode.CONFIRM_REQUIRED))
+            payload_gate = json.loads(buf_gate.getvalue())
+            self.assertFalse(payload_gate["ok"])
+            self.assertEqual(payload_gate["code"], "CONFIRM_REQUIRED")
+
             buf3 = io.StringIO()
             with redirect_stdout(buf3):
                 code3 = main(
@@ -408,12 +431,100 @@ class PlaylistMutationTests(unittest.TestCase):
                         "Road Mix",
                         "--guids",
                         g,
+                        "--confirm",
                     ]
                 )
             self.assertEqual(code3, 0)
             payload3 = json.loads(buf3.getvalue())
             self.assertTrue(payload3["ok"])
             self.assertEqual(payload3["data"]["track_count"], 1)
+
+
+class AgentSurfaceParityTests(unittest.TestCase):
+    """Catalog must match MCP dispatch; dev experiments stay off agent surfaces."""
+
+    def test_catalog_matches_mcp_handlers(self) -> None:
+        from mtpmanager.headless.tools import (
+            DEV_ONLY_TOOL_NAMES,
+            catalog_tool_names,
+        )
+        from mtpmanager.mcp_server import implemented_mcp_tool_names
+
+        catalog = catalog_tool_names()
+        mcp = implemented_mcp_tool_names()
+        self.assertEqual(
+            catalog,
+            mcp,
+            msg=(
+                f"catalog-only={sorted(catalog - mcp)!r} "
+                f"mcp-only={sorted(mcp - catalog)!r}"
+            ),
+        )
+        self.assertTrue(catalog.isdisjoint(DEV_ONLY_TOOL_NAMES))
+
+    def test_catalog_cli_paths_are_registered(self) -> None:
+        from mtpmanager.cli.main import build_parser
+        from mtpmanager.headless.tools import TOOL_CATALOG
+
+        parser = build_parser()
+        for tool in TOOL_CATALOG:
+            cli = list(tool.get("cli") or [])
+            self.assertGreaterEqual(
+                len(cli),
+                1,
+                msg=f"{tool['name']} missing cli path",
+            )
+            # sync is a top-level group with no sub-action.
+            if cli == ["sync"]:
+                args = parser.parse_args(["sync", "--dry-run"])
+                self.assertEqual(args.group, "sync")
+                continue
+            if len(cli) == 1:
+                args = parser.parse_args(cli)
+                self.assertEqual(args.group, cli[0])
+                continue
+            group, action = cli[0], cli[1]
+            argv = [group, action]
+            # Satisfy required positionals / flags so parse succeeds.
+            if group == "library" and action == "search":
+                argv.append("q")
+            elif group == "playlist" and action in (
+                "show",
+                "create",
+                "add",
+                "replace",
+                "push",
+            ):
+                argv.append("Name")
+            elif group == "device" and action == "delete":
+                argv.extend(["1", "--confirm"])
+            if group == "playlist" and action in ("replace", "push"):
+                argv.append("--confirm")
+            args = parser.parse_args(argv)
+            self.assertEqual(args.group, group)
+            self.assertEqual(getattr(args, "action", None), action)
+
+    def test_art_experiment_not_on_cli(self) -> None:
+        from mtpmanager.cli.main import build_parser
+
+        parser = build_parser()
+        with self.assertRaises(SystemExit) as ctx:
+            parser.parse_args(["device", "art-probe"])
+        self.assertNotEqual(ctx.exception.code, 0)
+        with self.assertRaises(SystemExit) as ctx2:
+            parser.parse_args(
+                ["device", "art-experiment", "--path", "/tmp/x", "--confirm"]
+            )
+        self.assertNotEqual(ctx2.exception.code, 0)
+
+    def test_agent_tools_omits_dev_art(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            svc = HeadlessService(data_dir=Path(tmp))
+            tools = svc.agent_tools()
+            self.assertTrue(tools.ok)
+            names = {t["name"] for t in tools.data["tools"]}
+            self.assertNotIn("device_art_probe", names)
+            self.assertNotIn("device_art_experiment", names)
 
 
 class CliMainTests(unittest.TestCase):

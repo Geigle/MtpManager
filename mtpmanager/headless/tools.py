@@ -146,7 +146,8 @@ TOOL_CATALOG: list[dict[str, Any]] = [
         "cli": ["playlist", "replace"],
         "description": (
             "Replace host playlist membership with the given tracks "
-            "(order preserved). Passing neither guids nor paths clears the playlist."
+            "(order preserved). Passing neither guids nor paths clears the playlist. "
+            "Requires confirm=true."
         ),
         "host_only": True,
         "destructive": True,
@@ -163,6 +164,11 @@ TOOL_CATALOG: list[dict[str, Any]] = [
                     "type": "array",
                     "items": {"type": "string"},
                     "description": "Host filesystem paths, order preserved",
+                },
+                "confirm": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Required true to replace or clear membership",
                 },
             },
             "required": ["name"],
@@ -254,51 +260,8 @@ TOOL_CATALOG: list[dict[str, Any]] = [
             "additionalProperties": False,
         },
     },
-    {
-        "name": "device_art_probe",
-        "cli": ["device", "art-probe"],
-        "description": (
-            "Probe libmtp RepresentativeSample support for MP3/ALBUM/etc. "
-            "Experimental; requires device connect. Does not write art."
-        ),
-        "host_only": False,
-        "destructive": False,
-        "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
-    },
-    {
-        "name": "device_art_experiment",
-        "cli": ["device", "art-experiment"],
-        "description": (
-            "Minimum album-art experiment: JPEG from host cover, optional track "
-            "send, Send_Representative_Sample on track and/or new album object. "
-            "Requires confirm=true. Avoids Get_Album_List."
-        ),
-        "host_only": False,
-        "destructive": True,
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Host audio path with cover art",
-                },
-                "object_id": {
-                    "type": "integer",
-                    "description": "Existing object id (skip send)",
-                },
-                "try_album": {
-                    "type": "boolean",
-                    "default": True,
-                    "description": "Create album object + sample when useful",
-                },
-                "max_edge": {"type": "integer", "default": 320},
-                "max_bytes": {"type": "integer", "default": 20480},
-                "confirm": {"type": "boolean", "default": False},
-            },
-            "required": ["path"],
-            "additionalProperties": False,
-        },
-    },
+    # device_art_probe / device_art_experiment: HeadlessService helpers only
+    # (dev experiment). Not agent tools — do not re-add to this catalog.
     {
         "name": "sync_tracks",
         "cli": ["sync"],
@@ -401,3 +364,17 @@ TOOL_CATALOG: list[dict[str, Any]] = [
 
 def tools_as_dict() -> dict[str, Any]:
     return {"tools": list(TOOL_CATALOG), "count": len(TOOL_CATALOG)}
+
+
+def catalog_tool_names() -> frozenset[str]:
+    """Names exposed to agents via ``agent tools`` / MCP ``tools/list``."""
+    return frozenset(str(t["name"]) for t in TOOL_CATALOG)
+
+
+# Dev-only HeadlessService helpers — must never appear in TOOL_CATALOG.
+DEV_ONLY_TOOL_NAMES: frozenset[str] = frozenset(
+    {
+        "device_art_probe",
+        "device_art_experiment",
+    }
+)

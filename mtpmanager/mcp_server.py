@@ -16,8 +16,9 @@ from __future__ import annotations
 import json
 import logging
 import sys
-from typing import Any
+from typing import Any, Callable
 
+from mtpmanager.headless.dto import AgentResult
 from mtpmanager.headless.service import HeadlessService
 from mtpmanager.headless.tools import TOOL_CATALOG
 from mtpmanager.infra.logging_setup import configure_logging
@@ -27,6 +28,134 @@ logger = logging.getLogger("mtpmanager.mcp")
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_NAME = "mtpmanager"
 SERVER_VERSION = "0.1.0"
+
+# name -> (svc, arguments) -> AgentResult
+ToolHandler = Callable[[HeadlessService, dict[str, Any]], AgentResult]
+
+
+def _handlers() -> dict[str, ToolHandler]:
+    """Single registry for MCP tool dispatch (parity-tested vs TOOL_CATALOG)."""
+
+    def agent_doctor(svc: HeadlessService, _args: dict[str, Any]) -> AgentResult:
+        return svc.agent_doctor()
+
+    def agent_tools(svc: HeadlessService, _args: dict[str, Any]) -> AgentResult:
+        return svc.agent_tools()
+
+    def library_list_roots(svc: HeadlessService, _args: dict[str, Any]) -> AgentResult:
+        return svc.library_list_roots()
+
+    def library_search(svc: HeadlessService, args: dict[str, Any]) -> AgentResult:
+        return svc.library_search(
+            str(args.get("query") or ""),
+            limit=int(args.get("limit") or 50),
+        )
+
+    def library_track(svc: HeadlessService, args: dict[str, Any]) -> AgentResult:
+        return svc.library_track(
+            guid=args.get("guid"),
+            path=args.get("path"),
+        )
+
+    def playlist_list(svc: HeadlessService, _args: dict[str, Any]) -> AgentResult:
+        return svc.playlist_list()
+
+    def playlist_show(svc: HeadlessService, args: dict[str, Any]) -> AgentResult:
+        return svc.playlist_show(str(args.get("name") or ""))
+
+    def playlist_create(svc: HeadlessService, args: dict[str, Any]) -> AgentResult:
+        return svc.playlist_create(str(args.get("name") or ""))
+
+    def playlist_add(svc: HeadlessService, args: dict[str, Any]) -> AgentResult:
+        skip_raw = args.get("skip_existing")
+        skip_existing = True if skip_raw is None else bool(skip_raw)
+        return svc.playlist_add(
+            str(args.get("name") or ""),
+            guids=list(args.get("guids") or []),
+            paths=list(args.get("paths") or []),
+            skip_existing=skip_existing,
+        )
+
+    def playlist_replace(svc: HeadlessService, args: dict[str, Any]) -> AgentResult:
+        return svc.playlist_replace(
+            str(args.get("name") or ""),
+            guids=list(args.get("guids") or []),
+            paths=list(args.get("paths") or []),
+            confirm=bool(args.get("confirm")),
+        )
+
+    def config_get(svc: HeadlessService, args: dict[str, Any]) -> AgentResult:
+        return svc.config_get(args.get("key"))
+
+    def device_status(svc: HeadlessService, _args: dict[str, Any]) -> AgentResult:
+        return svc.device_status()
+
+    def device_connect(svc: HeadlessService, _args: dict[str, Any]) -> AgentResult:
+        return svc.device_connect()
+
+    def device_disconnect(svc: HeadlessService, _args: dict[str, Any]) -> AgentResult:
+        return svc.device_disconnect()
+
+    def device_info(svc: HeadlessService, _args: dict[str, Any]) -> AgentResult:
+        return svc.device_info()
+
+    def device_inventory(svc: HeadlessService, args: dict[str, Any]) -> AgentResult:
+        return svc.device_inventory(limit=int(args.get("limit") or 200))
+
+    def device_delete(svc: HeadlessService, args: dict[str, Any]) -> AgentResult:
+        return svc.device_delete(
+            int(args.get("object_id") or 0),
+            confirm=bool(args.get("confirm")),
+        )
+
+    def sync_tracks(svc: HeadlessService, args: dict[str, Any]) -> AgentResult:
+        batch_raw = args.get("batch_size")
+        batch_size = int(batch_raw) if batch_raw is not None else None
+        return svc.sync_tracks(
+            guids=list(args.get("guids") or []),
+            paths=list(args.get("paths") or []),
+            artist=args.get("artist"),
+            album=args.get("album"),
+            playlist=args.get("playlist"),
+            mode=args.get("mode"),
+            dry_run=bool(args.get("dry_run")),
+            confirm=bool(args.get("confirm")),
+            push_playlist=bool(args.get("push_playlist")),
+            batch_size=batch_size,
+        )
+
+    def playlist_push(svc: HeadlessService, args: dict[str, Any]) -> AgentResult:
+        return svc.playlist_push(
+            str(args.get("name") or ""),
+            confirm=bool(args.get("confirm")),
+        )
+
+    return {
+        "agent_doctor": agent_doctor,
+        "agent_tools": agent_tools,
+        "library_list_roots": library_list_roots,
+        "library_search": library_search,
+        "library_track": library_track,
+        "playlist_list": playlist_list,
+        "playlist_show": playlist_show,
+        "playlist_create": playlist_create,
+        "playlist_add": playlist_add,
+        "playlist_replace": playlist_replace,
+        "config_get": config_get,
+        "device_status": device_status,
+        "device_connect": device_connect,
+        "device_disconnect": device_disconnect,
+        "device_info": device_info,
+        "device_inventory": device_inventory,
+        "device_delete": device_delete,
+        "sync_tracks": sync_tracks,
+        "playlist_push": playlist_push,
+    }
+
+
+def implemented_mcp_tool_names() -> frozenset[str]:
+    """Tool names MCP can invoke (must match :data:`TOOL_CATALOG`)."""
+    return frozenset(_handlers().keys())
 
 
 def _tool_mcp_list() -> list[dict[str, Any]]:
@@ -45,86 +174,13 @@ def _tool_mcp_list() -> list[dict[str, Any]]:
 
 def _call_tool(svc: HeadlessService, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     args = arguments or {}
-    if name == "agent_doctor":
-        result = svc.agent_doctor()
-    elif name == "agent_tools":
-        result = svc.agent_tools()
-    elif name == "library_list_roots":
-        result = svc.library_list_roots()
-    elif name == "library_search":
-        result = svc.library_search(
-            str(args.get("query") or ""),
-            limit=int(args.get("limit") or 50),
-        )
-    elif name == "library_track":
-        result = svc.library_track(
-            guid=args.get("guid"),
-            path=args.get("path"),
-        )
-    elif name == "playlist_list":
-        result = svc.playlist_list()
-    elif name == "playlist_show":
-        result = svc.playlist_show(str(args.get("name") or ""))
-    elif name == "playlist_create":
-        result = svc.playlist_create(str(args.get("name") or ""))
-    elif name == "playlist_add":
-        skip_raw = args.get("skip_existing")
-        skip_existing = True if skip_raw is None else bool(skip_raw)
-        result = svc.playlist_add(
-            str(args.get("name") or ""),
-            guids=list(args.get("guids") or []),
-            paths=list(args.get("paths") or []),
-            skip_existing=skip_existing,
-        )
-    elif name == "playlist_replace":
-        result = svc.playlist_replace(
-            str(args.get("name") or ""),
-            guids=list(args.get("guids") or []),
-            paths=list(args.get("paths") or []),
-        )
-    elif name == "config_get":
-        result = svc.config_get(args.get("key"))
-    elif name == "device_status":
-        result = svc.device_status()
-    elif name == "device_connect":
-        result = svc.device_connect()
-    elif name == "device_disconnect":
-        result = svc.device_disconnect()
-    elif name == "device_info":
-        result = svc.device_info()
-    elif name == "device_inventory":
-        result = svc.device_inventory(limit=int(args.get("limit") or 200))
-    elif name == "device_delete":
-        result = svc.device_delete(
-            int(args.get("object_id") or 0),
-            confirm=bool(args.get("confirm")),
-        )
-    elif name == "sync_tracks":
-        batch_raw = args.get("batch_size")
-        batch_size = int(batch_raw) if batch_raw is not None else None
-        result = svc.sync_tracks(
-            guids=list(args.get("guids") or []),
-            paths=list(args.get("paths") or []),
-            artist=args.get("artist"),
-            album=args.get("album"),
-            playlist=args.get("playlist"),
-            mode=args.get("mode"),
-            dry_run=bool(args.get("dry_run")),
-            confirm=bool(args.get("confirm")),
-            push_playlist=bool(args.get("push_playlist")),
-            batch_size=batch_size,
-        )
-    elif name == "playlist_push":
-        result = svc.playlist_push(
-            str(args.get("name") or ""),
-            confirm=bool(args.get("confirm")),
-        )
-    else:
+    handler = _handlers().get(name)
+    if handler is None:
         return {
             "content": [{"type": "text", "text": f"Unknown tool: {name}"}],
             "isError": True,
         }
-
+    result = handler(svc, args)
     text = json.dumps(result.to_dict(), indent=2, ensure_ascii=False)
     return {
         "content": [{"type": "text", "text": text}],
