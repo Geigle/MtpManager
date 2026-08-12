@@ -336,13 +336,18 @@ class PlaylistMutationTests(unittest.TestCase):
             self.assertTrue(shown.ok)
             self.assertEqual(shown.data["track_count"], 2)
 
-            replaced = svc.playlist_replace("Hansi", guids=[g2])
+            gated = svc.playlist_replace("Hansi", guids=[g2], confirm=False)
+            self.assertFalse(gated.ok)
+            self.assertEqual(gated.exit_code, int(ExitCode.CONFIRM_REQUIRED))
+            self.assertEqual(gated.code, "CONFIRM_REQUIRED")
+
+            replaced = svc.playlist_replace("Hansi", guids=[g2], confirm=True)
             self.assertTrue(replaced.ok)
             self.assertEqual(replaced.data["track_count"], 1)
             self.assertEqual(replaced.data["paths"], [str(f2)])
             self.assertEqual(replaced.data["replaced_with"], 1)
 
-            cleared = svc.playlist_replace("Hansi")
+            cleared = svc.playlist_replace("Hansi", confirm=True)
             self.assertTrue(cleared.ok)
             self.assertEqual(cleared.data["track_count"], 0)
 
@@ -397,6 +402,24 @@ class PlaylistMutationTests(unittest.TestCase):
             self.assertEqual(payload2["data"]["added"], 1)
             self.assertEqual(payload2["data"]["track_count"], 1)
 
+            buf_gate = io.StringIO()
+            with redirect_stdout(buf_gate):
+                code_gate = main(
+                    [
+                        "--data-dir",
+                        str(data),
+                        "playlist",
+                        "replace",
+                        "Road Mix",
+                        "--guids",
+                        g,
+                    ]
+                )
+            self.assertEqual(code_gate, int(ExitCode.CONFIRM_REQUIRED))
+            payload_gate = json.loads(buf_gate.getvalue())
+            self.assertFalse(payload_gate["ok"])
+            self.assertEqual(payload_gate["code"], "CONFIRM_REQUIRED")
+
             buf3 = io.StringIO()
             with redirect_stdout(buf3):
                 code3 = main(
@@ -408,12 +431,184 @@ class PlaylistMutationTests(unittest.TestCase):
                         "Road Mix",
                         "--guids",
                         g,
+                        "--confirm",
                     ]
                 )
             self.assertEqual(code3, 0)
             payload3 = json.loads(buf3.getvalue())
             self.assertTrue(payload3["ok"])
             self.assertEqual(payload3["data"]["track_count"], 1)
+
+
+class AgentSurfaceParityTests(unittest.TestCase):
+    """Catalog must match MCP dispatch; dev experiments stay off agent surfaces."""
+
+    def test_catalog_matches_mcp_handlers(self) -> None:
+        from mtpmanager.headless.tools import (
+            DEV_ONLY_TOOL_NAMES,
+            catalog_tool_names,
+        )
+        from mtpmanager.mcp_server import implemented_mcp_tool_names
+
+        catalog = catalog_tool_names()
+        mcp = implemented_mcp_tool_names()
+        self.assertEqual(
+            catalog,
+            mcp,
+            msg=(
+                f"catalog-only={sorted(catalog - mcp)!r} "
+                f"mcp-only={sorted(mcp - catalog)!r}"
+            ),
+        )
+        self.assertTrue(catalog.isdisjoint(DEV_ONLY_TOOL_NAMES))
+
+    def test_catalog_cli_paths_are_registered(self) -> None:
+        from mtpmanager.cli.main import build_parser
+        from mtpmanager.headless.tools import TOOL_CATALOG
+
+        parser = build_parser()
+        for tool in TOOL_CATALOG:
+            cli = list(tool.get("cli") or [])
+            self.assertGreaterEqual(
+                len(cli),
+                1,
+                msg=f"{tool['name']} missing cli path",
+            )
+            # sync is a top-level group with no sub-action.
+            if cli == ["sync"]:
+                args = parser.parse_args(["sync", "--dry-run"])
+                self.assertEqual(args.group, "sync")
+                continue
+            if len(cli) == 1:
+                args = parser.parse_args(cli)
+                self.assertEqual(args.group, cli[0])
+                continue
+            group, action = cli[0], cli[1]
+            argv = [group, action]
+            # Satisfy required positionals / flags so parse succeeds.
+            if group == "library" and action == "search":
+                argv.append("q")
+            elif group == "library" and action == "add-root":
+                argv.append("/tmp")
+            elif group == "library" and action == "remove-root":
+                argv.extend(["/tmp", "--confirm"])
+            elif group == "library" and action == "set-roots":
+                argv.append("--confirm")
+            elif group == "playlist" and action in (
+                "show",
+                "create",
+                "add",
+                "replace",
+                "push",
+                "delete",
+                "remove",
+                "move",
+                "shuffle",
+            ):
+                argv.append("Name")
+            elif group == "playlist" and action == "rename":
+                argv.extend(["Old", "New"])
+            elif group == "config" and action == "patch":
+                argv.append("{}")
+            elif group == "device" and action == "delete":
+                argv.extend(["1", "--confirm"])
+            elif group == "device" and action in ("pull", "enrich-tags"):
+                argv.extend(["1", "--confirm"])
+            elif group == "device" and action == "send-video":
+                argv.extend(["/tmp/x.avi", "--dry-run"])
+            elif group == "device" and action == "shrink":
+                argv.extend(["--artist", "X", "--dry-run"])
+            elif group == "device" and action == "delete-all":
+                argv.extend(
+                    ["--confirm", "--confirm-phrase", "DELETE ALL TRACKS"]
+                )
+            elif group == "device" and action == "create-folder":
+                argv.extend(["Folder", "--confirm"])
+            elif group == "device" and action == "delete-bulk":
+                argv.extend(["--object-id", "1", "--dry-run"])
+            elif group == "retail" and action == "package":
+                argv.extend(["/tmp/export", "/tmp/out.zip", "--confirm"])
+            elif group == "retail" and action == "restore":
+                argv.extend(["/tmp/pkg.zip", "--dry-run"])
+            elif group == "device-playlist" and action in (
+                "show",
+                "update",
+                "shuffle",
+                "recreate-host",
+            ):
+                argv.append("Name")
+            elif group == "device-playlist" and action in (
+                "update",
+                "shuffle",
+                "recreate-host",
+            ):
+                argv.append("--confirm")
+            elif group == "podcast" and action == "show":
+                argv.extend(["--id", "1"])
+            elif group == "podcast" and action in (
+                "episodes",
+                "refresh",
+                "unsubscribe",
+            ):
+                argv.append("1")
+            elif group == "podcast" and action == "unsubscribe":
+                argv.append("--confirm")
+            elif group == "podcast" and action == "subscribe":
+                argv.append("https://example.com/feed")
+            elif group == "podcast" and action == "download":
+                argv.append("1")
+            elif group == "podcast" and action == "day-add":
+                argv.extend(["--episode-id", "1"])
+            elif group == "podcast" and action == "day-remove":
+                argv.append("a" * 32)
+            elif group == "podcast" and action == "sync-pending":
+                argv.append("--dry-run")
+            elif group == "sync-job" and action == "clear":
+                argv.append("--confirm")
+            elif group == "sync-job" and action == "resume":
+                argv.append("--dry-run")
+            if group == "playlist" and action in (
+                "replace",
+                "push",
+                "delete",
+                "shuffle",
+            ):
+                argv.append("--confirm")
+            if group == "podcast" and action == "unsubscribe":
+                if "--confirm" not in argv:
+                    argv.append("--confirm")
+            if group == "device-playlist" and action in (
+                "update",
+                "shuffle",
+                "recreate-host",
+            ):
+                if "--confirm" not in argv:
+                    argv.append("--confirm")
+            args = parser.parse_args(argv)
+            self.assertEqual(args.group, group)
+            self.assertEqual(getattr(args, "action", None), action)
+
+    def test_art_experiment_not_on_cli(self) -> None:
+        from mtpmanager.cli.main import build_parser
+
+        parser = build_parser()
+        with self.assertRaises(SystemExit) as ctx:
+            parser.parse_args(["device", "art-probe"])
+        self.assertNotEqual(ctx.exception.code, 0)
+        with self.assertRaises(SystemExit) as ctx2:
+            parser.parse_args(
+                ["device", "art-experiment", "--path", "/tmp/x", "--confirm"]
+            )
+        self.assertNotEqual(ctx2.exception.code, 0)
+
+    def test_agent_tools_omits_dev_art(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            svc = HeadlessService(data_dir=Path(tmp))
+            tools = svc.agent_tools()
+            self.assertTrue(tools.ok)
+            names = {t["name"] for t in tools.data["tools"]}
+            self.assertNotIn("device_art_probe", names)
+            self.assertNotIn("device_art_experiment", names)
 
 
 class CliMainTests(unittest.TestCase):
@@ -498,6 +693,421 @@ class CliMainTests(unittest.TestCase):
             self.assertEqual(
                 payload["data"]["batch_size"], DEFAULT_PLAYLIST_BATCH_SIZE
             )
+
+
+class MilestoneDPhase3Tests(unittest.TestCase):
+    def test_experimental_gates_and_delete_all_phrase(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp)
+            svc = HeadlessService(data_dir=data)
+            # experimental off by default
+            r = svc.retail_package("/tmp/a", "/tmp/b.zip", confirm=True)
+            self.assertFalse(r.ok)
+            self.assertEqual(r.exit_code, int(ExitCode.USAGE))
+            svc.config_patch({"enable_experimental_tools": True})
+            # still needs confirm for package when paths bad - after experimental
+            r2 = svc.retail_package("/nope", "/tmp/b.zip", confirm=False)
+            self.assertEqual(r2.exit_code, int(ExitCode.CONFIRM_REQUIRED))
+            r3 = svc.device_delete_all_tracks(confirm=True, confirm_phrase="nope")
+            self.assertEqual(r3.exit_code, int(ExitCode.CONFIRM_REQUIRED))
+            r4 = svc.device_create_folder("X", confirm=False)
+            self.assertEqual(r4.exit_code, int(ExitCode.CONFIRM_REQUIRED))
+
+    def test_bulk_delete_dry_run_by_object_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            svc = HeadlessService(data_dir=Path(tmp))
+            plan = svc.device_delete_bulk(object_ids=[10, 20, 10], dry_run=True)
+            self.assertTrue(plan.ok)
+            self.assertEqual(plan.data["count"], 2)
+            gate = svc.device_delete_bulk(object_ids=[10], confirm=False)
+            self.assertEqual(gate.exit_code, int(ExitCode.CONFIRM_REQUIRED))
+
+    def test_shrink_dry_run_missing_serial(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp)
+            root = data / "Music"
+            root.mkdir()
+            f = root / "a.mp3"
+            f.write_bytes(b"x")
+            g = new_track_guid()
+            save_library_index(
+                Library(tracks=[_track(str(f), guid=g)], root_paths=[str(root)]),
+                path=data / "library_index.db",
+            )
+            svc = HeadlessService(data_dir=data)
+            r = svc.device_shrink(guids=[g], dry_run=True)
+            # no serial in empty device index
+            self.assertFalse(r.ok)
+            self.assertIn("serial", (r.message or "").lower())
+
+    def test_device_playlist_update_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            svc = HeadlessService(data_dir=Path(tmp))
+            r = svc.device_playlist_update("Rock", confirm=False)
+            self.assertEqual(r.exit_code, int(ExitCode.CONFIRM_REQUIRED))
+
+
+class MilestoneCPhase2Tests(unittest.TestCase):
+    def test_podcast_list_and_subscribe_mocked(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp)
+            svc = HeadlessService(data_dir=data)
+            empty = svc.podcast_list()
+            self.assertTrue(empty.ok)
+            self.assertEqual(empty.data["count"], 0)
+
+            from mtpmanager.infra.podcast_index import (
+                create_or_update_podcast,
+                upsert_episodes,
+            )
+
+            show = create_or_update_podcast(
+                feed_url="https://example.com/feed.xml",
+                title="Test Show",
+                author="Host",
+                path=data / "library_index.db",
+            )
+            upsert_episodes(
+                show.id,
+                [
+                    {
+                        "feed_guid": "ep1",
+                        "title": "Episode One",
+                        "pub_date": "2026-08-01",
+                        "enclosure_url": "https://example.com/e1.mp3",
+                        "enclosure_type": "audio/mpeg",
+                        "enclosure_bytes": 100,
+                        "duration_sec": 60,
+                    }
+                ],
+                path=data / "library_index.db",
+            )
+            listed = svc.podcast_list()
+            self.assertEqual(listed.data["count"], 1)
+            eps = svc.podcast_episodes(show.id, limit=10)
+            self.assertTrue(eps.ok)
+            self.assertEqual(eps.data["returned"], 1)
+            gated = svc.podcast_unsubscribe(show.id, confirm=False)
+            self.assertEqual(gated.exit_code, int(ExitCode.CONFIRM_REQUIRED))
+            unsub = svc.podcast_unsubscribe(show.id, confirm=True)
+            self.assertTrue(unsub.ok)
+
+    def test_enrich_and_pull_gates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            svc = HeadlessService(data_dir=Path(tmp))
+            g1 = svc.device_enrich_tags([1], confirm=False)
+            self.assertEqual(g1.exit_code, int(ExitCode.CONFIRM_REQUIRED))
+            self.assertIn("R1", g1.message + str(g1.data))
+            g2 = svc.device_pull([1], confirm=False)
+            self.assertEqual(g2.exit_code, int(ExitCode.CONFIRM_REQUIRED))
+            too_many = svc.device_enrich_tags(list(range(1, 30)), confirm=True)
+            self.assertFalse(too_many.ok)
+            self.assertEqual(too_many.exit_code, int(ExitCode.USAGE))
+
+    def test_send_video_dry_run_and_sync_job(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp)
+            vid = data / "clip.avi"
+            vid.write_bytes(b"\x00" * 64)
+            svc = HeadlessService(data_dir=data)
+            plan = svc.device_send_video(str(vid), dry_run=True)
+            self.assertTrue(plan.ok)
+            self.assertEqual(plan.data["parent_id"], 120)
+            st = svc.sync_job_status()
+            self.assertTrue(st.ok)
+            self.assertFalse(st.data["exists"])
+            # Create a resumable job via infra
+            from mtpmanager.infra.sync_job import (
+                new_sync_job,
+                save_sync_job,
+                sync_job_path,
+            )
+
+            job = new_sync_job(
+                paths=["/no/such/a.mp3", "/no/such/b.mp3"],
+                label="test",
+                mode="experimental",
+            )
+            job.status = "failed"
+            job.next_index = 0
+            save_sync_job(job, path=sync_job_path(data_dir=data))
+            st2 = svc.sync_job_status()
+            self.assertTrue(st2.data["resumable"])
+            # Resume dry-run will fail resolve paths — still exercises gate
+            res = svc.sync_resume(dry_run=True)
+            # Unknown paths → NOT_FOUND or USAGE from resolve
+            self.assertFalse(res.ok)
+
+    def test_device_pull_mocked(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp)
+            dest = data / "out"
+            dest.mkdir()
+            svc = HeadlessService(data_dir=data)
+            mock_dev = MagicMock()
+
+            def _get_file(_oid, path):
+                Path(path).write_bytes(b"audio")
+
+            mock_dev.get_file_to_file = _get_file
+            mock_dev.get_track_metadata = MagicMock(side_effect=Exception("skip"))
+            svc._device = mock_dev
+            svc._connected = True
+            svc._session_lock.try_acquire("cli-test")
+            with patch(
+                "mtpmanager.headless.phase2.retrieve_track",
+                side_effect=lambda *a, **k: type(
+                    "R",
+                    (),
+                    {
+                        "path": str(dest / "x.mp3"),
+                        "tags_written": False,
+                    },
+                )(),
+            ):
+                r = svc.device_pull([42], dest=str(dest), confirm=True)
+            self.assertTrue(r.ok, msg=r.message)
+            self.assertEqual(r.data["succeeded"], 1)
+            svc._session_lock.release()
+
+
+class MilestoneBLibraryConfigTests(unittest.TestCase):
+    def test_scan_add_root_and_search(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp)
+            root = data / "Music"
+            root.mkdir()
+            f = root / "song.mp3"
+            f.write_bytes(b"ID3")
+            svc = HeadlessService(data_dir=data)
+            added = svc.library_add_root(str(root), rescan=True)
+            self.assertTrue(added.ok, msg=added.message)
+            self.assertGreaterEqual(added.data["track_count"], 1)
+            search = svc.library_search("song")
+            self.assertTrue(search.ok)
+            self.assertGreaterEqual(search.data["total_matched"], 1)
+            roots = svc.library_list_roots()
+            self.assertEqual(roots.data["roots"], [str(root)])
+
+    def test_remove_last_root_requires_confirm(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp)
+            root = data / "Music"
+            root.mkdir()
+            (root / "a.mp3").write_bytes(b"x")
+            svc = HeadlessService(data_dir=data)
+            self.assertTrue(svc.library_add_root(str(root)).ok)
+            gated = svc.library_remove_root(str(root), confirm=False)
+            self.assertFalse(gated.ok)
+            self.assertEqual(gated.exit_code, int(ExitCode.CONFIRM_REQUIRED))
+            cleared = svc.library_remove_root(str(root), confirm=True, rescan=False)
+            self.assertTrue(cleared.ok)
+            self.assertEqual(cleared.data["roots"], [])
+
+    def test_config_patch_allowlist_and_roundtrip(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp)
+            svc = HeadlessService(data_dir=data)
+            bad = svc.config_patch({"not_a_key": True})
+            self.assertFalse(bad.ok)
+            self.assertEqual(bad.exit_code, int(ExitCode.USAGE))
+            patched = svc.config_patch(
+                {"stable_mode": True, "sync_album_art": False, "send_format": "mp3"}
+            )
+            self.assertTrue(patched.ok, msg=patched.message)
+            self.assertEqual(patched.data["mode"], "stable")
+            self.assertIn("stable_mode", patched.data["changed"])
+            got = svc.config_get("stable_mode")
+            self.assertTrue(got.ok)
+            self.assertTrue(got.data["value"])
+            # Round-trip off
+            off = svc.config_patch({"stable_mode": False})
+            self.assertTrue(off.ok)
+            self.assertEqual(off.data["mode"], "experimental")
+
+
+class MilestoneBInventoryPlaylistSyncTests(unittest.TestCase):
+    def test_inventory_pagination_and_filters(self) -> None:
+        from mtpmanager.domain.models import FileEntry
+        from mtpmanager.infra.device_index import replace_device_listing
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp)
+            index = data / "library_index.db"
+            serial = "TESTSERIAL001"
+            g1 = new_track_guid()
+            g2 = new_track_guid()
+            files = [
+                FileEntry(
+                    item_id=1,
+                    name=f"{g1}.mp3",
+                    parent_id=100,
+                    storage_id=1,
+                    filesize=10,
+                    filetype=1,
+                ),
+                FileEntry(
+                    item_id=2,
+                    name=f"{g2}.mp3",
+                    parent_id=100,
+                    storage_id=1,
+                    filesize=20,
+                    filetype=1,
+                ),
+                FileEntry(
+                    item_id=3,
+                    name="folder",
+                    parent_id=0,
+                    storage_id=1,
+                    filesize=0,
+                    filetype=2,
+                ),
+            ]
+            replace_device_listing(serial, files, path=index, source="list")
+            svc = HeadlessService(data_dir=data)
+            page = svc.device_inventory(limit=1, offset=0, serial=serial)
+            self.assertTrue(page.ok)
+            self.assertEqual(page.data["total"], 3)
+            self.assertEqual(page.data["returned"], 1)
+            page2 = svc.device_inventory(limit=1, offset=1, serial=serial)
+            self.assertEqual(page2.data["returned"], 1)
+            self.assertNotEqual(
+                page.data["files"][0]["item_id"], page2.data["files"][0]["item_id"]
+            )
+            by_parent = svc.device_inventory(parent_id=100, serial=serial)
+            self.assertEqual(by_parent.data["total"], 2)
+            by_guid = svc.device_inventory(guid=g1, serial=serial)
+            self.assertEqual(by_guid.data["total"], 1)
+            self.assertEqual(by_guid.data["files"][0]["name"], f"{g1}.mp3")
+            known = svc.device_list_known()
+            self.assertTrue(known.ok)
+            self.assertGreaterEqual(known.data["count"], 1)
+
+    def test_device_refresh_index_mocked(self) -> None:
+        from mtpmanager.domain.models import FileEntry
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp)
+            svc = HeadlessService(data_dir=data)
+            not_conn = svc.device_refresh_index()
+            self.assertFalse(not_conn.ok)
+            self.assertEqual(not_conn.code, "NOT_CONNECTED")
+
+            mock_dev = MagicMock()
+            listed = [
+                FileEntry(
+                    item_id=9,
+                    name=f"{new_track_guid()}.mp3",
+                    parent_id=100,
+                    storage_id=1,
+                    filesize=1,
+                    filetype=1,
+                )
+            ]
+            svc._device = mock_dev
+            svc._connected = True
+            svc._device_serial = "MOCKSERIAL"
+            svc._session_lock.try_acquire("cli-test")
+            with patch(
+                "mtpmanager.headless.service.device_list_files",
+                return_value=listed,
+            ):
+                result = svc.device_refresh_index()
+            self.assertTrue(result.ok, msg=result.message)
+            self.assertEqual(result.data["written"], 1)
+            inv = svc.device_inventory(serial="MOCKSERIAL")
+            self.assertEqual(inv.data["total"], 1)
+            svc._session_lock.release()
+
+    def test_playlist_lifecycle_delete_rename_remove_move_shuffle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp)
+            root = data / "Music"
+            root.mkdir()
+            paths = []
+            guids = []
+            tracks = []
+            for i, title in enumerate(["A", "B", "C"], start=1):
+                f = root / f"{title}.mp3"
+                f.write_bytes(b"x")
+                g = new_track_guid()
+                t = _track(str(f), guid=g, title=title, artist=f"Art{i}")
+                paths.append(str(f))
+                guids.append(g)
+                tracks.append(t)
+            save_library_index(
+                Library(tracks=tracks, root_paths=[str(root)]),
+                path=data / "library_index.db",
+            )
+            svc = HeadlessService(data_dir=data)
+            self.assertTrue(svc.playlist_create("Mix").ok)
+            self.assertTrue(
+                svc.playlist_add("Mix", guids=guids).ok
+            )
+            gated = svc.playlist_delete("Mix", confirm=False)
+            self.assertEqual(gated.exit_code, int(ExitCode.CONFIRM_REQUIRED))
+
+            ren = svc.playlist_rename("Mix", "Road")
+            self.assertTrue(ren.ok)
+            self.assertEqual(ren.data["name"], "Road")
+
+            rem = svc.playlist_remove("Road", guids=[guids[0]])
+            self.assertTrue(rem.ok)
+            self.assertEqual(rem.data["track_count"], 2)
+
+            shown = svc.playlist_show("Road")
+            order_before = list(shown.data["paths"])
+            moved = svc.playlist_move("Road", paths=[order_before[-1]], delta=-1)
+            self.assertTrue(moved.ok)
+            after_move = svc.playlist_show("Road").data["paths"]
+            self.assertEqual(len(after_move), 2)
+
+            shuf_gate = svc.playlist_shuffle("Road", confirm=False)
+            self.assertEqual(shuf_gate.exit_code, int(ExitCode.CONFIRM_REQUIRED))
+            shuf = svc.playlist_shuffle(
+                "Road", algorithm="artist", confirm=True, seed_guid=guids[1]
+            )
+            self.assertTrue(shuf.ok)
+            self.assertEqual(shuf.data["algorithm"], "artist")
+
+            deleted = svc.playlist_delete("Road", confirm=True)
+            self.assertTrue(deleted.ok)
+            miss = svc.playlist_show("Road")
+            self.assertFalse(miss.ok)
+
+    def test_sync_entire_library_and_path_prefix_dry_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp)
+            root = data / "Music"
+            sub = root / "Band"
+            sub.mkdir(parents=True)
+            f1 = sub / "a.mp3"
+            f2 = root / "other.mp3"
+            f1.write_bytes(b"a")
+            f2.write_bytes(b"b")
+            g1 = new_track_guid()
+            g2 = new_track_guid()
+            save_library_index(
+                Library(
+                    tracks=[
+                        _track(str(f1), guid=g1, title="A"),
+                        _track(str(f2), guid=g2, title="B"),
+                    ],
+                    root_paths=[str(root)],
+                ),
+                path=data / "library_index.db",
+            )
+            svc = HeadlessService(data_dir=data)
+            entire = svc.sync_tracks(entire_library=True, dry_run=True)
+            self.assertTrue(entire.ok)
+            self.assertEqual(entire.data["track_count"], 2)
+            self.assertEqual(
+                entire.data["batch_size"], DEFAULT_PLAYLIST_BATCH_SIZE
+            )
+            prefix = svc.sync_tracks(path_prefix=str(sub), dry_run=True)
+            self.assertTrue(prefix.ok)
+            self.assertEqual(prefix.data["track_count"], 1)
+            self.assertEqual(prefix.data["tracks"][0]["guid"], g1)
 
 
 if __name__ == "__main__":

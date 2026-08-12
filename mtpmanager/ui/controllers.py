@@ -480,7 +480,9 @@ class AppController:
             on_episode_select=self.on_podcast_episode_select,
             on_show_sync=self.on_podcast_sync_latest_selected,
             on_show_encode=self.on_podcast_show_encode,
+            on_show_special_sync=self.action_special_sync_podcast_show,
             on_episode_sync=self.on_podcast_sync_episodes_selected,
+            on_episode_special_sync=self.action_special_sync_podcast_episodes,
             on_episode_play=self.on_podcast_play_episodes_selected,
             on_episode_reveal_download=self.on_podcast_reveal_download,
             on_episode_add_to_day_playlist=self.on_podcast_add_to_day_playlist,
@@ -547,6 +549,8 @@ class AppController:
             on_sync_artist_group=self.action_sync_artist_group,
             on_sync_album_group=self.action_sync_album_group,
             on_sync_selected=self.action_sync_selected,
+            on_special_sync=self.action_special_sync_selection,
+            on_special_sync_group=self.action_special_sync_group,
             on_play_track=self.action_play_selected_tracks,
             on_play_artist_group=self.action_play_artist_group,
             on_play_album_group=self.action_play_album_group,
@@ -3602,7 +3606,7 @@ class AppController:
             pass
 
         # Play This Track / Play These Tracks (audio only).
-        # Index 6: after sync block + separator (label changes; do not key by label).
+        # Indices shift when experimental Special Sync is present.
         try:
             from mtpmanager.ui.window import (
                 CTX_ADD_TO_PLAYLIST,
@@ -3611,9 +3615,12 @@ class AppController:
                 CTX_PLAY_TRACKS,
             )
 
+            exp = bool(self.win.experimental_tools_enabled())
+            play_idx = 7 if exp else 6
+            add_idx = 8 if exp else 7
             play_label = CTX_PLAY_TRACKS if n_audio > 1 else CTX_PLAY_TRACK
             self.win.menu_track_ctx.entryconfig(
-                6,
+                play_idx,
                 label=play_label,
                 state=NORMAL if n_audio >= 1 else DISABLED,
             )
@@ -3623,7 +3630,7 @@ class AppController:
                 else CTX_ADD_TO_PLAYLIST
             )
             self.win.menu_track_ctx.entryconfig(
-                7,
+                add_idx,
                 label=add_label,
                 state=NORMAL if n_audio >= 1 else DISABLED,
             )
@@ -3640,6 +3647,10 @@ class AppController:
         else:
             bulk_add_label = "Add to Playlist…"
         add_state = NORMAL if n_audio >= 1 else DISABLED
+        exp = bool(self.win.experimental_tools_enabled())
+        # Group menus: 0 Sync, [1 Special Sync], sep, Play, Add…
+        play_g = 3 if exp else 2
+        add_g = 4 if exp else 3
 
         if seed is None:
             return
@@ -3649,9 +3660,8 @@ class AppController:
                 0, label=f"Sync all from {artist}"
             )
             try:
-                # Index 2: Play All from Artist (label changes with artist name).
                 self.win.menu_artist_ctx.entryconfig(
-                    2, label=f"Play All from {artist}"
+                    play_g, label=f"Play All from {artist}"
                 )
                 artist_add = (
                     bulk_add_label
@@ -3659,7 +3669,7 @@ class AppController:
                     else f"Add All from {artist} to Playlist…"
                 )
                 self.win.menu_artist_ctx.entryconfig(
-                    3, label=artist_add, state=add_state
+                    add_g, label=artist_add, state=add_state
                 )
             except Exception:
                 pass
@@ -3671,9 +3681,8 @@ class AppController:
                 0, label=f"Sync folder {folder}"
             )
             try:
-                # Index 2: Play Album / folder (label changes).
                 self.win.menu_album_ctx.entryconfig(
-                    2, label=f"Play folder {folder}"
+                    play_g, label=f"Play folder {folder}"
                 )
                 folder_add = (
                     bulk_add_label
@@ -3681,7 +3690,7 @@ class AppController:
                     else f"Add folder {folder} to Playlist…"
                 )
                 self.win.menu_album_ctx.entryconfig(
-                    3, label=folder_add, state=add_state
+                    add_g, label=folder_add, state=add_state
                 )
             except Exception:
                 pass
@@ -3692,7 +3701,7 @@ class AppController:
             )
             try:
                 self.win.menu_album_ctx.entryconfig(
-                    2, label=f"Play Album {album}"
+                    play_g, label=f"Play Album {album}"
                 )
                 album_add = (
                     bulk_add_label
@@ -3700,7 +3709,7 @@ class AppController:
                     else f"Add Album {album} to Playlist…"
                 )
                 self.win.menu_album_ctx.entryconfig(
-                    3, label=album_add, state=add_state
+                    add_g, label=album_add, state=add_state
                 )
             except Exception:
                 pass
@@ -10436,8 +10445,14 @@ class AppController:
         label: str = "",
         resume_job: SyncJobState | None = None,
         quiet: bool = False,
+        special=None,
     ) -> bool:
-        """Start or extend a batch transfer. Returns True if work was accepted."""
+        """Start or extend a batch transfer. Returns True if work was accepted.
+
+        *special*: optional :class:`~mtpmanager.domain.special_sync.SpecialSyncOptions`
+        for experimental Special Sync (fixed encode/meta/parent/GUID).
+        Mid-job enqueue ignores *special* (queue only accepts tracks).
+        """
         if resume_job is None:
             videos = [t for t in tracks if is_video_track(t)]
             audio = self._audio_tracks_only(list(tracks))
@@ -10461,8 +10476,10 @@ class AppController:
             return False
 
         # Mid-job: append to the live queue instead of refusing.
+        # Special Sync starts a dedicated job (no mid-queue special options).
         if (
             resume_job is None
+            and special is None
             and self._transfer_busy
             and self._transfer_queue is not None
             and self._active_sync_job is not None
@@ -10475,6 +10492,15 @@ class AppController:
                 )
             return n > 0
 
+        if special is not None and self._transfer_busy:
+            if not quiet:
+                messagebox.showwarning(
+                    "Special Sync",
+                    "Wait for the current transfer to finish before starting "
+                    "a Special Sync job.",
+                )
+            return False
+
         if not self._begin_transfer_job(quiet=quiet):
             return False
 
@@ -10482,7 +10508,11 @@ class AppController:
         transcoder = self.transcoder
         device_formats = self._device_audio_formats()
         encode_settings = self._encode_settings()
-        fmt = encode_settings.normalized_format()
+        if special is not None and getattr(special, "encode", None) is not None:
+            encode_settings = special.encode
+            fmt = encode_settings.normalized_format()
+        else:
+            fmt = encode_settings.normalized_format()
         ab_enc = (
             self._config.resolved_audiobook_audio_encode()
             if self._config.uses_audiobook_encode_override()
@@ -10513,10 +10543,12 @@ class AppController:
         self.win.set_resume_sync_enabled(False)
         self._mark_batch_queued(batch)
         logger.info(
-            "Sync job start: %s encode=%s audiobook_encode=%s (queue=%d)",
+            "Sync job start: %s encode=%s audiobook_encode=%s special=%s "
+            "(queue=%d)",
             job.summary_line(),
             encode_settings.summary_line(),
             ab_enc.summary_line() if ab_enc is not None else "global",
+            special is not None,
             track_queue.total(),
         )
 
@@ -10544,7 +10576,10 @@ class AppController:
                 device_guid_stems=stems,
                 on_after_send=self._on_after_send,
                 encode_settings=encode_settings,
-                resolve_encode_settings=self._encode_settings_for_track,
+                resolve_encode_settings=(
+                    None if special is not None else self._encode_settings_for_track
+                ),
+                special=special,
             )
 
         def on_done(succeeded: int) -> None:
@@ -11058,6 +11093,425 @@ class AppController:
             if "group_directory" in tags:
                 kind = "directory"
         self._sync_from_seed(seed, kind=kind)
+
+    def action_special_sync_selection(self) -> None:
+        """Library track context: Special Sync for selection / this track."""
+        if not self._experimental_tools_on():
+            return
+        tracks = self._audio_tracks_only(
+            self._tracks_from_selected_iids(quiet=True)
+        )
+        if not tracks:
+            track = self._selected_track()
+            if track is not None and not is_video_track(track):
+                tracks = [track]
+        self._run_special_sync(tracks, label="Special Sync", kind="special")
+
+    def action_special_sync_group(self) -> None:
+        """Artist/album group header: Special Sync all tracks in the group."""
+        if not self._experimental_tools_on():
+            return
+        seed = self._context_group_seed
+        iid = self.win.selected_tree_iid()
+        if seed is None:
+            seed = self._group_seed_by_iid.get(iid or "")
+        if seed is None:
+            messagebox.showinfo("Special Sync", "No group selected.")
+            return
+        kind = "album"
+        if iid:
+            try:
+                tags = set(self.win.active_library_tree().item(iid, "tags"))
+            except Exception:
+                tags = set()
+            if "group_artist" in tags:
+                kind = "artist"
+            elif "group_directory" in tags:
+                kind = "directory"
+        if kind == "artist":
+            matches = self.library.filter_by_artist(seed)
+        elif kind == "directory":
+            matches = self.library.filter_by_directory(seed)
+        else:
+            matches = self.library.filter_by_album(seed)
+        tracks = self._audio_tracks_only(list(matches))
+        self._run_special_sync(
+            tracks, label=f"Special Sync ({kind})", kind="special"
+        )
+
+    def action_special_sync_podcast_show(self) -> None:
+        """Podcast show context: Special Sync using Sync Latest episode set."""
+        if not self._experimental_tools_on():
+            return
+        from mtpmanager.app.podcast_ops import episode_as_track
+
+        ids = self._selected_podcast_ids()
+        if not ids and self._selected_podcast_id is not None:
+            ids = [self._selected_podcast_id]
+        if not ids:
+            messagebox.showinfo("Special Sync", "Select a podcast show.")
+            return
+        if not self._require_sync_ready():
+            return
+        stems = self._device_guid_stems_for_skip() or set()
+        tracks: list[Track] = []
+        for pid in ids:
+            ep = pick_latest_not_on_device(pid, stems)
+            if ep is None:
+                continue
+            show = get_podcast(int(pid))
+            if show is None:
+                continue
+            if not ep.local_path or not os.path.isfile(ep.local_path):
+                continue
+            try:
+                tracks.append(
+                    episode_as_track(
+                        ep,
+                        show,
+                        tracknumber_as_date=bool(
+                            self._config.podcast_tracknumber_as_date
+                        ),
+                        title_date_prefix=bool(
+                            self._config.podcast_title_date_prefix
+                        ),
+                    )
+                )
+            except Exception:
+                logger.debug(
+                    "special sync podcast track build failed", exc_info=True
+                )
+        if not tracks:
+            messagebox.showinfo(
+                "Special Sync",
+                "No local episode files for Sync Latest on the selected "
+                "show(s).\n\nDownload or run Sync Latest first so a cache "
+                "file exists, or use Special Sync on specific episodes.",
+            )
+            return
+        self._run_special_sync(
+            tracks,
+            label="Special Sync (podcast show)",
+            kind="special_podcast",
+            default_parent_id=self._podcast_folder_id(),
+            seed_encode=self._podcast_encode_for_tracks(tracks),
+        )
+
+    def action_special_sync_podcast_episodes(self) -> None:
+        """Podcast episode context: Special Sync selected downloaded episodes."""
+        if not self._experimental_tools_on():
+            return
+        from mtpmanager.app.podcast_ops import episode_as_track
+
+        eids = self._selected_episode_ids()
+        if not eids:
+            messagebox.showinfo("Special Sync", "Select one or more episodes.")
+            return
+        tracks: list[Track] = []
+        for eid in eids:
+            ep = get_episode(eid)
+            if ep is None:
+                continue
+            show = get_podcast(int(ep.podcast_id))
+            if show is None:
+                continue
+            if not ep.local_path or not os.path.isfile(ep.local_path):
+                continue
+            try:
+                tracks.append(
+                    episode_as_track(
+                        ep,
+                        show,
+                        tracknumber_as_date=bool(
+                            self._config.podcast_tracknumber_as_date
+                        ),
+                        title_date_prefix=bool(
+                            self._config.podcast_title_date_prefix
+                        ),
+                    )
+                )
+            except Exception:
+                logger.debug(
+                    "special sync episode build failed", exc_info=True
+                )
+        if not tracks:
+            messagebox.showinfo(
+                "Special Sync",
+                "No local files for the selected episodes.\n\n"
+                "Download or Sync them first.",
+            )
+            return
+        self._run_special_sync(
+            tracks,
+            label="Special Sync (episodes)",
+            kind="special_podcast",
+            default_parent_id=self._podcast_folder_id(),
+            seed_encode=self._podcast_encode_for_tracks(tracks),
+        )
+
+    def _experimental_tools_on(self) -> bool:
+        return bool(
+            getattr(self._config, "enable_experimental_tools", False)
+            or self.win.experimental_tools_enabled()
+        )
+
+    def _podcast_encode_for_tracks(self, tracks: list[Track]):
+        """Best-effort podcast encode seed for the Special Sync dialog."""
+        try:
+            return self._encode_settings_for_track(tracks[0])
+        except Exception:
+            return self._config.resolved_podcast_audio_encode()
+
+    def _folder_choices_for_special_sync(self) -> list[tuple[int, str]]:
+        """Live folder list when connected; else legacy ZEN map."""
+        from mtpmanager.infra.remote_naming import ZEN_VISION_M_FOLDER_IDS
+
+        choices: list[tuple[int, str]] = []
+        try:
+            if (
+                self.win.active_mode() != "stable"
+                and self.device is not None
+                and self.device.is_connected()
+            ):
+                for entry in self.device.list_folders():
+                    fid = int(entry.folder_id)
+                    name = (entry.name or "").strip() or f"Folder {fid}"
+                    choices.append((fid, f"{name} ({fid})"))
+        except Exception:
+            logger.debug("list_folders for Special Sync failed", exc_info=True)
+            choices = []
+        if not choices:
+            choices = [
+                (fid, f"{name} ({fid})")
+                for fid, name in sorted(ZEN_VISION_M_FOLDER_IDS.items())
+            ]
+        return choices
+
+    def _run_special_sync(
+        self,
+        tracks: list[Track],
+        *,
+        label: str,
+        kind: str = "special",
+        default_parent_id: int | None = None,
+        seed_encode=None,
+    ) -> None:
+        """Show Special Sync dialog and start a transfer with overrides."""
+        if not self._experimental_tools_on():
+            return
+        tracks = self._audio_tracks_only(list(tracks or []))
+        tracks = [t for t in tracks if t.path and os.path.isfile(t.path)]
+        if not tracks:
+            messagebox.showinfo(
+                "Special Sync",
+                "No local audio files to send.",
+            )
+            return
+        if not self._require_sync_ready():
+            return
+        if self._transfer_busy:
+            messagebox.showwarning(
+                "Special Sync",
+                "Wait for the current transfer to finish first.",
+            )
+            return
+
+        from mtpmanager.domain.special_sync import SpecialSyncOptions
+        from mtpmanager.ui.dialogs import ask_special_sync
+
+        is_stable = self.win.active_mode() == "stable"
+        parent_default = (
+            default_parent_id
+            if default_parent_id is not None
+            else self._music_folder_id()
+        )
+        if seed_encode is None:
+            # Audiobook tab tracks prefer audiobook encode when configured.
+            seed_encode = self._encode_settings_for_track(tracks[0])
+        allowed = None
+        try:
+            allowed = self._allowed_send_formats()
+        except Exception:
+            allowed = None
+
+        result = ask_special_sync(
+            self.win.root,
+            tracks=tracks,
+            initial_encode=seed_encode,
+            allowed_send_formats=allowed,
+            default_parent_id=parent_default,
+            folder_choices=self._folder_choices_for_special_sync(),
+            allow_create_folders=not is_stable,
+            context_label=label,
+            is_stable_mode=is_stable,
+        )
+        if result is None:
+            return
+        options: SpecialSyncOptions = result.options  # type: ignore[assignment]
+
+        # Resolve folder create (custom once; artist modes via resolver).
+        final_options = options
+        resolve_parent = self._parent_folder_resolver()
+        if options.needs_folder_create():
+            if is_stable:
+                messagebox.showwarning(
+                    "Special Sync",
+                    "Create Folders requires PyMTP mode (not Stable Mode).",
+                )
+                return
+            if not self._require_experimental_connected():
+                return
+            base = int(options.parent_id or self._music_folder_id())
+            if options.folder_mode == "custom":
+                try:
+                    from mtpmanager.app import artist_folders as af
+                    from mtpmanager.infra.remote_naming import sanitize_component
+
+                    name = sanitize_component(
+                        options.custom_folder_name or "folder", 48
+                    )
+                    existing = af.find_child_folder(
+                        self.device, name=name, parent_id=base
+                    )
+                    if existing is not None:
+                        new_id = existing
+                    else:
+                        new_id = int(
+                            self.device.create_folder(name, parent=base)
+                        )
+                    final_options = SpecialSyncOptions(
+                        encode=options.encode,
+                        force_transcode=options.force_transcode,
+                        meta_patch=dict(options.meta_patch),
+                        apply_meta_to_all=options.apply_meta_to_all,
+                        parent_id=new_id,
+                        folder_mode="none",
+                        custom_folder_name="",
+                        use_guid=options.use_guid,
+                        basename_mode=options.basename_mode,
+                        basename_pattern=options.basename_pattern,
+                        custom_basename=options.custom_basename,
+                        skip_if_present=options.skip_if_present,
+                    )
+                except Exception as exc:
+                    messagebox.showerror(
+                        "Special Sync",
+                        f"Could not create folder:\n{exc}",
+                    )
+                    return
+            elif options.folder_mode in ("artist", "artist_album"):
+                from mtpmanager.app import artist_folders as af
+
+                cache: dict[str, int] = {}
+                want_album = options.folder_mode == "artist_album"
+
+                def resolve_parent(meta):  # type: ignore[no-redef]
+                    try:
+                        if want_album:
+                            return af.ensure_album_folder(
+                                self.device,
+                                meta,
+                                music_parent_id=base,
+                                cache=cache,
+                            )
+                        return af.ensure_artist_folder(
+                            self.device,
+                            meta,
+                            music_parent_id=base,
+                            cache=cache,
+                        )
+                    except Exception:
+                        logger.exception("Special Sync folder create failed")
+                        return base
+
+                # Keep base as parent_id for preview; transfer uses resolver.
+                final_options = SpecialSyncOptions(
+                    encode=options.encode,
+                    force_transcode=options.force_transcode,
+                    meta_patch=dict(options.meta_patch),
+                    apply_meta_to_all=options.apply_meta_to_all,
+                    parent_id=base,
+                    folder_mode=options.folder_mode,
+                    custom_folder_name="",
+                    use_guid=options.use_guid,
+                    basename_mode=options.basename_mode,
+                    basename_pattern=options.basename_pattern,
+                    custom_basename=options.custom_basename,
+                    skip_if_present=options.skip_if_present,
+                )
+
+        # Stash resolver for this special job when artist folders needed.
+        self._special_sync_parent_resolver = (
+            resolve_parent
+            if final_options.folder_mode in ("artist", "artist_album")
+            else None
+        )
+        try:
+            self._transfer_many_special(
+                tracks,
+                special=final_options,
+                kind=kind,
+                label=label or f"Special Sync ({len(tracks)} tracks)",
+            )
+        finally:
+            self._special_sync_parent_resolver = None
+
+    def _transfer_many_special(
+        self,
+        tracks: list[Track],
+        *,
+        special,
+        kind: str,
+        label: str,
+    ) -> bool:
+        """Like _transfer_many but always uses *special* and optional parent resolver."""
+        # Temporarily wrap parent resolver if artist folder mode.
+        saved = getattr(self, "_special_sync_parent_resolver", None)
+        if saved is not None:
+            # _transfer_many reads self._parent_folder_resolver(); inject via
+            # a one-shot attribute checked there is heavy — pass by monkeypatch
+            # of the work() closure instead: call transfer path with special
+            # and custom resolve.
+            return self._transfer_many_with_parent(
+                tracks,
+                special=special,
+                kind=kind,
+                label=label,
+                resolve_parent=saved,
+            )
+        return self._transfer_many(
+            tracks,
+            kind=kind,
+            label=label,
+            special=special,
+        )
+
+    def _transfer_many_with_parent(
+        self,
+        tracks: list[Track],
+        *,
+        special,
+        kind: str,
+        label: str,
+        resolve_parent,
+    ) -> bool:
+        """Special Sync path that supplies a custom parent-folder resolver."""
+        # Reuse _transfer_many by temporarily replacing the resolver method.
+        original = self._parent_folder_resolver
+
+        def _override():
+            return resolve_parent
+
+        self._parent_folder_resolver = _override  # type: ignore[method-assign]
+        try:
+            return self._transfer_many(
+                tracks,
+                kind=kind,
+                label=label,
+                special=special,
+            )
+        finally:
+            self._parent_folder_resolver = original  # type: ignore[method-assign]
 
     def action_entire_library(self) -> None:
         if not self._require_sync_ready():

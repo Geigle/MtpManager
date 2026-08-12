@@ -4,8 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
+from mtpmanager.headless.tools_phase2 import PHASE2_TOOLS
+from mtpmanager.headless.tools_phase3 import PHASE3_TOOLS
+
 # Each tool: name, description, host_only, destructive, parameters (JSON-schema-ish).
-TOOL_CATALOG: list[dict[str, Any]] = [
+_BASE_TOOLS: list[dict[str, Any]] = [
     {
         "name": "agent_doctor",
         "cli": ["agent", "doctor"],
@@ -29,6 +32,96 @@ TOOL_CATALOG: list[dict[str, Any]] = [
         "host_only": True,
         "destructive": False,
         "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
+        "name": "library_set_roots",
+        "cli": ["library", "set-roots"],
+        "description": (
+            "Replace library root paths. Empty list clears roots (requires confirm). "
+            "Default rescan=true runs a full scan after updating roots."
+        ),
+        "host_only": True,
+        "destructive": True,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "roots": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Absolute library root directories",
+                },
+                "rescan": {"type": "boolean", "default": True},
+                "confirm": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Required when clearing all roots",
+                },
+            },
+            "required": ["roots"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "library_add_root",
+        "cli": ["library", "add-root"],
+        "description": "Append one library root directory; rescans by default.",
+        "host_only": True,
+        "destructive": False,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "root": {"type": "string", "description": "Absolute directory path"},
+                "rescan": {"type": "boolean", "default": True},
+            },
+            "required": ["root"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "library_remove_root",
+        "cli": ["library", "remove-root"],
+        "description": (
+            "Remove one library root (untracks media under it). "
+            "Removing the last root requires confirm=true."
+        ),
+        "host_only": True,
+        "destructive": True,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "root": {"type": "string"},
+                "rescan": {"type": "boolean", "default": True},
+                "confirm": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Required when removing the last root",
+                },
+            },
+            "required": ["root"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "library_scan",
+        "cli": ["library", "scan"],
+        "description": (
+            "Scan library roots and rewrite the SQLite index (GUID preserve). "
+            "Optional roots override; default uses configured roots. "
+            "Honors durable library exclusions. Blocks until complete."
+        ),
+        "host_only": True,
+        "destructive": False,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "roots": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional explicit roots for this scan only",
+                },
+            },
+            "additionalProperties": False,
+        },
     },
     {
         "name": "library_search",
@@ -146,7 +239,8 @@ TOOL_CATALOG: list[dict[str, Any]] = [
         "cli": ["playlist", "replace"],
         "description": (
             "Replace host playlist membership with the given tracks "
-            "(order preserved). Passing neither guids nor paths clears the playlist."
+            "(order preserved). Passing neither guids nor paths clears the playlist. "
+            "Requires confirm=true."
         ),
         "host_only": True,
         "destructive": True,
@@ -164,6 +258,128 @@ TOOL_CATALOG: list[dict[str, Any]] = [
                     "items": {"type": "string"},
                     "description": "Host filesystem paths, order preserved",
                 },
+                "confirm": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Required true to replace or clear membership",
+                },
+            },
+            "required": ["name"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "playlist_delete",
+        "cli": ["playlist", "delete"],
+        "description": "Delete a host playlist. Requires confirm=true.",
+        "host_only": True,
+        "destructive": True,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "confirm": {"type": "boolean", "default": False},
+            },
+            "required": ["name"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "playlist_rename",
+        "cli": ["playlist", "rename"],
+        "description": "Rename a host playlist.",
+        "host_only": True,
+        "destructive": False,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Current name"},
+                "new_name": {"type": "string", "description": "New unique name"},
+            },
+            "required": ["name", "new_name"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "playlist_remove",
+        "cli": ["playlist", "remove"],
+        "description": "Remove tracks from a host playlist by GUID and/or path.",
+        "host_only": True,
+        "destructive": True,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "guids": {"type": "array", "items": {"type": "string"}},
+                "paths": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["name"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "playlist_move",
+        "cli": ["playlist", "move"],
+        "description": (
+            "Move tracks within a host playlist. delta=-1 moves up one slot; "
+            "delta=+1 moves down. Host M3U only."
+        ),
+        "host_only": True,
+        "destructive": False,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "guids": {"type": "array", "items": {"type": "string"}},
+                "paths": {"type": "array", "items": {"type": "string"}},
+                "delta": {
+                    "type": "integer",
+                    "default": -1,
+                    "description": "Negative=up, positive=down",
+                },
+            },
+            "required": ["name"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "playlist_shuffle",
+        "cli": ["playlist", "shuffle"],
+        "description": (
+            "Shuffle host playlist order in place. algorithm=artist (merge) or "
+            "spotify. Requires confirm=true. Optional seed_guid for deterministic RNG."
+        ),
+        "host_only": True,
+        "destructive": True,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "algorithm": {
+                    "type": "string",
+                    "enum": ["artist", "merge", "spotify"],
+                    "default": "artist",
+                },
+                "seed_guid": {"type": "string"},
+                "confirm": {"type": "boolean", "default": False},
+            },
+            "required": ["name"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "playlist_push",
+        "cli": ["playlist", "push"],
+        "description": (
+            "Push a host playlist to the device (GUID→item_id). Requires confirm=true."
+        ),
+        "host_only": False,
+        "destructive": True,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "confirm": {"type": "boolean", "default": False},
             },
             "required": ["name"],
             "additionalProperties": False,
@@ -187,9 +403,43 @@ TOOL_CATALOG: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "config_patch",
+        "cli": ["config", "patch"],
+        "description": (
+            "Patch allowlisted config keys and save config.json. "
+            "Unknown keys fail. stable_mode=true selects mtp-sendtr for sync "
+            "(GUI Stable Mode parity). Prefer patch over full file replace."
+        ),
+        "host_only": True,
+        "destructive": True,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "updates": {
+                    "type": "object",
+                    "description": (
+                        "Allowlisted keys only: stable_mode, sync_album_art, "
+                        "send_format, audio_encode, enable_experimental_tools, "
+                        "podcast_*, folder layout flags, …"
+                    ),
+                },
+            },
+            "required": ["updates"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "device_status",
         "cli": ["device", "status"],
         "description": "Cross-process lock state and whether this process holds a session.",
+        "host_only": True,
+        "destructive": False,
+        "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
+        "name": "device_list_known",
+        "cli": ["device", "list-known"],
+        "description": "List known device serials from the local device index (no USB).",
         "host_only": True,
         "destructive": False,
         "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
@@ -219,18 +469,37 @@ TOOL_CATALOG: list[dict[str, Any]] = [
         "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
     },
     {
+        "name": "device_refresh_index",
+        "cli": ["device", "refresh-index"],
+        "description": (
+            "Full USB list_files and replace the SQLite device cache. "
+            "Requires connect. Slow on large libraries; exclusive USB "
+            "(quit GUI first). Prefer after quiet reconnect if a prior "
+            "transfer hit session poison."
+        ),
+        "host_only": False,
+        "destructive": False,
+        "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
         "name": "device_inventory",
         "cli": ["device", "inventory"],
         "description": (
-            "List cached device inventory from SQLite (no full USB walk). "
-            "Prefer this over live listings."
+            "Cached device inventory from SQLite only (no USB walk, no lock). "
+            "Supports offset/limit and filters: parent_id, name_contains, guid. "
+            "Seed via device refresh-index or GUI connect."
         ),
-        "host_only": False,
+        "host_only": True,
         "destructive": False,
         "parameters": {
             "type": "object",
             "properties": {
                 "limit": {"type": "integer", "default": 200},
+                "offset": {"type": "integer", "default": 0},
+                "parent_id": {"type": "integer"},
+                "name_contains": {"type": "string"},
+                "guid": {"type": "string", "description": "Match ObjectFileName GUID stem"},
+                "serial": {"type": "string", "description": "Device serial; default last known"},
             },
             "additionalProperties": False,
         },
@@ -254,64 +523,22 @@ TOOL_CATALOG: list[dict[str, Any]] = [
             "additionalProperties": False,
         },
     },
-    {
-        "name": "device_art_probe",
-        "cli": ["device", "art-probe"],
-        "description": (
-            "Probe libmtp RepresentativeSample support for MP3/ALBUM/etc. "
-            "Experimental; requires device connect. Does not write art."
-        ),
-        "host_only": False,
-        "destructive": False,
-        "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
-    },
-    {
-        "name": "device_art_experiment",
-        "cli": ["device", "art-experiment"],
-        "description": (
-            "Minimum album-art experiment: JPEG from host cover, optional track "
-            "send, Send_Representative_Sample on track and/or new album object. "
-            "Requires confirm=true. Avoids Get_Album_List."
-        ),
-        "host_only": False,
-        "destructive": True,
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Host audio path with cover art",
-                },
-                "object_id": {
-                    "type": "integer",
-                    "description": "Existing object id (skip send)",
-                },
-                "try_album": {
-                    "type": "boolean",
-                    "default": True,
-                    "description": "Create album object + sample when useful",
-                },
-                "max_edge": {"type": "integer", "default": 320},
-                "max_bytes": {"type": "integer", "default": 20480},
-                "confirm": {"type": "boolean", "default": False},
-            },
-            "required": ["path"],
-            "additionalProperties": False,
-        },
-    },
+    # device_art_probe / device_art_experiment: HeadlessService helpers only
+    # (dev experiment). Not agent tools — do not re-add to this catalog.
     {
         "name": "sync_tracks",
         "cli": ["sync"],
         "description": (
-            "Sync track(s) by GUID, path, artist/album, or host playlist name. "
+            "Sync track(s) by GUID, path, artist/album, host playlist, "
+            "entire_library, or path_prefix (host folder). "
             "Remote ObjectFileName is always the track GUID + extension under "
             "Music folder 100 — never pass nested paths. Use dry_run to plan; "
             "confirm=true to send. Default transport is PyMTP (same as GUI when "
             "Stable Mode is off). mode aliases: default|pymtp|experimental "
             "(PyMTP) or stable|cmd (mtp-sendtr recovery only — never silent "
-            "fallback). Playlist sync defaults to batch_size=15 with "
-            "reconnect-on-fatal for ZEN session poison; optional "
-            "push_playlist creates/updates the on-device playlist after send."
+            "fallback). Playlist / entire_library / path_prefix default "
+            "batch_size=15 with reconnect-on-fatal for ZEN session poison; "
+            "optional push_playlist creates/updates the on-device playlist after send."
         ),
         "host_only": False,
         "destructive": True,
@@ -334,6 +561,15 @@ TOOL_CATALOG: list[dict[str, Any]] = [
                         "Missing paths are soft-skipped and listed as unresolved_paths."
                     ),
                 },
+                "entire_library": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Sync all indexed tracks (prefer dry_run first)",
+                },
+                "path_prefix": {
+                    "type": "string",
+                    "description": "Host directory; expand to indexed tracks under it",
+                },
                 "push_playlist": {
                     "type": "boolean",
                     "default": False,
@@ -346,7 +582,8 @@ TOOL_CATALOG: list[dict[str, Any]] = [
                     "type": "integer",
                     "description": (
                         "USB batch size; reconnect after fatal (PyMTP). "
-                        "Default 15 when playlist is set, else 0 (all at once)."
+                        "Default 15 for playlist/entire_library/path_prefix, "
+                        "else 0 (all at once)."
                     ),
                 },
                 "album": {
@@ -378,26 +615,26 @@ TOOL_CATALOG: list[dict[str, Any]] = [
             "additionalProperties": False,
         },
     },
-    {
-        "name": "playlist_push",
-        "cli": ["playlist", "push"],
-        "description": (
-            "Push a host playlist to the device (GUID→item_id). Requires confirm=true."
-        ),
-        "host_only": False,
-        "destructive": True,
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "name": {"type": "string"},
-                "confirm": {"type": "boolean", "default": False},
-            },
-            "required": ["name"],
-            "additionalProperties": False,
-        },
-    },
 ]
+
+TOOL_CATALOG: list[dict[str, Any]] = (
+    list(_BASE_TOOLS) + list(PHASE2_TOOLS) + list(PHASE3_TOOLS)
+)
 
 
 def tools_as_dict() -> dict[str, Any]:
     return {"tools": list(TOOL_CATALOG), "count": len(TOOL_CATALOG)}
+
+
+def catalog_tool_names() -> frozenset[str]:
+    """Names exposed to agents via ``agent tools`` / MCP ``tools/list``."""
+    return frozenset(str(t["name"]) for t in TOOL_CATALOG)
+
+
+# Dev-only HeadlessService helpers — must never appear in TOOL_CATALOG.
+DEV_ONLY_TOOL_NAMES: frozenset[str] = frozenset(
+    {
+        "device_art_probe",
+        "device_art_experiment",
+    }
+)

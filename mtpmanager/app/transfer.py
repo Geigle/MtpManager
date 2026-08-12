@@ -24,6 +24,11 @@ from mtpmanager.domain.audio_quality import (
     decide_action,
 )
 from mtpmanager.domain.models import Track, TrackMetadata
+from mtpmanager.domain.special_sync import (
+    SpecialSyncOptions,
+    apply_meta_patch,
+    basename_for_special_sync,
+)
 from mtpmanager.domain.track_id import is_track_guid, new_track_guid
 from mtpmanager.infra.logging_setup import start_transfer_log, stop_transfer_log
 from mtpmanager.infra.mutagen_tags import read_metadata
@@ -50,6 +55,9 @@ class PreparedTrack:
 
     When *already_on_device* is True, prepare/transcode was skipped and
     *send_path* is empty — the batch pipeline only records a skip.
+
+    *preferred_basename* is set when Special Sync disables GUID naming.
+    *fixed_parent_id* overrides normal parent resolution when set.
     """
 
     send_path: str
@@ -58,6 +66,9 @@ class PreparedTrack:
     source_path: str
     guid: str = ""
     already_on_device: bool = False
+    preferred_basename: str | None = None
+    fixed_parent_id: int | None = None
+    use_guid: bool = True
 
 
 def _merge_meta_after_convert(
@@ -106,6 +117,7 @@ def prepare_track(
     should_cancel: CancelCheck | None = None,
     encode_settings: AudioEncodeSettings | None = None,
     force_transcode: bool = False,
+    special: SpecialSyncOptions | None = None,
 ) -> PreparedTrack:
     """Transcode into *slot* if needed; return path/meta for send (no send yet).
 
@@ -119,8 +131,17 @@ def prepare_track(
 
     *force_transcode*: request a re-encode (Shrink). Still skips when the
     recipe would not lower quality on a device-native file.
+
+    *special*: optional Special Sync overrides (meta patch, encode force,
+    GUID/basename/parent). Host library tags are not mutated.
     """
     raise_if_cancelled(should_cancel)
+    track = _apply_special_to_track(track, special)
+    if special is not None:
+        if special.encode is not None:
+            encode_settings = special.encode
+        if special.force_transcode:
+            force_transcode = True
     if encode_settings is not None:
         target_format = encode_settings.file_extension()
     else:
@@ -161,6 +182,13 @@ def prepare_track(
         if reread_tags_after_convert:
             converted = read_metadata(src)
             meta = _merge_meta_after_convert(meta, converted)
+            # Re-apply patch so convert tag re-read cannot clobber overrides.
+            if special is not None and special.meta_patch:
+                meta = apply_meta_patch(
+                    meta,
+                    special.meta_patch,
+                    apply_all=special.apply_meta_to_all,
+                )
     else:
         logger.info(
             "Passthrough (no transcode): %s (%s)",
@@ -168,13 +196,41 @@ def prepare_track(
             decision.reason,
         )
 
-    guid = track.guid if is_track_guid(track.guid) else new_track_guid()
+    use_guid = True if special is None else bool(special.use_guid)
+    if use_guid:
+        guid = track.guid if is_track_guid(track.guid) else new_track_guid()
+        preferred_basename = None
+    else:
+        guid = ""
+        out_ext = (
+            encode_settings.file_extension()
+            if encode_settings is not None
+            else target_format
+        )
+        if special is not None:
+            preferred_basename = basename_for_special_sync(
+                track, meta, out_ext, options=special
+            )
+        else:
+            preferred_basename = None
+
+    # Fixed parent only for modes that share one parent for the whole batch.
+    # artist / artist_album use resolve_parent_folder per track instead.
+    fixed_parent: int | None = None
+    if special is not None and special.parent_id is not None:
+        mode = special.folder_mode or "none"
+        if mode in ("none", "custom"):
+            fixed_parent = int(special.parent_id)
+
     return PreparedTrack(
         send_path=src,
         meta=meta,
         cleanup_path=cleanup_path,
         source_path=track.path,
         guid=guid,
+        preferred_basename=preferred_basename,
+        fixed_parent_id=fixed_parent,
+        use_guid=use_guid,
     )
 
 
@@ -183,13 +239,23 @@ def _resolve_parent(
     meta: TrackMetadata,
     *,
     guid: str | None = None,
+    fixed_parent_id: int | None = None,
+    honor_resolver: bool = False,
 ) -> int | None:
     """Resolve MTP parent folder id for a send.
+
+    *fixed_parent_id* (Special Sync) always wins when set — including when
+    GUID ObjectFileName mode would otherwise force flat Music.
+
+    *honor_resolver*: Special Sync artist/album folder modes — use the
+    resolver even when a host GUID is present.
 
     Music with a host GUID stays flat under Music (resolver artist/album
     nesting is ignored). Podcasts always consult the resolver so they land
     under ZENcast even though ObjectFileName is still the episode GUID.
     """
+    if fixed_parent_id is not None:
+        return int(fixed_parent_id)
     if resolver is None:
         return None
     parent = resolver(meta)
@@ -198,10 +264,29 @@ def _resolve_parent(
     genre = (getattr(meta, "genre", None) or "").strip().casefold()
     if genre == "podcast":
         return parent
+    if honor_resolver:
+        return parent
     # Music GUID ObjectFileName mode: flat under Music (ignore artist folders).
     if guid and is_track_guid(guid):
         return None
     return parent
+
+
+def _apply_special_to_track(
+    track: Track,
+    special: SpecialSyncOptions | None,
+) -> Track:
+    """Return a Track with Special Sync metadata patch applied (host path same)."""
+    if special is None:
+        return track
+    meta = apply_meta_patch(
+        track.meta,
+        special.meta_patch,
+        apply_all=special.apply_meta_to_all,
+    )
+    if meta is track.meta:
+        return track
+    return Track(path=track.path, meta=meta, guid=track.guid)
 
 
 def _guid_already_on_device(
@@ -246,6 +331,7 @@ def transfer_track(
     encode_settings: AudioEncodeSettings | None = None,
     resolve_encode_settings: EncodeSettingsResolver | None = None,
     force_transcode: bool = False,
+    special: SpecialSyncOptions | None = None,
 ) -> None:
     """
     Ensure track is device-ready (transcode if needed), then send via transport.
@@ -256,8 +342,12 @@ def transfer_track(
 
     *device_guid_stems*: set of 32-hex GUIDs already present on the device
     (durable device index). Matching tracks skip transcode and send.
+
+    *special*: optional Special Sync overrides (see :class:`SpecialSyncOptions`).
     """
     raise_if_cancelled(should_cancel, total=1)
+    if special is not None and not special.effective_skip_if_present():
+        device_guid_stems = None
     guid_hint = track.guid if is_track_guid(track.guid) else ""
     if guid_hint and _guid_already_on_device(guid_hint, device_guid_stems):
         logger.info(
@@ -273,6 +363,10 @@ def transfer_track(
         encode_settings=encode_settings,
         resolve_encode_settings=resolve_encode_settings,
     )
+    if special is not None and special.encode is not None:
+        track_encode = special.encode
+    if special is not None and special.force_transcode:
+        force_transcode = True
     track_fmt = (
         track_encode.file_extension()
         if track_encode is not None
@@ -289,18 +383,29 @@ def transfer_track(
         should_cancel=should_cancel,
         encode_settings=track_encode,
         force_transcode=force_transcode,
+        special=special,
     )
     try:
         raise_if_cancelled(should_cancel, total=1)
         _notify_status(on_track_status, track.path, "transferring")
+        send_guid = prepared.guid if prepared.use_guid else None
+        honor = bool(
+            special is not None
+            and special.folder_mode in ("artist", "artist_album")
+        )
         parent_id = _resolve_parent(
-            resolve_parent_folder, prepared.meta, guid=prepared.guid
+            resolve_parent_folder,
+            prepared.meta,
+            guid=send_guid if prepared.use_guid else None,
+            fixed_parent_id=prepared.fixed_parent_id,
+            honor_resolver=honor,
         )
         object_id = transport.send_track(
             prepared.send_path,
             prepared.meta,
             parent_id=parent_id,
-            guid=prepared.guid,
+            guid=send_guid,
+            preferred_basename=prepared.preferred_basename,
         )
         if on_after_send is not None:
             try:
@@ -333,6 +438,7 @@ def transfer_tracks(
     on_after_send: AfterSendCallback | None = None,
     encode_settings: AudioEncodeSettings | None = None,
     resolve_encode_settings: EncodeSettingsResolver | None = None,
+    special: SpecialSyncOptions | None = None,
 ) -> int:
     """Transfer many tracks with dual-slot convert/send pipeline.
 
@@ -356,6 +462,10 @@ def transfer_tracks(
     *resolve_encode_settings*: optional per-track encode recipe (e.g. audiobook
     override). When set, wins over the batch-level *encode_settings*.
 
+    *special*: optional Special Sync overrides applied to every track in the
+    batch (encode, meta patch, parent, GUID/basename). When Special Sync
+    disables skip-if-present, *device_guid_stems* is ignored.
+
     *should_cancel*: when true between tracks, remaining items are skipped and
     :class:`~mtpmanager.app.cancellation.JobCancelled` is raised (the track
     already in flight still finishes).
@@ -364,6 +474,11 @@ def transfer_tracks(
         track_queue = tracks
     else:
         track_queue = BatchTransferQueue(tracks)
+
+    if special is not None and not special.effective_skip_if_present():
+        device_guid_stems = None
+    if special is not None and special.encode is not None:
+        encode_settings = special.encode
 
     succeeded = 0
     skipped = 0
@@ -376,11 +491,13 @@ def transfer_tracks(
 
     logger.info(
         "Batch transfer start: %d track(s) target_format=%s "
-        "device_formats=%s device_guid_stems=%s (queue dual-slot pipeline)",
+        "device_formats=%s device_guid_stems=%s special=%s "
+        "(queue dual-slot pipeline)",
         track_queue.total(),
         target_format,
         sorted(device_formats) if device_formats else None,
         len(device_guid_stems) if device_guid_stems is not None else None,
+        special is not None,
     )
 
     prepared: PreparedTrack | None = None
@@ -427,6 +544,9 @@ def transfer_tracks(
             encode_settings=encode_settings,
             resolve_encode_settings=resolve_encode_settings,
         )
+        if special is not None and special.encode is not None:
+            track_encode = special.encode
+        force_tc = bool(special is not None and special.force_transcode)
         track_fmt = (
             track_encode.file_extension()
             if track_encode is not None
@@ -441,6 +561,8 @@ def transfer_tracks(
             device_formats=device_formats,
             should_cancel=should_cancel,
             encode_settings=track_encode,
+            force_transcode=force_tc,
+            special=special,
         )
 
     def _live_total() -> int:
@@ -522,16 +644,27 @@ def transfer_tracks(
                         _notify_status(
                             on_track_status, track.path, "transferring"
                         )
+                        send_guid = (
+                            prepared.guid if prepared.use_guid else None
+                        )
+                        honor = bool(
+                            special is not None
+                            and special.folder_mode
+                            in ("artist", "artist_album")
+                        )
                         parent_id = _resolve_parent(
                             resolve_parent_folder,
                             prepared.meta,
-                            guid=prepared.guid,
+                            guid=send_guid if prepared.use_guid else None,
+                            fixed_parent_id=prepared.fixed_parent_id,
+                            honor_resolver=honor,
                         )
                         object_id = transport.send_track(
                             prepared.send_path,
                             prepared.meta,
                             parent_id=parent_id,
-                            guid=prepared.guid,
+                            guid=send_guid,
+                            preferred_basename=prepared.preferred_basename,
                         )
                         if on_after_send is not None:
                             try:

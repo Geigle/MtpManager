@@ -3218,3 +3218,420 @@ def show_shrink_encode_dialog(
         pass
     parent.wait_window(dlg)
     return result[0]
+
+
+# ---------------------------------------------------------------------------
+# Special Sync (experimental per-batch send overrides)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class SpecialSyncDialogResult:
+    """User choices from the Special Sync dialog (before folder create)."""
+
+    options: object  # SpecialSyncOptions — typed at runtime
+
+
+def ask_special_sync(
+    parent,
+    *,
+    tracks: list,
+    initial_encode: AudioEncodeSettings | None = None,
+    allowed_send_formats: frozenset[str] | None = None,
+    default_parent_id: int | None = None,
+    folder_choices: list[tuple[int, str]] | None = None,
+    allow_create_folders: bool = True,
+    context_label: str = "Special Sync",
+    is_stable_mode: bool = False,
+) -> SpecialSyncDialogResult | None:
+    """Modal Special Sync dialog. OK → result; Cancel → None.
+
+    *folder_choices*: ``(folder_id, display_label)`` for the parent combobox.
+    *allow_create_folders*: False under Stable Mode (CMD cannot create folders).
+    """
+    from mtpmanager.domain.special_sync import (
+        META_PATCH_FIELDS,
+        SpecialSyncOptions,
+        basename_for_special_sync,
+        common_meta_seed,
+        meta_patch_from_dialog_fields,
+    )
+    from mtpmanager.infra.remote_naming import (
+        DEFAULT_MUSIC_FOLDER_ID,
+        ZEN_VISION_M_FOLDER_IDS,
+    )
+
+    track_list = list(tracks or [])
+    n = len(track_list)
+    if n < 1:
+        return None
+
+    seed_meta = common_meta_seed(track_list)
+    initial = resolve_settings(
+        settings=initial_encode,
+        allowed_formats=allowed_send_formats,
+    )
+    parent_default = (
+        int(default_parent_id)
+        if default_parent_id is not None
+        else DEFAULT_MUSIC_FOLDER_ID
+    )
+
+    choices: list[tuple[int, str]] = list(folder_choices or [])
+    if not choices:
+        choices = [
+            (fid, f"{name} ({fid})")
+            for fid, name in sorted(ZEN_VISION_M_FOLDER_IDS.items())
+        ]
+    if not any(fid == parent_default for fid, _ in choices):
+        choices = [(parent_default, f"Folder {parent_default}")] + choices
+
+    label_by_id = {fid: lab for fid, lab in choices}
+    id_by_label = {lab: fid for fid, lab in choices}
+
+    dlg = Toplevel(parent)
+    dlg.title(context_label)
+    dlg.transient(parent)
+    dlg.resizable(True, True)
+
+    body = Frame(dlg, padx=12, pady=10)
+    body.pack(fill=BOTH, expand=True)
+
+    noun = "track" if n == 1 else f"{n} tracks"
+    Label(
+        body,
+        text=f"Special Sync — {noun}",
+        font=("", 11, "bold"),
+        anchor="w",
+    ).pack(fill="x", pady=(0, 4))
+    Label(
+        body,
+        text=(
+            "Experimental overrides for this send only. Host library tags "
+            "are not changed. Wrong folder or long ObjectFileNames can "
+            "fail or poison the MTP session on picky players (e.g. ZEN)."
+            + (
+                "\n\nStable Mode: Create Folders is disabled "
+                "(mtp-sendtr cannot create folders)."
+                if is_stable_mode or not allow_create_folders
+                else ""
+            )
+        ),
+        justify=LEFT,
+        wraplength=520,
+        **secondary_label_kwargs(),
+    ).pack(anchor="w", pady=(0, 8))
+
+    nb = ttk.Notebook(body)
+    nb.pack(fill=BOTH, expand=True)
+
+    tab_enc = Frame(nb, padx=8, pady=8)
+    nb.add(tab_enc, text="Encode")
+    _override_var, get_encode = _pack_encode_override_section(
+        tab_enc,
+        title="",
+        blurb="Format and quality for this batch (defaults from Config / show).",
+        use_override=True,
+        initial=initial,
+        allowed_send_formats=allowed_send_formats,
+        checkbox_text="Use these encode settings",
+        list_height=5,
+    )
+    force_tc_var = BooleanVar(value=False)
+    Checkbutton(
+        tab_enc,
+        text="Force re-encode (even if source is already device-native)",
+        variable=force_tc_var,
+        anchor="w",
+    ).pack(fill="x", pady=(8, 0))
+
+    tab_meta = Frame(nb, padx=8, pady=8)
+    nb.add(tab_meta, text="Metadata")
+    Label(
+        tab_meta,
+        text=(
+            "Empty fields leave each track's own tags. Multi-select: shared "
+            "values are pre-filled; varying fields start empty."
+        ),
+        justify=LEFT,
+        wraplength=500,
+        **secondary_label_kwargs(),
+    ).pack(anchor="w", pady=(0, 6))
+    meta_vars: dict[str, StringVar] = {}
+    field_labels = {
+        "title": "Title",
+        "artist": "Artist",
+        "albumartist": "Album artist",
+        "album": "Album",
+        "genre": "Genre",
+        "tracknumber": "Track #",
+        "date": "Year / date",
+        "composer": "Composer",
+    }
+    for key in META_PATCH_FIELDS:
+        row = Frame(tab_meta)
+        row.pack(fill="x", pady=2)
+        Label(row, text=field_labels.get(key, key), width=12, anchor="w").pack(
+            side=LEFT
+        )
+        var = StringVar(value=seed_meta.get(key, ""))
+        meta_vars[key] = var
+        Entry(row, textvariable=var, width=48).pack(
+            side=LEFT, fill="x", expand=True
+        )
+    apply_all_var = BooleanVar(value=False)
+    if n > 1:
+        Checkbutton(
+            tab_meta,
+            text="Apply these metadata values to every track",
+            variable=apply_all_var,
+            anchor="w",
+        ).pack(fill="x", pady=(8, 0))
+
+    tab_dest = Frame(nb, padx=8, pady=8)
+    nb.add(tab_dest, text="Destination")
+    Label(tab_dest, text="Parent folder:", anchor="w").pack(fill="x")
+    parent_label_var = StringVar(
+        value=label_by_id.get(parent_default, choices[0][1])
+    )
+    parent_combo = ttk.Combobox(
+        tab_dest,
+        textvariable=parent_label_var,
+        values=[lab for _, lab in choices],
+        state="readonly",
+        width=48,
+    )
+    parent_combo.pack(fill="x", pady=(2, 6))
+    Label(
+        tab_dest,
+        text="Or enter a numeric folder id:",
+        anchor="w",
+        **secondary_label_kwargs(),
+    ).pack(fill="x")
+    parent_id_var = StringVar(value=str(parent_default))
+    Entry(tab_dest, textvariable=parent_id_var, width=16).pack(
+        anchor="w", pady=(2, 8)
+    )
+
+    def on_parent_combo(_e=None) -> None:
+        lab = parent_label_var.get()
+        fid = id_by_label.get(lab)
+        if fid is not None:
+            parent_id_var.set(str(fid))
+
+    parent_combo.bind("<<ComboboxSelected>>", on_parent_combo)
+
+    Label(tab_dest, text="Create folders under parent:", anchor="w").pack(
+        fill="x", pady=(4, 2)
+    )
+    folder_mode_var = StringVar(value="none")
+    create_enabled = bool(allow_create_folders) and not is_stable_mode
+    for value, text in (
+        ("none", "None (use parent as-is)"),
+        ("artist", "Artist folder"),
+        ("artist_album", "Artist / Album folders"),
+        ("custom", "Custom folder name"),
+    ):
+        rb = Radiobutton(
+            tab_dest,
+            text=text,
+            variable=folder_mode_var,
+            value=value,
+            anchor="w",
+        )
+        rb.pack(fill="x")
+        if not create_enabled and value != "none":
+            rb.configure(state=DISABLED)
+    custom_name_var = StringVar(value="")
+    custom_row = Frame(tab_dest)
+    custom_row.pack(fill="x", pady=(4, 0))
+    Label(custom_row, text="Custom name:").pack(side=LEFT)
+    custom_entry = Entry(custom_row, textvariable=custom_name_var, width=32)
+    custom_entry.pack(side=LEFT, padx=(6, 0))
+    if not create_enabled:
+        custom_entry.configure(state=DISABLED)
+
+    tab_name = Frame(nb, padx=8, pady=8)
+    nb.add(tab_name, text="Naming")
+    use_guid_var = BooleanVar(value=True)
+    Checkbutton(
+        tab_name,
+        text="Use host GUID as ObjectFileName (recommended)",
+        variable=use_guid_var,
+        anchor="w",
+    ).pack(fill="x")
+    Label(
+        tab_name,
+        text=(
+            "When unchecked, ObjectFileName uses a human-readable basename "
+            "(default: source filename stem). Skip-if-present will not apply; "
+            "re-sync may create duplicates."
+        ),
+        justify=LEFT,
+        wraplength=500,
+        **secondary_label_kwargs(),
+    ).pack(anchor="w", pady=(4, 8))
+    Label(tab_name, text="Basename when GUID is off:", anchor="w").pack(
+        fill="x"
+    )
+    basename_mode_var = StringVar(value="source_stem")
+    for value, text in (
+        ("source_stem", "Source filename stem (default)"),
+        ("title", "Title tag"),
+        ("pattern", "Pattern (e.g. {tracknumber} - {title})"),
+    ):
+        Radiobutton(
+            tab_name,
+            text=text,
+            variable=basename_mode_var,
+            value=value,
+            anchor="w",
+        ).pack(fill="x")
+    pattern_var = StringVar(value="{tracknumber} - {title}")
+    Entry(tab_name, textvariable=pattern_var, width=40).pack(
+        anchor="w", pady=(2, 6)
+    )
+    custom_base_var = StringVar(value="")
+    if n == 1:
+        Label(
+            tab_name,
+            text="Optional custom basename (single track only):",
+            anchor="w",
+        ).pack(fill="x")
+        Entry(tab_name, textvariable=custom_base_var, width=40).pack(
+            anchor="w", pady=(2, 6)
+        )
+    skip_var = BooleanVar(value=True)
+    Checkbutton(
+        tab_name,
+        text="Skip if already on device (GUID present in device index)",
+        variable=skip_var,
+        anchor="w",
+    ).pack(fill="x", pady=(4, 0))
+
+    preview_var = StringVar(value="")
+    Label(
+        tab_name,
+        textvariable=preview_var,
+        anchor="w",
+        justify=LEFT,
+        wraplength=500,
+        **secondary_label_kwargs(),
+    ).pack(fill="x", pady=(10, 0))
+
+    def _read_parent_id() -> int | None:
+        raw = (parent_id_var.get() or "").strip()
+        if not raw:
+            return None
+        try:
+            return int(raw)
+        except ValueError:
+            return None
+
+    def refresh_preview(*_a) -> None:
+        t0 = track_list[0]
+        pid = _read_parent_id()
+        pid_s = str(pid) if pid is not None else "?"
+        enc = get_encode() if _override_var.get() else initial
+        if use_guid_var.get():
+            g = (t0.guid or "").strip() or ("0" * 32)
+            preview_var.set(f"Preview: {pid_s}/{g}.{enc.file_extension()}")
+        else:
+            opts = SpecialSyncOptions(
+                use_guid=False,
+                basename_mode=basename_mode_var.get() or "source_stem",  # type: ignore[arg-type]
+                basename_pattern=pattern_var.get(),
+                custom_basename=custom_base_var.get(),
+            )
+            name = basename_for_special_sync(
+                t0, t0.meta, enc.file_extension(), options=opts
+            )
+            preview_var.set(f"Preview: {pid_s}/{name}")
+
+    for v in (
+        use_guid_var,
+        basename_mode_var,
+        pattern_var,
+        custom_base_var,
+        parent_id_var,
+    ):
+        try:
+            v.trace_add("write", lambda *_: refresh_preview())
+        except Exception:
+            pass
+    refresh_preview()
+
+    result: list[SpecialSyncDialogResult | None] = [None]
+
+    def on_ok() -> None:
+        pid = _read_parent_id()
+        if pid is None or pid < 0:
+            messagebox.showerror(
+                "Special Sync",
+                "Enter a valid numeric parent folder id.",
+                parent=dlg,
+            )
+            return
+        fields = {k: meta_vars[k].get() for k in META_PATCH_FIELDS}
+        apply_all = bool(apply_all_var.get()) if n > 1 else False
+        patch = meta_patch_from_dialog_fields(
+            fields, seed=seed_meta, apply_all=apply_all
+        )
+        mode = folder_mode_var.get() or "none"
+        if mode not in ("none", "artist", "artist_album", "custom"):
+            mode = "none"
+        if not create_enabled:
+            mode = "none"
+        custom_name = (custom_name_var.get() or "").strip()
+        if mode == "custom" and not custom_name:
+            messagebox.showerror(
+                "Special Sync",
+                "Enter a custom folder name, or choose another folder mode.",
+                parent=dlg,
+            )
+            return
+        use_guid = bool(use_guid_var.get())
+        bmode = basename_mode_var.get() or "source_stem"
+        if bmode not in ("source_stem", "title", "pattern"):
+            bmode = "source_stem"
+        enc = get_encode() if _override_var.get() else initial
+        opts = SpecialSyncOptions(
+            encode=enc,
+            force_transcode=bool(force_tc_var.get()),
+            meta_patch=patch,
+            apply_meta_to_all=apply_all,
+            parent_id=pid,
+            folder_mode=mode,  # type: ignore[arg-type]
+            custom_folder_name=custom_name,
+            use_guid=use_guid,
+            basename_mode=bmode,  # type: ignore[arg-type]
+            basename_pattern=pattern_var.get() or "{tracknumber} - {title}",
+            custom_basename=(
+                (custom_base_var.get() or "").strip() if n == 1 else ""
+            ),
+            skip_if_present=bool(skip_var.get()) if use_guid else False,
+        )
+        result[0] = SpecialSyncDialogResult(options=opts)
+        dlg.destroy()
+
+    def on_cancel() -> None:
+        result[0] = None
+        dlg.destroy()
+
+    btn_row = Frame(body)
+    btn_row.pack(fill="x", pady=(10, 0))
+    Button(btn_row, text="Cancel", width=10, command=on_cancel).pack(
+        side=RIGHT, padx=(6, 0)
+    )
+    Button(btn_row, text="Sync", width=10, command=on_ok).pack(side=RIGHT)
+
+    dlg.protocol("WM_DELETE_WINDOW", on_cancel)
+    dlg.grab_set()
+    try:
+        px = parent.winfo_rootx() + max(0, (parent.winfo_width() - 560) // 2)
+        py = parent.winfo_rooty() + max(0, (parent.winfo_height() - 520) // 3)
+        dlg.geometry(f"560x560+{px}+{py}")
+    except Exception:
+        pass
+    parent.wait_window(dlg)
+    return result[0]
