@@ -217,6 +217,113 @@ def _handlers() -> dict[str, ToolHandler]:
             batch_size=batch_size,
         )
 
+    def podcast_list(svc: HeadlessService, _args: dict[str, Any]) -> AgentResult:
+        return svc.podcast_list()
+
+    def podcast_show(svc: HeadlessService, args: dict[str, Any]) -> AgentResult:
+        pid = args.get("podcast_id")
+        return svc.podcast_show(
+            int(pid) if pid is not None else None,
+            title=args.get("title"),
+        )
+
+    def podcast_episodes(svc: HeadlessService, args: dict[str, Any]) -> AgentResult:
+        return svc.podcast_episodes(
+            int(args.get("podcast_id") or 0),
+            limit=int(args.get("limit") or 50),
+        )
+
+    def podcast_subscribe(svc: HeadlessService, args: dict[str, Any]) -> AgentResult:
+        return svc.podcast_subscribe(
+            str(args.get("feed_url") or ""),
+            initial_limit=int(args.get("initial_limit") or 20),
+        )
+
+    def podcast_unsubscribe(svc: HeadlessService, args: dict[str, Any]) -> AgentResult:
+        return svc.podcast_unsubscribe(
+            int(args.get("podcast_id") or 0),
+            confirm=bool(args.get("confirm")),
+        )
+
+    def podcast_refresh(svc: HeadlessService, args: dict[str, Any]) -> AgentResult:
+        return svc.podcast_refresh(int(args.get("podcast_id") or 0))
+
+    def podcast_download_episode(svc: HeadlessService, args: dict[str, Any]) -> AgentResult:
+        return svc.podcast_download_episode(
+            int(args.get("episode_id") or 0),
+            prefer_video=bool(args.get("prefer_video")),
+        )
+
+    def podcast_full_sync_host(svc: HeadlessService, args: dict[str, Any]) -> AgentResult:
+        ids = args.get("podcast_ids")
+        return svc.podcast_full_sync_host(
+            podcast_ids=list(ids) if ids else None,
+            max_new_per_show=args.get("max_new_per_show"),
+        )
+
+    def podcast_day_playlist_show(svc: HeadlessService, _args: dict[str, Any]) -> AgentResult:
+        return svc.podcast_day_playlist_show()
+
+    def podcast_day_add(svc: HeadlessService, args: dict[str, Any]) -> AgentResult:
+        eid = args.get("episode_id")
+        return svc.podcast_day_add(
+            episode_id=int(eid) if eid is not None else None,
+            guid=args.get("guid"),
+        )
+
+    def podcast_day_remove(svc: HeadlessService, args: dict[str, Any]) -> AgentResult:
+        return svc.podcast_day_remove(str(args.get("guid") or ""))
+
+    def podcast_sync_pending(svc: HeadlessService, args: dict[str, Any]) -> AgentResult:
+        batch_raw = args.get("batch_size")
+        batch_size = int(batch_raw) if batch_raw is not None else None
+        return svc.podcast_sync_pending(
+            dry_run=bool(args.get("dry_run")),
+            confirm=bool(args.get("confirm")),
+            mode=args.get("mode"),
+            batch_size=batch_size,
+            push_day_playlist=bool(args.get("push_day_playlist")),
+        )
+
+    def device_pull(svc: HeadlessService, args: dict[str, Any]) -> AgentResult:
+        return svc.device_pull(
+            list(args.get("object_ids") or []),
+            dest=args.get("dest"),
+            confirm=bool(args.get("confirm")),
+        )
+
+    def device_enrich_tags(svc: HeadlessService, args: dict[str, Any]) -> AgentResult:
+        return svc.device_enrich_tags(
+            list(args.get("object_ids") or []),
+            confirm=bool(args.get("confirm")),
+        )
+
+    def device_send_video(svc: HeadlessService, args: dict[str, Any]) -> AgentResult:
+        return svc.device_send_video(
+            str(args.get("path") or ""),
+            parent_id=int(args.get("parent_id") or 120),
+            encode=True if args.get("encode") is None else bool(args.get("encode")),
+            preset_id=args.get("preset_id"),
+            dry_run=bool(args.get("dry_run")),
+            confirm=bool(args.get("confirm")),
+            title=args.get("title"),
+        )
+
+    def sync_job_status(svc: HeadlessService, _args: dict[str, Any]) -> AgentResult:
+        return svc.sync_job_status()
+
+    def sync_job_clear(svc: HeadlessService, args: dict[str, Any]) -> AgentResult:
+        return svc.sync_job_clear(confirm=bool(args.get("confirm")))
+
+    def sync_resume(svc: HeadlessService, args: dict[str, Any]) -> AgentResult:
+        batch_raw = args.get("batch_size")
+        batch_size = int(batch_raw) if batch_raw is not None else None
+        return svc.sync_resume(
+            dry_run=bool(args.get("dry_run")),
+            confirm=bool(args.get("confirm")),
+            batch_size=batch_size,
+        )
+
     return {
         "agent_doctor": agent_doctor,
         "agent_tools": agent_tools,
@@ -248,7 +355,25 @@ def _handlers() -> dict[str, ToolHandler]:
         "device_refresh_index": device_refresh_index,
         "device_inventory": device_inventory,
         "device_delete": device_delete,
+        "device_pull": device_pull,
+        "device_enrich_tags": device_enrich_tags,
+        "device_send_video": device_send_video,
         "sync_tracks": sync_tracks,
+        "podcast_list": podcast_list,
+        "podcast_show": podcast_show,
+        "podcast_episodes": podcast_episodes,
+        "podcast_subscribe": podcast_subscribe,
+        "podcast_unsubscribe": podcast_unsubscribe,
+        "podcast_refresh": podcast_refresh,
+        "podcast_download_episode": podcast_download_episode,
+        "podcast_full_sync_host": podcast_full_sync_host,
+        "podcast_day_playlist_show": podcast_day_playlist_show,
+        "podcast_day_add": podcast_day_add,
+        "podcast_day_remove": podcast_day_remove,
+        "podcast_sync_pending": podcast_sync_pending,
+        "sync_job_status": sync_job_status,
+        "sync_job_clear": sync_job_clear,
+        "sync_resume": sync_resume,
     }
 
 
@@ -346,12 +471,24 @@ def _handle(
 
 
 def main(argv: list[str] | None = None) -> int:
+    import argparse
+    from pathlib import Path
+
+    parser = argparse.ArgumentParser(prog="python -m mtpmanager.mcp_server")
+    parser.add_argument(
+        "--data-dir",
+        type=Path,
+        default=None,
+        help="Override app data dir (or set MTP_MANAGER_DATA_DIR)",
+    )
+    args = parser.parse_args(list(argv) if argv is not None else None)
+
     try:
         configure_logging()
     except Exception:
         logging.basicConfig(level=logging.INFO)
 
-    svc = HeadlessService()
+    svc = HeadlessService(data_dir=args.data_dir)
     try:
         for line in sys.stdin:
             line = line.strip()

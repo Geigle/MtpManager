@@ -137,12 +137,38 @@ Unknown keys fail with exit 2 and list allowed keys. Includes booleans such as `
 - **`--batch-size N`**: USB-friendly batches with quiet reconnect on PyMTP fatal (ZEN PTP session poison). Default **15** for `--playlist`, `--entire-library`, or `--path-prefix`; **0** (all at once) otherwise. Successful sends call `record_send` so skip-if-present stays accurate across batches/restarts.
 - **Never** pass nested remote paths; the app always uses track GUID ObjectFileNames.
 
-### Hazardous device tools (Phase 1)
+### Podcasts
+
+| Command | Purpose |
+|---------|---------|
+| `podcast list` / `show` / `episodes ID` | Host index |
+| `podcast subscribe URL` / `unsubscribe ID --confirm` | Manage feeds |
+| `podcast refresh ID` / `download EPISODE_ID` | RSS + enclosure download (host) |
+| `podcast full-sync-host` | Refresh + download N new/show; mark pending (**no USB**) |
+| `podcast day-show` / `day-add` / `day-remove` | Today's day playlist (host M3U) |
+| `podcast sync-pending --dry-run` / `--confirm` | Transfer pending episodes; optional `--push-day-playlist` (Finish Sync) |
+
+### Device media (Phase 2)
+
+| Command | Purpose |
+|---------|---------|
+| `device pull ID… --confirm [--dest DIR]` | Download objects (R3/R4) |
+| `device enrich-tags ID… --confirm` | **Hazardous** metadata fetch (R1/R2); max 25 |
+| `device send-video PATH [--parent-id 120\|124] --dry-run` / `--confirm` | Video/TV send (R1/R3/R4) |
+| `sync-job status` / `clear --confirm` / `resume --dry-run` / `--confirm` | Durable multi-track job |
+
+### Hazardous device tools
+
+Risk classes: **R1** session poison · **R2** hang/metadata · **R3** USB exclusive · **R4** large download · **R5** destructive.
 
 | Tool | Risk | Mitigation |
 |------|------|------------|
-| `device refresh-index` | Full USB `list_files` can be slow; exclusive lock; stress flaky devices | Quit GUI; avoid after unhandled fatal without quiet reconnect |
-| `sync` (confirm) | Session poison on bulk PyMTP; USB exclusive | dry-run first; batch_size; no silent mode switch |
+| `device refresh-index` | R3; slow list_files | Quit GUI; quiet reconnect after fatal |
+| `sync` / `podcast sync-pending` / `sync-job resume` | R1, R3 | dry-run; batch_size; no silent mode switch; fatal aborts batch |
+| `device pull` | R3, R4 | confirm; per-id results; prefer host library |
+| `device enrich-tags` | **R1, R2** | **Not for inventory**; confirm; ≤25 ids; abort on fatal; disconnect/quiet/reconnect after poison |
+| `device send-video` | R1, R3, R4 (encode) | dry-run; parent 120/124 only on agent API |
+| See also | | [pymtp-binding-hazards.md](./pymtp-binding-hazards.md), bulk session poison debrief |
 
 Example agent flow:
 
@@ -192,6 +218,13 @@ Tools mirror `agent tools` names (`library_search`, `sync_tracks`, …). Destruc
 
 **Note:** This is a minimal MCP subset (initialize, tools/list, tools/call) using **line-delimited** JSON-RPC on stdio (one JSON object per line), not Content-Length framing. Some clients expect the official framing/SDK — verify before relying on auto-connect. Upgrade to the official Python MCP SDK later if a client needs full protocol features.
 
+```bash
+.venv/bin/python -m mtpmanager.mcp_server --data-dir /path/to/data
+# or: MTP_MANAGER_DATA_DIR=...
+```
+
+Long ops: no progress notifications yet — watch log files. Cancel by killing the process; stale device locks recover when the holder PID is dead.
+
 **Not agent tools:** album-art probe/experiment live only on `HeadlessService` for human/script debugging. They do not appear in `agent tools`, CLI, or MCP.
 
 ## What this is not
@@ -208,7 +241,7 @@ Phased PR plan (P0–P3): **[plan-agent-interface-phases.md](./plan-agent-interf
 |-----------|--------|
 | **A (Phase 0)** | Done — art experiment hidden; docs; `playlist_replace` confirm; catalog↔MCP tests |
 | **B (Phase 1)** | Done — library scan/roots; config patch; refresh-index; inventory filters; playlist lifecycle; entire/path sync |
-| **C (Phase 2)** | Podcasts; pull; tag enrich (**risk docs required**); video; resume job; MCP ergonomics |
+| **C (Phase 2)** | Done — podcasts; pull; enrich (**risk docs**); video; sync-job; MCP `--data-dir` |
 | **D (Phase 3)** | Retail, shrink, delete-all, create-folder, device playlist edit |
 
 Historical shipped item (`sync --playlist`): [todo-agent-cli.md](./todo-agent-cli.md).

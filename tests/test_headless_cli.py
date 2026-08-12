@@ -512,6 +512,34 @@ class AgentSurfaceParityTests(unittest.TestCase):
                 argv.append("{}")
             elif group == "device" and action == "delete":
                 argv.extend(["1", "--confirm"])
+            elif group == "device" and action in ("pull", "enrich-tags"):
+                argv.extend(["1", "--confirm"])
+            elif group == "device" and action == "send-video":
+                argv.extend(["/tmp/x.avi", "--dry-run"])
+            elif group == "podcast" and action == "show":
+                argv.extend(["--id", "1"])
+            elif group == "podcast" and action in (
+                "episodes",
+                "refresh",
+                "unsubscribe",
+            ):
+                argv.append("1")
+            elif group == "podcast" and action == "unsubscribe":
+                argv.append("--confirm")
+            elif group == "podcast" and action == "subscribe":
+                argv.append("https://example.com/feed")
+            elif group == "podcast" and action == "download":
+                argv.append("1")
+            elif group == "podcast" and action == "day-add":
+                argv.extend(["--episode-id", "1"])
+            elif group == "podcast" and action == "day-remove":
+                argv.append("a" * 32)
+            elif group == "podcast" and action == "sync-pending":
+                argv.append("--dry-run")
+            elif group == "sync-job" and action == "clear":
+                argv.append("--confirm")
+            elif group == "sync-job" and action == "resume":
+                argv.append("--dry-run")
             if group == "playlist" and action in (
                 "replace",
                 "push",
@@ -519,6 +547,9 @@ class AgentSurfaceParityTests(unittest.TestCase):
                 "shuffle",
             ):
                 argv.append("--confirm")
+            if group == "podcast" and action == "unsubscribe":
+                if "--confirm" not in argv:
+                    argv.append("--confirm")
             args = parser.parse_args(argv)
             self.assertEqual(args.group, group)
             self.assertEqual(getattr(args, "action", None), action)
@@ -628,6 +659,130 @@ class CliMainTests(unittest.TestCase):
             self.assertEqual(
                 payload["data"]["batch_size"], DEFAULT_PLAYLIST_BATCH_SIZE
             )
+
+
+class MilestoneCPhase2Tests(unittest.TestCase):
+    def test_podcast_list_and_subscribe_mocked(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp)
+            svc = HeadlessService(data_dir=data)
+            empty = svc.podcast_list()
+            self.assertTrue(empty.ok)
+            self.assertEqual(empty.data["count"], 0)
+
+            from mtpmanager.infra.podcast_index import (
+                create_or_update_podcast,
+                upsert_episodes,
+            )
+
+            show = create_or_update_podcast(
+                feed_url="https://example.com/feed.xml",
+                title="Test Show",
+                author="Host",
+                path=data / "library_index.db",
+            )
+            upsert_episodes(
+                show.id,
+                [
+                    {
+                        "feed_guid": "ep1",
+                        "title": "Episode One",
+                        "pub_date": "2026-08-01",
+                        "enclosure_url": "https://example.com/e1.mp3",
+                        "enclosure_type": "audio/mpeg",
+                        "enclosure_bytes": 100,
+                        "duration_sec": 60,
+                    }
+                ],
+                path=data / "library_index.db",
+            )
+            listed = svc.podcast_list()
+            self.assertEqual(listed.data["count"], 1)
+            eps = svc.podcast_episodes(show.id, limit=10)
+            self.assertTrue(eps.ok)
+            self.assertEqual(eps.data["returned"], 1)
+            gated = svc.podcast_unsubscribe(show.id, confirm=False)
+            self.assertEqual(gated.exit_code, int(ExitCode.CONFIRM_REQUIRED))
+            unsub = svc.podcast_unsubscribe(show.id, confirm=True)
+            self.assertTrue(unsub.ok)
+
+    def test_enrich_and_pull_gates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            svc = HeadlessService(data_dir=Path(tmp))
+            g1 = svc.device_enrich_tags([1], confirm=False)
+            self.assertEqual(g1.exit_code, int(ExitCode.CONFIRM_REQUIRED))
+            self.assertIn("R1", g1.message + str(g1.data))
+            g2 = svc.device_pull([1], confirm=False)
+            self.assertEqual(g2.exit_code, int(ExitCode.CONFIRM_REQUIRED))
+            too_many = svc.device_enrich_tags(list(range(1, 30)), confirm=True)
+            self.assertFalse(too_many.ok)
+            self.assertEqual(too_many.exit_code, int(ExitCode.USAGE))
+
+    def test_send_video_dry_run_and_sync_job(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp)
+            vid = data / "clip.avi"
+            vid.write_bytes(b"\x00" * 64)
+            svc = HeadlessService(data_dir=data)
+            plan = svc.device_send_video(str(vid), dry_run=True)
+            self.assertTrue(plan.ok)
+            self.assertEqual(plan.data["parent_id"], 120)
+            st = svc.sync_job_status()
+            self.assertTrue(st.ok)
+            self.assertFalse(st.data["exists"])
+            # Create a resumable job via infra
+            from mtpmanager.infra.sync_job import (
+                new_sync_job,
+                save_sync_job,
+                sync_job_path,
+            )
+
+            job = new_sync_job(
+                paths=["/no/such/a.mp3", "/no/such/b.mp3"],
+                label="test",
+                mode="experimental",
+            )
+            job.status = "failed"
+            job.next_index = 0
+            save_sync_job(job, path=sync_job_path(data_dir=data))
+            st2 = svc.sync_job_status()
+            self.assertTrue(st2.data["resumable"])
+            # Resume dry-run will fail resolve paths — still exercises gate
+            res = svc.sync_resume(dry_run=True)
+            # Unknown paths → NOT_FOUND or USAGE from resolve
+            self.assertFalse(res.ok)
+
+    def test_device_pull_mocked(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp)
+            dest = data / "out"
+            dest.mkdir()
+            svc = HeadlessService(data_dir=data)
+            mock_dev = MagicMock()
+
+            def _get_file(_oid, path):
+                Path(path).write_bytes(b"audio")
+
+            mock_dev.get_file_to_file = _get_file
+            mock_dev.get_track_metadata = MagicMock(side_effect=Exception("skip"))
+            svc._device = mock_dev
+            svc._connected = True
+            svc._session_lock.try_acquire("cli-test")
+            with patch(
+                "mtpmanager.headless.phase2.retrieve_track",
+                side_effect=lambda *a, **k: type(
+                    "R",
+                    (),
+                    {
+                        "path": str(dest / "x.mp3"),
+                        "tags_written": False,
+                    },
+                )(),
+            ):
+                r = svc.device_pull([42], dest=str(dest), confirm=True)
+            self.assertTrue(r.ok, msg=r.message)
+            self.assertEqual(r.data["succeeded"], 1)
+            svc._session_lock.release()
 
 
 class MilestoneBLibraryConfigTests(unittest.TestCase):

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
+from mtpmanager.headless.tools_phase2 import PHASE2_TOOLS
+
 # Each tool: name, description, host_only, destructive, parameters (JSON-schema-ish).
-TOOL_CATALOG: list[dict[str, Any]] = [
+_BASE_TOOLS: list[dict[str, Any]] = [
     {
         "name": "agent_doctor",
         "cli": ["agent", "doctor"],
@@ -613,6 +615,8 @@ TOOL_CATALOG: list[dict[str, Any]] = [
         },
     },
 ]
+
+TOOL_CATALOG: list[dict[str, Any]] = list(_BASE_TOOLS) + list(PHASE2_TOOLS)
 
 
 def tools_as_dict() -> dict[str, Any]:

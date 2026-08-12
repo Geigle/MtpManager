@@ -39,7 +39,14 @@ from mtpmanager.domain.playlist_shuffle import (
 )
 from mtpmanager.domain.track_id import is_track_guid
 from mtpmanager.headless.dto import AgentResult, ExitCode, fail, ok, to_jsonable
+from mtpmanager.headless.phase2 import Phase2Mixin
 from mtpmanager.headless.tools import tools_as_dict
+from mtpmanager.infra.sync_job import (
+    load_sync_job,
+    new_sync_job,
+    save_sync_job,
+    sync_job_path,
+)
 from mtpmanager.infra.app_config import (
     VALID_SEND_FORMATS,
     load_app_config,
@@ -169,7 +176,7 @@ def _track_dict(track: Track, *, score: float | None = None) -> dict[str, Any]:
     return d
 
 
-class HeadlessService:
+class HeadlessService(Phase2Mixin):
     """Composition root for agent-facing operations."""
 
     def __init__(self, *, data_dir: Path | None = None) -> None:
@@ -2148,24 +2155,37 @@ class HeadlessService:
         playlist: str | None = None,
         entire_library: bool = False,
         path_prefix: str | None = None,
+        tracks: Sequence[Track] | None = None,
         mode: str | None = None,
         dry_run: bool = False,
         confirm: bool = False,
         push_playlist: bool = False,
         batch_size: int | None = None,
         reconnect_quiet_s: float | None = None,
+        persist_job: bool | None = None,
     ) -> AgentResult:
-        selected, unresolved, playlist_name, err = self._resolve_sync_tracks(
-            guids=guids,
-            paths=paths,
-            artist=artist,
-            album=album,
-            playlist=playlist,
-            entire_library=bool(entire_library),
-            path_prefix=path_prefix,
-        )
-        if err is not None:
-            return err
+        if tracks is not None:
+            selected = list(tracks)
+            unresolved: list[str] = []
+            playlist_name = None
+            if not selected:
+                return fail(
+                    "USAGE",
+                    "No tracks provided",
+                    exit_code=ExitCode.USAGE,
+                )
+        else:
+            selected, unresolved, playlist_name, err = self._resolve_sync_tracks(
+                guids=guids,
+                paths=paths,
+                artist=artist,
+                album=album,
+                playlist=playlist,
+                entire_library=bool(entire_library),
+                path_prefix=path_prefix,
+            )
+            if err is not None:
+                return err
 
         cfg = self._config()
         # Same default as the GUI: PyMTP unless config Stable Mode is on.
@@ -2234,8 +2254,11 @@ class HeadlessService:
         )
 
         # Default batching for large scopes (ZEN poison recovery).
-        bulk_scope = bool(playlist_name) or bool(entire_library) or bool(
-            (path_prefix or "").strip()
+        bulk_scope = (
+            bool(playlist_name)
+            or bool(entire_library)
+            or bool((path_prefix or "").strip())
+            or (tracks is not None and len(selected) > 1)
         )
         if batch_size is None:
             effective_batch = DEFAULT_PLAYLIST_BATCH_SIZE if bulk_scope else 0
@@ -2245,6 +2268,13 @@ class HeadlessService:
             DEFAULT_RECONNECT_QUIET_S
             if reconnect_quiet_s is None
             else max(0.0, float(reconnect_quiet_s))
+        )
+
+        # Durable job for multi-track resumes (playlist / entire / prefix / bulk).
+        write_job = (
+            bool(persist_job)
+            if persist_job is not None
+            else bool(bulk_scope and confirm and not dry_run)
         )
 
         serial = self._device_serial
@@ -2343,6 +2373,22 @@ class HeadlessService:
             statuses: list[dict[str, str]] = []
             succeeded = 0
             fatal_events = 0
+            job = None
+            job_path = sync_job_path(data_dir=self.data_dir)
+            if write_job and to_send:
+                job = new_sync_job(
+                    paths=[t.path for t in to_send if t.path],
+                    kind="playlist" if playlist_name else "batch",
+                    label=playlist_name or "agent-sync",
+                    target_format=target_format,
+                    mode=mode_s,
+                )
+                try:
+                    save_sync_job(job, path=job_path)
+                except Exception:
+                    logger.debug("save_sync_job start failed", exc_info=True)
+                    job = None
+
             if to_send:
                 succeeded, fatal_events, early = self._transfer_batches(
                     to_send,
@@ -2357,6 +2403,35 @@ class HeadlessService:
                     encode_settings=encode_settings,
                     resolve_encode_settings=resolve_encode_for_track,
                 )
+                if job is not None:
+                    try:
+                        # Advance past paths that reported done.
+                        done_paths = {
+                            s.get("path")
+                            for s in statuses
+                            if s.get("status") == "done" and s.get("path")
+                        }
+                        for p in list(job.paths):
+                            if p in done_paths:
+                                job.mark_path_done(p)
+                        if early is not None or fatal_events:
+                            fail_path = ""
+                            for s in reversed(statuses):
+                                if s.get("status") not in ("done",) and s.get("path"):
+                                    fail_path = s["path"]
+                                    break
+                            if not fail_path and job.remaining_paths():
+                                fail_path = job.remaining_paths()[0]
+                            if fail_path:
+                                job.mark_path_failed(
+                                    fail_path,
+                                    (early.message if early else "") or "fatal",
+                                )
+                        elif succeeded >= len(to_send):
+                            job.mark_completed()
+                        save_sync_job(job, path=job_path)
+                    except Exception:
+                        logger.debug("save_sync_job mid failed", exc_info=True)
                 if early is not None:
                     early.data = {
                         **(early.data or {}),

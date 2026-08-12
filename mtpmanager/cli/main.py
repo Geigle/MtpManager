@@ -256,7 +256,117 @@ def build_parser() -> argparse.ArgumentParser:
     delete = dev_sub.add_parser("delete", help="Delete one object by id")
     delete.add_argument("object_id", type=int)
     delete.add_argument("--confirm", action="store_true")
+    pull = dev_sub.add_parser(
+        "pull",
+        help="Pull object id(s) to library/dest (R3/R4; requires --confirm)",
+    )
+    pull.add_argument(
+        "object_ids",
+        nargs="+",
+        type=int,
+        help="MTP object id(s)",
+    )
+    pull.add_argument("--dest", default=None, help="Destination directory")
+    pull.add_argument("--confirm", action="store_true")
+    enrich = dev_sub.add_parser(
+        "enrich-tags",
+        help=(
+            "HAZARDOUS: fetch tags for object ids (R1/R2 hang/poison; "
+            "max 25; requires --confirm)"
+        ),
+    )
+    enrich.add_argument("object_ids", nargs="+", type=int)
+    enrich.add_argument("--confirm", action="store_true")
+    send_vid = dev_sub.add_parser(
+        "send-video",
+        help="Send host video to Video 120 / TV 124 (R1/R3/R4)",
+    )
+    send_vid.add_argument("path", help="Host video file")
+    send_vid.add_argument(
+        "--parent-id",
+        type=int,
+        default=120,
+        dest="parent_id",
+        help="120=Video (default), 124=TV",
+    )
+    send_vid.add_argument(
+        "--no-encode",
+        action="store_true",
+        help="Send file as-is without device encode",
+    )
+    send_vid.add_argument("--preset-id", default=None, dest="preset_id")
+    send_vid.add_argument("--title", default=None)
+    gvid = send_vid.add_mutually_exclusive_group()
+    gvid.add_argument("--dry-run", action="store_true")
+    gvid.add_argument("--confirm", action="store_true")
     # Album-art probe/experiment: HeadlessService only (dev). Not CLI tools.
+
+    # podcast (host + pending device)
+    pod = sub.add_parser("podcast", help="Podcasts (RSS host + pending device sync)")
+    pod_sub = pod.add_subparsers(dest="action", required=True)
+    pod_sub.add_parser("list", help="List subscriptions")
+    pod_show = pod_sub.add_parser("show", help="Show one podcast")
+    pod_show.add_argument("--id", type=int, default=None, dest="podcast_id")
+    pod_show.add_argument("--title", default=None)
+    pod_eps = pod_sub.add_parser("episodes", help="List episodes")
+    pod_eps.add_argument("podcast_id", type=int)
+    pod_eps.add_argument("--limit", type=int, default=50)
+    pod_sub_s = pod_sub.add_parser("subscribe", help="Subscribe to feed URL")
+    pod_sub_s.add_argument("feed_url")
+    pod_sub_s.add_argument("--initial-limit", type=int, default=20, dest="initial_limit")
+    pod_un = pod_sub.add_parser("unsubscribe", help="Delete subscription")
+    pod_un.add_argument("podcast_id", type=int)
+    pod_un.add_argument("--confirm", action="store_true")
+    pod_rf = pod_sub.add_parser("refresh", help="Refresh feed")
+    pod_rf.add_argument("podcast_id", type=int)
+    pod_dl = pod_sub.add_parser("download", help="Download episode enclosure")
+    pod_dl.add_argument("episode_id", type=int)
+    pod_dl.add_argument("--prefer-video", action="store_true", dest="prefer_video")
+    pod_fs = pod_sub.add_parser(
+        "full-sync-host",
+        help="Host pass: refresh + download new (no USB)",
+    )
+    pod_fs.add_argument(
+        "--podcast-id",
+        action="append",
+        type=int,
+        default=[],
+        dest="podcast_ids",
+    )
+    pod_fs.add_argument("--max-new-per-show", type=int, default=None, dest="max_new")
+    pod_sub.add_parser("day-show", help="Today's day playlist")
+    pod_da = pod_sub.add_parser("day-add", help="Add episode to day playlist")
+    pod_da.add_argument("--episode-id", type=int, default=None, dest="episode_id")
+    pod_da.add_argument("--guid", default=None)
+    pod_dr = pod_sub.add_parser("day-remove", help="Remove GUID from day playlist")
+    pod_dr.add_argument("guid")
+    pod_sp = pod_sub.add_parser(
+        "sync-pending",
+        help="Send pending episodes to device (R1/R3/R4)",
+    )
+    pod_sp.add_argument("--mode", default=None)
+    pod_sp.add_argument("--batch-size", type=int, default=None, dest="batch_size")
+    pod_sp.add_argument(
+        "--push-day-playlist",
+        action="store_true",
+        dest="push_day_playlist",
+        help="After send, push today's day playlist (Finish Sync)",
+    )
+    gpod = pod_sp.add_mutually_exclusive_group()
+    gpod.add_argument("--dry-run", action="store_true")
+    gpod.add_argument("--confirm", action="store_true")
+
+    # sync-job
+    sj = sub.add_parser("sync-job", help="Durable multi-track sync job")
+    sj_sub = sj.add_subparsers(dest="action", required=True)
+    sj_sub.add_parser("status", help="Show job state")
+    sj_cl = sj_sub.add_parser("clear", help="Clear job file")
+    sj_cl.add_argument("--confirm", action="store_true")
+    sj_rs = sj_sub.add_parser("resume", help="Resume remaining paths (R1)")
+    sj_rs.add_argument("--batch-size", type=int, default=None, dest="batch_size")
+    gsj = sj_rs.add_mutually_exclusive_group()
+    gsj.add_argument("--dry-run", action="store_true")
+    gsj.add_argument("--confirm", action="store_true")
 
     # sync
     sync = sub.add_parser("sync", help="Transfer tracks to device")
@@ -461,6 +571,91 @@ def dispatch(svc: HeadlessService, args: argparse.Namespace) -> AgentResult:
             )
         if action == "delete":
             return svc.device_delete(args.object_id, confirm=bool(args.confirm))
+        if action == "pull":
+            return svc.device_pull(
+                list(args.object_ids or []),
+                dest=getattr(args, "dest", None),
+                confirm=bool(args.confirm),
+            )
+        if action == "enrich-tags":
+            return svc.device_enrich_tags(
+                list(args.object_ids or []),
+                confirm=bool(args.confirm),
+            )
+        if action == "send-video":
+            return svc.device_send_video(
+                args.path,
+                parent_id=int(getattr(args, "parent_id", 120) or 120),
+                encode=not bool(getattr(args, "no_encode", False)),
+                preset_id=getattr(args, "preset_id", None),
+                dry_run=bool(getattr(args, "dry_run", False)),
+                confirm=bool(getattr(args, "confirm", False)),
+                title=getattr(args, "title", None),
+            )
+
+    if group == "podcast":
+        if action == "list":
+            return svc.podcast_list()
+        if action == "show":
+            return svc.podcast_show(
+                getattr(args, "podcast_id", None),
+                title=getattr(args, "title", None),
+            )
+        if action == "episodes":
+            return svc.podcast_episodes(
+                int(args.podcast_id), limit=int(getattr(args, "limit", 50) or 50)
+            )
+        if action == "subscribe":
+            return svc.podcast_subscribe(
+                args.feed_url,
+                initial_limit=int(getattr(args, "initial_limit", 20) or 20),
+            )
+        if action == "unsubscribe":
+            return svc.podcast_unsubscribe(
+                int(args.podcast_id), confirm=bool(args.confirm)
+            )
+        if action == "refresh":
+            return svc.podcast_refresh(int(args.podcast_id))
+        if action == "download":
+            return svc.podcast_download_episode(
+                int(args.episode_id),
+                prefer_video=bool(getattr(args, "prefer_video", False)),
+            )
+        if action == "full-sync-host":
+            ids = list(getattr(args, "podcast_ids", None) or [])
+            return svc.podcast_full_sync_host(
+                podcast_ids=ids or None,
+                max_new_per_show=getattr(args, "max_new", None),
+            )
+        if action == "day-show":
+            return svc.podcast_day_playlist_show()
+        if action == "day-add":
+            return svc.podcast_day_add(
+                episode_id=getattr(args, "episode_id", None),
+                guid=getattr(args, "guid", None),
+            )
+        if action == "day-remove":
+            return svc.podcast_day_remove(args.guid)
+        if action == "sync-pending":
+            return svc.podcast_sync_pending(
+                dry_run=bool(getattr(args, "dry_run", False)),
+                confirm=bool(getattr(args, "confirm", False)),
+                mode=getattr(args, "mode", None),
+                batch_size=getattr(args, "batch_size", None),
+                push_day_playlist=bool(getattr(args, "push_day_playlist", False)),
+            )
+
+    if group == "sync-job":
+        if action == "status":
+            return svc.sync_job_status()
+        if action == "clear":
+            return svc.sync_job_clear(confirm=bool(args.confirm))
+        if action == "resume":
+            return svc.sync_resume(
+                dry_run=bool(getattr(args, "dry_run", False)),
+                confirm=bool(getattr(args, "confirm", False)),
+                batch_size=getattr(args, "batch_size", None),
+            )
 
     if group == "sync":
         guids, paths = _collect_guids_paths(args)

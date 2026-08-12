@@ -289,9 +289,9 @@ Official MCP SDK remains optional (existing note in agent-interface).
 
 ### Phase 2 exit criteria
 
-- Podcast host + device path usable from CLI/MCP with experimental flags respected.
-- Pull and enrich available with **visible risk docs**.
-- Video send and job resume available or explicitly deferred with reason in this file.
+- [x] Podcast host + device path usable from CLI/MCP with experimental flags respected.
+- [x] Pull and enrich available with **visible risk docs**.
+- [x] Video send and job resume available; MCP `--data-dir` shipped; progress/cancel deferred (docs only).
 
 ---
 
@@ -373,12 +373,12 @@ Each PR: catalog + CLI + MCP + tests + hazard table rows.
 
 ### Milestone C — Full product agent (Phase 2)
 
-- [ ] PR 2.1–2.2 Podcasts
-- [ ] PR 2.3 Pull
-- [ ] PR 2.4 Enrich + risk docs
-- [ ] PR 2.5 Video
-- [ ] PR 2.6 Resume job
-- [ ] PR 2.7 MCP ergonomics
+- [x] PR 2.1–2.2 Podcasts
+- [x] PR 2.3 Pull
+- [x] PR 2.4 Enrich + risk docs
+- [x] PR 2.5 Video
+- [x] PR 2.6 Resume job
+- [x] PR 2.7 MCP ergonomics (`--data-dir`; progress/cancel documented, not implemented)
 
 ### Milestone D — Power tools (Phase 3)
 
@@ -415,3 +415,4 @@ Each PR: catalog + CLI + MCP + tests + hazard table rows.
 | 2026-08-11 | Plan created from CLI/MCP gap review. P0.1: **hide** art experiment (do not MCP-wire). P2 enrich: mandatory risk docs. |
 | 2026-08-11 | Milestone A shipped: art tools off agent surface; playlist_replace confirm; catalog↔MCP/CLI parity tests; docs. |
 | 2026-08-11 | Milestone B shipped: library roots/scan; config_patch; refresh-index; inventory filters; playlist CRUD/reorder/shuffle; entire_library + path_prefix sync. |
+| 2026-08-11 | Milestone C shipped: podcasts; pull; enrich (R1/R2 docs); video; sync-job; MCP --data-dir; 49 agent tools. |
