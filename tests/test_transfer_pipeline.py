@@ -46,8 +46,10 @@ class _FakeTranscoder:
 
 class _RecordingTransport:
     def __init__(self) -> None:
-        # path, title, parent, guid
-        self.sent: list[tuple[str, str, int | None, str | None]] = []
+        # path, title, parent, guid, preferred_basename
+        self.sent: list[
+            tuple[str, str, int | None, str | None, str | None]
+        ] = []
         self.hold_paths: list[str] = []
 
     def send_track(
@@ -57,11 +59,14 @@ class _RecordingTransport:
         *,
         parent_id: int | None = None,
         guid: str | None = None,
+        preferred_basename: str | None = None,
     ) -> int | None:
         # Prove the file still exists at send time (not clobbered/deleted).
         self.hold_paths.append(path)
         assert os.path.isfile(path), f"missing at send: {path}"
-        self.sent.append((path, meta.title, parent_id, guid))
+        self.sent.append(
+            (path, meta.title, parent_id, guid, preferred_basename)
+        )
         return None
 
 
@@ -73,8 +78,15 @@ class _FailSecondTransport(_RecordingTransport):
         *,
         parent_id: int | None = None,
         guid: str | None = None,
+        preferred_basename: str | None = None,
     ) -> int | None:
-        super().send_track(path, meta, parent_id=parent_id, guid=guid)
+        super().send_track(
+            path,
+            meta,
+            parent_id=parent_id,
+            guid=guid,
+            preferred_basename=preferred_basename,
+        )
         if len(self.sent) == 2:
             raise TransportError("boom", fatal=True, path=path)
         return None
@@ -188,11 +200,13 @@ class DualSlotPipelineTests(unittest.TestCase):
             )
             self.assertEqual(n, 3)
             self.assertEqual(
-                [t for _, t, _, _ in transport.sent], ["One", "Two", "Three"]
+                [t for _, t, _, _, _ in transport.sent], ["One", "Two", "Three"]
             )
-            self.assertEqual([p for _, _, p, _ in transport.sent], [None, None, None])
+            self.assertEqual(
+                [p for _, _, p, _, _ in transport.sent], [None, None, None]
+            )
             # Every send gets a 32-hex guid
-            for _, _, _, g in transport.sent:
+            for _, _, _, g, _ in transport.sent:
                 self.assertEqual(len(g or ""), 32)
             # Convert order uses slots 0, 1, 0
             slots = [c[2] for c in tr.calls]
@@ -295,9 +309,21 @@ class DualSlotPipelineTests(unittest.TestCase):
                 return cancel_after_first["n"] >= 1
 
             class _CountingTransport(_RecordingTransport):
-                def send_track(self, path, meta, *, parent_id=None, guid=None):
+                def send_track(
+                    self,
+                    path,
+                    meta,
+                    *,
+                    parent_id=None,
+                    guid=None,
+                    preferred_basename=None,
+                ):
                     super().send_track(
-                        path, meta, parent_id=parent_id, guid=guid
+                        path,
+                        meta,
+                        parent_id=parent_id,
+                        guid=guid,
+                        preferred_basename=preferred_basename,
                     )
                     cancel_after_first["n"] += 1
                     return None
@@ -372,7 +398,15 @@ class DualSlotPipelineTests(unittest.TestCase):
             tr = _FakeTranscoder(tmp)
 
             class _GrowTransport(_RecordingTransport):
-                def send_track(self, path, meta, *, parent_id=None, guid=None):
+                def send_track(
+                    self,
+                    path,
+                    meta,
+                    *,
+                    parent_id=None,
+                    guid=None,
+                    preferred_basename=None,
+                ):
                     # After first send starts, enqueue more work.
                     if len(self.sent) == 0:
                         q.extend(
@@ -382,7 +416,11 @@ class DualSlotPipelineTests(unittest.TestCase):
                             ]
                         )
                     return super().send_track(
-                        path, meta, parent_id=parent_id, guid=guid
+                        path,
+                        meta,
+                        parent_id=parent_id,
+                        guid=guid,
+                        preferred_basename=preferred_basename,
                     )
 
             transport = _GrowTransport()
@@ -396,7 +434,7 @@ class DualSlotPipelineTests(unittest.TestCase):
             self.assertEqual(n, 3)
             self.assertEqual(len(transport.sent), 3)
             self.assertEqual(
-                [t for _, t, _, _ in transport.sent],
+                [t for _, t, _, _, _ in transport.sent],
                 ["One", "Two", "Three"],
             )
 

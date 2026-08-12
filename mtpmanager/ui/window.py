@@ -163,7 +163,9 @@ BG_VIDEO_PODCAST = "#c5e8e6"
 # Podcasts tab
 CTX_PODCAST_SYNC_LATEST = "Sync Latest"
 CTX_PODCAST_ENCODE = "Encode Settings…"
+CTX_PODCAST_SPECIAL_SYNC = "Special Sync…"
 CTX_PODCAST_EPISODE_SYNC = "Sync Episodes Now"
+CTX_PODCAST_EPISODE_SPECIAL_SYNC = "Special Sync…"
 CTX_PODCAST_PLAY_EPISODE = "Play This Episode"
 CTX_PODCAST_PLAY_EPISODES = "Play These Episodes"
 CTX_PODCAST_REVEAL_DOWNLOAD = reveal_in_file_manager_label(download=True)
@@ -192,6 +194,7 @@ CTX_SYNC_SELECTED = "Sync selected tracks"
 CTX_SYNC_TRACK = "Sync this track"
 CTX_SYNC_ALBUM = "Sync Album"
 CTX_SYNC_ARTIST = "Sync all from Artist"
+CTX_SPECIAL_SYNC = "Special Sync…"
 CTX_PLAY_TRACK = "Play This Track"
 CTX_PLAY_TRACKS = "Play These Tracks"
 CTX_ADD_TO_PLAYLIST = "Add This Track to Playlist…"
@@ -202,6 +205,7 @@ CTX_EXCLUDE_FOLDER = "Exclude this folder…"
 # Group header context menus (labels updated dynamically before popup)
 CTX_SYNC_ARTIST_GROUP = "Sync all from Artist"
 CTX_SYNC_ALBUM_GROUP = "Sync album"
+CTX_SPECIAL_SYNC_GROUP = "Special Sync…"
 CTX_PLAY_ARTIST_GROUP = "Play All from Artist"
 CTX_PLAY_ALBUM_GROUP = "Play Album"
 CTX_ADD_ARTIST_TO_PLAYLIST = "Add All from Artist to Playlist…"
@@ -571,33 +575,17 @@ class MainWindow:
         # Default: experimental tools off (simpler menus).
         self.set_experimental_tools_enabled(False)
 
-        # Track / group context menus (commands wired by controller).
+        # Track / group / podcast context menus rebuilt when experimental tools
+        # toggle (Special Sync is experimental-only). Handlers re-applied.
+        self._track_ctx_cmds: dict = {}
+        self._podcast_ctx_cmds: dict = {}
         self.menu_track_ctx = Menu(self.root, tearoff=0)
-        self.menu_track_ctx.add_command(label=CTX_SYNC_SELECTED, state=DISABLED)
-        self.menu_track_ctx.add_separator()
-        self.menu_track_ctx.add_command(label=CTX_SYNC_TRACK)
-        self.menu_track_ctx.add_command(label=CTX_SYNC_ALBUM)
-        self.menu_track_ctx.add_command(label=CTX_SYNC_ARTIST)
-        self.menu_track_ctx.add_separator()
-        self.menu_track_ctx.add_command(label=CTX_PLAY_TRACK)
-        self.menu_track_ctx.add_command(label=CTX_ADD_TO_PLAYLIST)
-        self.menu_track_ctx.add_separator()
-        self.menu_track_ctx.add_command(label=CTX_EXCLUDE_FILE)
-        self.menu_track_ctx.add_command(label=CTX_EXCLUDE_FOLDER)
-
         self.menu_artist_ctx = Menu(self.root, tearoff=0)
-        self.menu_artist_ctx.add_command(label=CTX_SYNC_ARTIST_GROUP)
-        self.menu_artist_ctx.add_separator()
-        self.menu_artist_ctx.add_command(label=CTX_PLAY_ARTIST_GROUP)
-        self.menu_artist_ctx.add_command(label=CTX_ADD_ARTIST_TO_PLAYLIST)
-
         self.menu_album_ctx = Menu(self.root, tearoff=0)
-        self.menu_album_ctx.add_command(label=CTX_SYNC_ALBUM_GROUP)
-        self.menu_album_ctx.add_separator()
-        self.menu_album_ctx.add_command(label=CTX_PLAY_ALBUM_GROUP)
-        self.menu_album_ctx.add_command(label=CTX_ADD_ALBUM_TO_PLAYLIST)
-        self.menu_album_ctx.add_separator()
-        self.menu_album_ctx.add_command(label=CTX_EXCLUDE_GROUP_FOLDER)
+        self.menu_podcast_show_ctx = Menu(self.root, tearoff=0)
+        self.menu_podcast_episode_ctx = Menu(self.root, tearoff=0)
+        self._rebuild_library_context_menus()
+        self._rebuild_podcast_context_menus()
 
         self.menu_playlist_ctx = Menu(self.root, tearoff=0)
         self.menu_playlist_ctx.add_command(label=CTX_PLAYLIST_PLAY_TRACK)
@@ -644,25 +632,6 @@ class MainWindow:
         )
         self.menu_device_playlist_ctx.add_command(
             label=CTX_DEVICE_PLAYLIST_REFRESH
-        )
-
-        self.menu_podcast_show_ctx = Menu(self.root, tearoff=0)
-        self.menu_podcast_show_ctx.add_command(label=CTX_PODCAST_SYNC_LATEST)
-        self.menu_podcast_show_ctx.add_command(label=CTX_PODCAST_ENCODE)
-
-        self.menu_podcast_episode_ctx = Menu(self.root, tearoff=0)
-        self.menu_podcast_episode_ctx.add_command(label=CTX_PODCAST_PLAY_EPISODE)
-        self.menu_podcast_episode_ctx.add_command(label=CTX_PODCAST_EPISODE_SYNC)
-        self.menu_podcast_episode_ctx.add_separator()
-        self.menu_podcast_episode_ctx.add_command(
-            label=CTX_PODCAST_ADD_TO_DAY_PLAYLIST, state=DISABLED
-        )
-        self.menu_podcast_episode_ctx.add_command(
-            label=CTX_PODCAST_REMOVE_FROM_DAY_PLAYLIST, state=DISABLED
-        )
-        self.menu_podcast_episode_ctx.add_separator()
-        self.menu_podcast_episode_ctx.add_command(
-            label=CTX_PODCAST_REVEAL_DOWNLOAD, state=DISABLED
         )
 
         # Device on-media context menus (delete / pull / on-demand tags).
@@ -2145,7 +2114,9 @@ class MainWindow:
         on_episode_select=None,
         on_show_sync=None,
         on_show_encode=None,
+        on_show_special_sync=None,
         on_episode_sync=None,
+        on_episode_special_sync=None,
         on_episode_play=None,
         on_episode_reveal_download=None,
         on_episode_add_to_day_playlist=None,
@@ -2169,37 +2140,54 @@ class MainWindow:
             self.podcast_episode_tree.bind(
                 "<<TreeviewSelect>>", lambda _e: on_episode_select()
             )
-        if on_show_sync is not None:
-            self.menu_podcast_show_ctx.entryconfig(
-                CTX_PODCAST_SYNC_LATEST, command=on_show_sync
-            )
-        if on_show_encode is not None:
-            self.menu_podcast_show_ctx.entryconfig(
-                CTX_PODCAST_ENCODE, command=on_show_encode
-            )
-        if on_episode_play is not None:
-            # Index 0: Play (label toggles This/These).
-            self.menu_podcast_episode_ctx.entryconfig(0, command=on_episode_play)
-        if on_episode_sync is not None:
-            # Index 1: Sync N Episodes Now.
-            self.menu_podcast_episode_ctx.entryconfig(
-                1, command=on_episode_sync
-            )
-        if on_episode_reveal_download is not None:
-            self.menu_podcast_episode_ctx.entryconfig(
-                CTX_PODCAST_REVEAL_DOWNLOAD,
-                command=on_episode_reveal_download,
-            )
-        if on_episode_add_to_day_playlist is not None:
-            self.menu_podcast_episode_ctx.entryconfig(
-                CTX_PODCAST_ADD_TO_DAY_PLAYLIST,
-                command=on_episode_add_to_day_playlist,
-            )
-        if on_episode_remove_from_day_playlist is not None:
-            self.menu_podcast_episode_ctx.entryconfig(
-                CTX_PODCAST_REMOVE_FROM_DAY_PLAYLIST,
-                command=on_episode_remove_from_day_playlist,
-            )
+        # Merge into stored cmds (preserve handlers across rebuilds).
+        prev = getattr(self, "_podcast_ctx_cmds", {}) or {}
+        self._podcast_ctx_cmds = {
+            **prev,
+            "on_sync_latest": on_show_sync or prev.get("on_sync_latest"),
+            "on_encode": on_show_encode or prev.get("on_encode"),
+            "on_special_sync_show": on_show_special_sync
+            or prev.get("on_special_sync_show"),
+            "on_episode_play": on_episode_play or prev.get("on_episode_play"),
+            "on_episode_sync": on_episode_sync or prev.get("on_episode_sync"),
+            "on_special_sync_episodes": on_episode_special_sync
+            or prev.get("on_special_sync_episodes"),
+            "on_episode_reveal_download": on_episode_reveal_download
+            or prev.get("on_episode_reveal_download"),
+            "on_episode_add_to_day_playlist": on_episode_add_to_day_playlist
+            or prev.get("on_episode_add_to_day_playlist"),
+            "on_episode_remove_from_day_playlist": (
+                on_episode_remove_from_day_playlist
+                or prev.get("on_episode_remove_from_day_playlist")
+            ),
+        }
+        self._apply_podcast_context_commands(self._podcast_ctx_cmds)
+        # Day-playlist / reveal use labels (stable across Special Sync insert).
+        cmds = self._podcast_ctx_cmds
+        if cmds.get("on_episode_reveal_download") is not None:
+            try:
+                self.menu_podcast_episode_ctx.entryconfig(
+                    CTX_PODCAST_REVEAL_DOWNLOAD,
+                    command=cmds["on_episode_reveal_download"],
+                )
+            except Exception:
+                pass
+        if cmds.get("on_episode_add_to_day_playlist") is not None:
+            try:
+                self.menu_podcast_episode_ctx.entryconfig(
+                    CTX_PODCAST_ADD_TO_DAY_PLAYLIST,
+                    command=cmds["on_episode_add_to_day_playlist"],
+                )
+            except Exception:
+                pass
+        if cmds.get("on_episode_remove_from_day_playlist") is not None:
+            try:
+                self.menu_podcast_episode_ctx.entryconfig(
+                    CTX_PODCAST_REMOVE_FROM_DAY_PLAYLIST,
+                    command=cmds["on_episode_remove_from_day_playlist"],
+                )
+            except Exception:
+                pass
 
     def set_podcast_day_playlist_episode_menu(
         self,
@@ -2213,12 +2201,16 @@ class MainWindow:
         add_label = f"Add This Episode to {name}"
         rem_label = f"Remove This Episode from {name}"
         try:
-            # Index: 0 Play, 1 Sync, 2 sep, 3 Add, 4 Remove, 5 sep, 6 Reveal
+            # Prefer labels (indices shift when Special Sync is present).
             self.menu_podcast_episode_ctx.entryconfig(
-                3, label=add_label, state=NORMAL if can_add else DISABLED
+                CTX_PODCAST_ADD_TO_DAY_PLAYLIST,
+                label=add_label,
+                state=NORMAL if can_add else DISABLED,
             )
             self.menu_podcast_episode_ctx.entryconfig(
-                4, label=rem_label, state=NORMAL if can_remove else DISABLED
+                CTX_PODCAST_REMOVE_FROM_DAY_PLAYLIST,
+                label=rem_label,
+                state=NORMAL if can_remove else DISABLED,
             )
         except Exception:
             pass
@@ -2366,6 +2358,7 @@ class MainWindow:
 
         Send Video is a standard Device tool and is not gated.
         List Folders is experimental and is gated.
+        Special Sync on library/podcast context menus is experimental.
         """
         enabled = bool(enabled)
         self._enable_experimental_tools = enabled
@@ -2376,9 +2369,253 @@ class MainWindow:
         self._rebuild_device_menu()
         self._rebuild_transfer_menu()
         self._rebuild_config_menu()
+        # Context menus are created after the first call during __init__.
+        if getattr(self, "menu_track_ctx", None) is not None:
+            self._rebuild_library_context_menus()
+        if getattr(self, "menu_podcast_show_ctx", None) is not None:
+            self._rebuild_podcast_context_menus()
         # apply_mode_ui sets _mode late in __init__; skip until then.
         if getattr(self, "_mode", None) is not None:
             self.apply_mode_actions()
+
+    def _rebuild_library_context_menus(self) -> None:
+        """Rebuild Music/Audiobook track + group context menus."""
+        exp = bool(getattr(self, "_enable_experimental_tools", False))
+        cmds = getattr(self, "_track_ctx_cmds", {}) or {}
+
+        def _cmd(key: str):
+            return cmds.get(key)
+
+        try:
+            self.menu_track_ctx.delete(0, END)
+        except Exception:
+            pass
+        self.menu_track_ctx.add_command(
+            label=CTX_SYNC_SELECTED, state=DISABLED
+        )
+        self.menu_track_ctx.add_separator()
+        self.menu_track_ctx.add_command(label=CTX_SYNC_TRACK)
+        self.menu_track_ctx.add_command(label=CTX_SYNC_ALBUM)
+        self.menu_track_ctx.add_command(label=CTX_SYNC_ARTIST)
+        if exp:
+            self.menu_track_ctx.add_command(label=CTX_SPECIAL_SYNC)
+        self.menu_track_ctx.add_separator()
+        self.menu_track_ctx.add_command(label=CTX_PLAY_TRACK)
+        self.menu_track_ctx.add_command(label=CTX_ADD_TO_PLAYLIST)
+        self.menu_track_ctx.add_separator()
+        self.menu_track_ctx.add_command(label=CTX_EXCLUDE_FILE)
+        self.menu_track_ctx.add_command(label=CTX_EXCLUDE_FOLDER)
+
+        try:
+            self.menu_artist_ctx.delete(0, END)
+        except Exception:
+            pass
+        self.menu_artist_ctx.add_command(label=CTX_SYNC_ARTIST_GROUP)
+        if exp:
+            self.menu_artist_ctx.add_command(label=CTX_SPECIAL_SYNC_GROUP)
+        self.menu_artist_ctx.add_separator()
+        self.menu_artist_ctx.add_command(label=CTX_PLAY_ARTIST_GROUP)
+        self.menu_artist_ctx.add_command(label=CTX_ADD_ARTIST_TO_PLAYLIST)
+
+        try:
+            self.menu_album_ctx.delete(0, END)
+        except Exception:
+            pass
+        self.menu_album_ctx.add_command(label=CTX_SYNC_ALBUM_GROUP)
+        if exp:
+            self.menu_album_ctx.add_command(label=CTX_SPECIAL_SYNC_GROUP)
+        self.menu_album_ctx.add_separator()
+        self.menu_album_ctx.add_command(label=CTX_PLAY_ALBUM_GROUP)
+        self.menu_album_ctx.add_command(label=CTX_ADD_ALBUM_TO_PLAYLIST)
+        self.menu_album_ctx.add_separator()
+        self.menu_album_ctx.add_command(label=CTX_EXCLUDE_GROUP_FOLDER)
+
+        # Re-apply stored handlers if present
+        if cmds:
+            self._apply_track_context_commands(cmds)
+
+    def _rebuild_podcast_context_menus(self) -> None:
+        """Rebuild podcast show/episode context menus (Special Sync gated)."""
+        exp = bool(getattr(self, "_enable_experimental_tools", False))
+        cmds = getattr(self, "_podcast_ctx_cmds", {}) or {}
+        try:
+            self.menu_podcast_show_ctx.delete(0, END)
+        except Exception:
+            pass
+        self.menu_podcast_show_ctx.add_command(label=CTX_PODCAST_SYNC_LATEST)
+        if exp:
+            self.menu_podcast_show_ctx.add_command(
+                label=CTX_PODCAST_SPECIAL_SYNC
+            )
+        self.menu_podcast_show_ctx.add_command(label=CTX_PODCAST_ENCODE)
+
+        try:
+            self.menu_podcast_episode_ctx.delete(0, END)
+        except Exception:
+            pass
+        self.menu_podcast_episode_ctx.add_command(
+            label=CTX_PODCAST_PLAY_EPISODE
+        )
+        self.menu_podcast_episode_ctx.add_command(
+            label=CTX_PODCAST_EPISODE_SYNC
+        )
+        if exp:
+            self.menu_podcast_episode_ctx.add_command(
+                label=CTX_PODCAST_EPISODE_SPECIAL_SYNC
+            )
+        self.menu_podcast_episode_ctx.add_separator()
+        self.menu_podcast_episode_ctx.add_command(
+            label=CTX_PODCAST_ADD_TO_DAY_PLAYLIST, state=DISABLED
+        )
+        self.menu_podcast_episode_ctx.add_command(
+            label=CTX_PODCAST_REMOVE_FROM_DAY_PLAYLIST, state=DISABLED
+        )
+        self.menu_podcast_episode_ctx.add_separator()
+        self.menu_podcast_episode_ctx.add_command(
+            label=CTX_PODCAST_REVEAL_DOWNLOAD, state=DISABLED
+        )
+        if cmds:
+            self._apply_podcast_context_commands(cmds)
+
+    def _apply_track_context_commands(self, cmds: dict) -> None:
+        """Wire labels → callables for library context menus."""
+        exp = bool(getattr(self, "_enable_experimental_tools", False))
+        mapping = [
+            (CTX_SYNC_SELECTED, cmds.get("on_sync_selected")),
+            (CTX_SYNC_TRACK, cmds.get("on_sync_track")),
+            (CTX_SYNC_ALBUM, cmds.get("on_sync_album")),
+            (CTX_SYNC_ARTIST, cmds.get("on_sync_artist")),
+            (CTX_PLAY_TRACK, cmds.get("on_play_track")),
+            (CTX_ADD_TO_PLAYLIST, cmds.get("on_add_to_playlist")),
+            (CTX_EXCLUDE_FILE, cmds.get("on_exclude_file")),
+            (CTX_EXCLUDE_FOLDER, cmds.get("on_exclude_folder")),
+        ]
+        if exp:
+            mapping.append((CTX_SPECIAL_SYNC, cmds.get("on_special_sync")))
+        for label, handler in mapping:
+            if handler is not None:
+                try:
+                    self.menu_track_ctx.entryconfig(label, command=handler)
+                except Exception:
+                    pass
+        # Artist / album groups
+        try:
+            self.menu_artist_ctx.entryconfig(
+                CTX_SYNC_ARTIST_GROUP,
+                command=cmds.get("on_sync_artist_group"),
+            )
+        except Exception:
+            pass
+        if exp and cmds.get("on_special_sync_group") is not None:
+            try:
+                self.menu_artist_ctx.entryconfig(
+                    CTX_SPECIAL_SYNC_GROUP,
+                    command=cmds.get("on_special_sync_group"),
+                )
+            except Exception:
+                pass
+        if cmds.get("on_play_artist_group") is not None:
+            try:
+                self.menu_artist_ctx.entryconfig(
+                    CTX_PLAY_ARTIST_GROUP,
+                    command=cmds.get("on_play_artist_group"),
+                )
+            except Exception:
+                pass
+        if cmds.get("on_add_artist_to_playlist") is not None:
+            try:
+                self.menu_artist_ctx.entryconfig(
+                    CTX_ADD_ARTIST_TO_PLAYLIST,
+                    command=cmds.get("on_add_artist_to_playlist"),
+                )
+            except Exception:
+                pass
+        try:
+            self.menu_album_ctx.entryconfig(
+                CTX_SYNC_ALBUM_GROUP,
+                command=cmds.get("on_sync_album_group"),
+            )
+        except Exception:
+            pass
+        if exp and cmds.get("on_special_sync_group") is not None:
+            try:
+                self.menu_album_ctx.entryconfig(
+                    CTX_SPECIAL_SYNC_GROUP,
+                    command=cmds.get("on_special_sync_group"),
+                )
+            except Exception:
+                pass
+        if cmds.get("on_play_album_group") is not None:
+            try:
+                self.menu_album_ctx.entryconfig(
+                    CTX_PLAY_ALBUM_GROUP,
+                    command=cmds.get("on_play_album_group"),
+                )
+            except Exception:
+                pass
+        if cmds.get("on_add_album_to_playlist") is not None:
+            try:
+                self.menu_album_ctx.entryconfig(
+                    CTX_ADD_ALBUM_TO_PLAYLIST,
+                    command=cmds.get("on_add_album_to_playlist"),
+                )
+            except Exception:
+                pass
+        if cmds.get("on_exclude_group_folder") is not None:
+            try:
+                self.menu_album_ctx.entryconfig(
+                    CTX_EXCLUDE_GROUP_FOLDER,
+                    command=cmds.get("on_exclude_group_folder"),
+                )
+            except Exception:
+                pass
+
+    def _apply_podcast_context_commands(self, cmds: dict) -> None:
+        exp = bool(getattr(self, "_enable_experimental_tools", False))
+        if cmds.get("on_sync_latest") is not None:
+            try:
+                self.menu_podcast_show_ctx.entryconfig(
+                    CTX_PODCAST_SYNC_LATEST, command=cmds["on_sync_latest"]
+                )
+            except Exception:
+                pass
+        if exp and cmds.get("on_special_sync_show") is not None:
+            try:
+                self.menu_podcast_show_ctx.entryconfig(
+                    CTX_PODCAST_SPECIAL_SYNC,
+                    command=cmds["on_special_sync_show"],
+                )
+            except Exception:
+                pass
+        if cmds.get("on_encode") is not None:
+            try:
+                self.menu_podcast_show_ctx.entryconfig(
+                    CTX_PODCAST_ENCODE, command=cmds["on_encode"]
+                )
+            except Exception:
+                pass
+        if cmds.get("on_episode_play") is not None:
+            try:
+                self.menu_podcast_episode_ctx.entryconfig(
+                    CTX_PODCAST_PLAY_EPISODE, command=cmds["on_episode_play"]
+                )
+            except Exception:
+                pass
+        if cmds.get("on_episode_sync") is not None:
+            try:
+                self.menu_podcast_episode_ctx.entryconfig(
+                    CTX_PODCAST_EPISODE_SYNC, command=cmds["on_episode_sync"]
+                )
+            except Exception:
+                pass
+        if exp and cmds.get("on_special_sync_episodes") is not None:
+            try:
+                self.menu_podcast_episode_ctx.entryconfig(
+                    CTX_PODCAST_EPISODE_SPECIAL_SYNC,
+                    command=cmds["on_special_sync_episodes"],
+                )
+            except Exception:
+                pass
 
     def _rebuild_device_menu(self) -> None:
         try:
@@ -2499,6 +2736,8 @@ class MainWindow:
         on_sync_artist_group,
         on_sync_album_group,
         on_sync_selected=None,
+        on_special_sync=None,
+        on_special_sync_group=None,
         on_play_track=None,
         on_play_artist_group=None,
         on_play_album_group=None,
@@ -2509,42 +2748,26 @@ class MainWindow:
         on_exclude_folder=None,
         on_exclude_group_folder=None,
     ) -> None:
-        if on_sync_selected is not None:
-            self.menu_track_ctx.entryconfig(
-                CTX_SYNC_SELECTED, command=on_sync_selected
-            )
-        self.menu_track_ctx.entryconfig(CTX_SYNC_TRACK, command=on_sync_track)
-        self.menu_track_ctx.entryconfig(CTX_SYNC_ALBUM, command=on_sync_album)
-        self.menu_track_ctx.entryconfig(CTX_SYNC_ARTIST, command=on_sync_artist)
-        if on_play_track is not None:
-            # Index (not label): label toggles Play This / These Tracks.
-            # Layout: 0 Sync sel, 1 sep, 2–4 sync, 5 sep, 6 Play, 7 Add…
-            self.menu_track_ctx.entryconfig(6, command=on_play_track)
-        if on_add_to_playlist is not None:
-            self.menu_track_ctx.entryconfig(7, command=on_add_to_playlist)
-        if on_exclude_file is not None:
-            self.menu_track_ctx.entryconfig(
-                CTX_EXCLUDE_FILE, command=on_exclude_file
-            )
-        if on_exclude_folder is not None:
-            self.menu_track_ctx.entryconfig(
-                CTX_EXCLUDE_FOLDER, command=on_exclude_folder
-            )
-        self.menu_artist_ctx.entryconfig(0, command=on_sync_artist_group)
-        if on_play_artist_group is not None:
-            # Index 2 (0 Sync, 1 sep, 2 Play…).
-            self.menu_artist_ctx.entryconfig(2, command=on_play_artist_group)
-        if on_add_artist_to_playlist is not None:
-            self.menu_artist_ctx.entryconfig(3, command=on_add_artist_to_playlist)
-        self.menu_album_ctx.entryconfig(0, command=on_sync_album_group)
-        if on_play_album_group is not None:
-            # Index 2 (0 Sync, 1 sep, 2 Play…).
-            self.menu_album_ctx.entryconfig(2, command=on_play_album_group)
-        if on_add_album_to_playlist is not None:
-            self.menu_album_ctx.entryconfig(3, command=on_add_album_to_playlist)
-        if on_exclude_group_folder is not None:
-            # Index 5 after Play + Add + separator.
-            self.menu_album_ctx.entryconfig(5, command=on_exclude_group_folder)
+        self._track_ctx_cmds = {
+            "on_sync_track": on_sync_track,
+            "on_sync_album": on_sync_album,
+            "on_sync_artist": on_sync_artist,
+            "on_sync_artist_group": on_sync_artist_group,
+            "on_sync_album_group": on_sync_album_group,
+            "on_sync_selected": on_sync_selected,
+            "on_special_sync": on_special_sync,
+            "on_special_sync_group": on_special_sync_group,
+            "on_play_track": on_play_track,
+            "on_play_artist_group": on_play_artist_group,
+            "on_play_album_group": on_play_album_group,
+            "on_add_to_playlist": on_add_to_playlist,
+            "on_add_artist_to_playlist": on_add_artist_to_playlist,
+            "on_add_album_to_playlist": on_add_album_to_playlist,
+            "on_exclude_file": on_exclude_file,
+            "on_exclude_folder": on_exclude_folder,
+            "on_exclude_group_folder": on_exclude_group_folder,
+        }
+        self._apply_track_context_commands(self._track_ctx_cmds)
 
     def set_playlist_tab_commands(
         self,

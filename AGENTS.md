@@ -52,6 +52,7 @@ Do **not**:
 | CMD hang / timeout / fatal stderr patterns | `mtpmanager/infra/cmd_transport.py` |
 | PyMTP send, filetype enum, ctypes | `mtpmanager/infra/pymtp_wrapper.py`, `pymtp_device.py` + `tests/test_pymtp_filetypes.py` |
 | Transcode → send pipeline, batch abort | `mtpmanager/app/transfer.py` |
+| Special Sync (experimental per-batch encode/meta/folder/GUID) | `domain/special_sync.py`, `ui/dialogs.ask_special_sync`, context menus in `ui/window.py` / `ui/controllers.py`; gated by `enable_experimental_tools` |
 | Live batch queue (append mid-job) | `mtpmanager/app/transfer_queue.py` + controllers `_enqueue_tracks` |
 | UI actions, mode, recovery dialogs | `mtpmanager/ui/controllers.py`, `window.py`, `dialogs.py` (incl. Manage Library) |
 | Exclusive MTP/USB ownership (auto-connect vs sync) | `mtpmanager/app/device_io_gate.py` + poll/transfer/seed paths in `ui/controllers.py` |
