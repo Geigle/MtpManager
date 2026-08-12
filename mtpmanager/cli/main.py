@@ -41,6 +41,43 @@ def _csv_list(value: str | None) -> list[str]:
     return parts
 
 
+def _guid_path_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--guid",
+        action="append",
+        default=[],
+        dest="guids",
+        help="Track GUID (repeatable)",
+    )
+    parser.add_argument(
+        "--guids",
+        dest="guids_csv",
+        default=None,
+        help="Comma-separated GUIDs",
+    )
+    parser.add_argument(
+        "--path",
+        action="append",
+        default=[],
+        dest="paths",
+        help="Host file path (repeatable)",
+    )
+    parser.add_argument(
+        "--paths",
+        dest="paths_csv",
+        default=None,
+        help="Comma-separated host paths",
+    )
+
+
+def _collect_guids_paths(args: argparse.Namespace) -> tuple[list[str], list[str]]:
+    guids = list(args.guids or [])
+    guids.extend(_csv_list(getattr(args, "guids_csv", None)))
+    paths = list(args.paths or [])
+    paths.extend(_csv_list(getattr(args, "paths_csv", None)))
+    return guids, paths
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="python -m mtpmanager.cli",
@@ -73,6 +110,41 @@ def build_parser() -> argparse.ArgumentParser:
     lib = sub.add_parser("library", help="Host library (no USB)")
     lib_sub = lib.add_subparsers(dest="action", required=True)
     lib_sub.add_parser("list-roots", help="List library root paths")
+    set_roots = lib_sub.add_parser("set-roots", help="Replace library roots")
+    set_roots.add_argument(
+        "roots",
+        nargs="*",
+        help="Root directories (empty + --confirm clears)",
+    )
+    set_roots.add_argument(
+        "--no-rescan",
+        action="store_true",
+        help="Update roots without scanning",
+    )
+    set_roots.add_argument(
+        "--confirm",
+        action="store_true",
+        help="Required when clearing all roots",
+    )
+    add_root = lib_sub.add_parser("add-root", help="Append one library root")
+    add_root.add_argument("root", help="Absolute directory path")
+    add_root.add_argument("--no-rescan", action="store_true")
+    rem_root = lib_sub.add_parser("remove-root", help="Remove one library root")
+    rem_root.add_argument("root", help="Root path to remove")
+    rem_root.add_argument("--no-rescan", action="store_true")
+    rem_root.add_argument(
+        "--confirm",
+        action="store_true",
+        help="Required when removing the last root",
+    )
+    scan = lib_sub.add_parser("scan", help="Scan roots into SQLite index")
+    scan.add_argument(
+        "--root",
+        action="append",
+        default=[],
+        dest="scan_roots",
+        help="Optional root for this scan only (repeatable)",
+    )
     search = lib_sub.add_parser("search", help="Fuzzy search tracks")
     search.add_argument("query", help="Search query (supports artist:term etc.)")
     search.add_argument("--limit", type=int, default=50)
@@ -93,32 +165,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Append tracks to a host playlist by GUID and/or path",
     )
     pl_add.add_argument("name", help="Existing playlist name")
-    pl_add.add_argument(
-        "--guid",
-        action="append",
-        default=[],
-        dest="guids",
-        help="Track GUID (repeatable)",
-    )
-    pl_add.add_argument(
-        "--guids",
-        dest="guids_csv",
-        default=None,
-        help="Comma-separated GUIDs",
-    )
-    pl_add.add_argument(
-        "--path",
-        action="append",
-        default=[],
-        dest="paths",
-        help="Host file path (repeatable)",
-    )
-    pl_add.add_argument(
-        "--paths",
-        dest="paths_csv",
-        default=None,
-        help="Comma-separated host paths",
-    )
+    _guid_path_args(pl_add)
     pl_add.add_argument(
         "--allow-duplicates",
         action="store_true",
@@ -132,37 +179,39 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     pl_replace.add_argument("name", help="Existing playlist name")
-    pl_replace.add_argument(
-        "--guid",
-        action="append",
-        default=[],
-        dest="guids",
-        help="Track GUID (repeatable)",
-    )
-    pl_replace.add_argument(
-        "--guids",
-        dest="guids_csv",
-        default=None,
-        help="Comma-separated GUIDs",
-    )
-    pl_replace.add_argument(
-        "--path",
-        action="append",
-        default=[],
-        dest="paths",
-        help="Host file path (repeatable)",
-    )
-    pl_replace.add_argument(
-        "--paths",
-        dest="paths_csv",
-        default=None,
-        help="Comma-separated host paths",
-    )
+    _guid_path_args(pl_replace)
     pl_replace.add_argument(
         "--confirm",
         action="store_true",
         help="Required to replace or clear playlist membership",
     )
+    pl_del = pl_sub.add_parser("delete", help="Delete host playlist")
+    pl_del.add_argument("name")
+    pl_del.add_argument("--confirm", action="store_true")
+    pl_ren = pl_sub.add_parser("rename", help="Rename host playlist")
+    pl_ren.add_argument("name")
+    pl_ren.add_argument("new_name")
+    pl_rem = pl_sub.add_parser("remove", help="Remove tracks from host playlist")
+    pl_rem.add_argument("name")
+    _guid_path_args(pl_rem)
+    pl_move = pl_sub.add_parser("move", help="Reorder tracks in host playlist")
+    pl_move.add_argument("name")
+    _guid_path_args(pl_move)
+    pl_move.add_argument(
+        "--delta",
+        type=int,
+        default=-1,
+        help="Negative=up, positive=down (default -1)",
+    )
+    pl_shuf = pl_sub.add_parser("shuffle", help="Shuffle host playlist order")
+    pl_shuf.add_argument("name")
+    pl_shuf.add_argument(
+        "--algorithm",
+        choices=("artist", "merge", "spotify"),
+        default="artist",
+    )
+    pl_shuf.add_argument("--seed-guid", default=None, dest="seed_guid")
+    pl_shuf.add_argument("--confirm", action="store_true")
     pl_push = pl_sub.add_parser("push", help="Push playlist to device")
     pl_push.add_argument("name")
     pl_push.add_argument(
@@ -176,16 +225,34 @@ def build_parser() -> argparse.ArgumentParser:
     cfg_sub = cfg.add_subparsers(dest="action", required=True)
     cfg_get = cfg_sub.add_parser("get", help="Get config (or one key)")
     cfg_get.add_argument("key", nargs="?", default=None)
+    cfg_patch = cfg_sub.add_parser(
+        "patch",
+        help="Patch allowlisted config keys (JSON object)",
+    )
+    cfg_patch.add_argument(
+        "updates_json",
+        help='JSON object, e.g. \'{"stable_mode": true}\'',
+    )
 
     # device
     dev = sub.add_parser("device", help="Device session / inventory")
     dev_sub = dev.add_subparsers(dest="action", required=True)
     dev_sub.add_parser("status", help="Lock + connection status")
+    dev_sub.add_parser("list-known", help="Known device serials (cache)")
     dev_sub.add_parser("connect", help="Open PyMTP session (takes session lock)")
     dev_sub.add_parser("disconnect", help="Close session / release lock")
     dev_sub.add_parser("info", help="Device diagnostics (connected)")
+    dev_sub.add_parser(
+        "refresh-index",
+        help="Full list_files → replace device cache (USB; slow)",
+    )
     inv = dev_sub.add_parser("inventory", help="Cached inventory (no USB walk)")
     inv.add_argument("--limit", type=int, default=200)
+    inv.add_argument("--offset", type=int, default=0)
+    inv.add_argument("--parent-id", type=int, default=None, dest="parent_id")
+    inv.add_argument("--name-contains", default=None, dest="name_contains")
+    inv.add_argument("--guid", default=None)
+    inv.add_argument("--serial", default=None)
     delete = dev_sub.add_parser("delete", help="Delete one object by id")
     delete.add_argument("object_id", type=int)
     delete.add_argument("--confirm", action="store_true")
@@ -193,32 +260,25 @@ def build_parser() -> argparse.ArgumentParser:
 
     # sync
     sync = sub.add_parser("sync", help="Transfer tracks to device")
-    sync.add_argument(
-        "--guid",
-        action="append",
-        default=[],
-        dest="guids",
-        help="Track GUID (repeatable)",
-    )
-    sync.add_argument(
-        "--guids",
-        dest="guids_csv",
-        default=None,
-        help="Comma-separated GUIDs",
-    )
-    sync.add_argument(
-        "--path",
-        action="append",
-        default=[],
-        dest="paths",
-        help="Host file path (repeatable)",
-    )
+    _guid_path_args(sync)
     sync.add_argument("--artist", default=None, help="Expand to artist tracks")
     sync.add_argument("--album", default=None, help="Filter/expand by album")
     sync.add_argument(
         "--playlist",
         default=None,
         help="Host playlist name (M3U in library index); soft-skips missing paths",
+    )
+    sync.add_argument(
+        "--entire-library",
+        action="store_true",
+        dest="entire_library",
+        help="All indexed tracks (prefer --dry-run first)",
+    )
+    sync.add_argument(
+        "--path-prefix",
+        default=None,
+        dest="path_prefix",
+        help="Host folder; expand to indexed tracks under it",
     )
     sync.add_argument(
         "--push-playlist",
@@ -231,7 +291,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "USB-friendly batch size with reconnect on fatal "
-            f"(default: {15} for --playlist, 0=all-at-once otherwise)"
+            "(default: 15 for playlist/entire-library/path-prefix, 0 otherwise)"
         ),
     )
     sync.add_argument(
@@ -279,6 +339,26 @@ def dispatch(svc: HeadlessService, args: argparse.Namespace) -> AgentResult:
     if group == "library":
         if action == "list-roots":
             return svc.library_list_roots()
+        if action == "set-roots":
+            return svc.library_set_roots(
+                list(args.roots or []),
+                rescan=not bool(getattr(args, "no_rescan", False)),
+                confirm=bool(getattr(args, "confirm", False)),
+            )
+        if action == "add-root":
+            return svc.library_add_root(
+                args.root,
+                rescan=not bool(getattr(args, "no_rescan", False)),
+            )
+        if action == "remove-root":
+            return svc.library_remove_root(
+                args.root,
+                rescan=not bool(getattr(args, "no_rescan", False)),
+                confirm=bool(getattr(args, "confirm", False)),
+            )
+        if action == "scan":
+            roots = list(getattr(args, "scan_roots", None) or [])
+            return svc.library_scan(roots=roots or None)
         if action == "search":
             return svc.library_search(args.query, limit=args.limit)
         if action == "track":
@@ -292,10 +372,7 @@ def dispatch(svc: HeadlessService, args: argparse.Namespace) -> AgentResult:
         if action == "create":
             return svc.playlist_create(args.name)
         if action == "add":
-            guids = list(args.guids or [])
-            guids.extend(_csv_list(getattr(args, "guids_csv", None)))
-            paths = list(args.paths or [])
-            paths.extend(_csv_list(getattr(args, "paths_csv", None)))
+            guids, paths = _collect_guids_paths(args)
             return svc.playlist_add(
                 args.name,
                 guids=guids,
@@ -303,15 +380,36 @@ def dispatch(svc: HeadlessService, args: argparse.Namespace) -> AgentResult:
                 skip_existing=not bool(getattr(args, "allow_duplicates", False)),
             )
         if action == "replace":
-            guids = list(args.guids or [])
-            guids.extend(_csv_list(getattr(args, "guids_csv", None)))
-            paths = list(args.paths or [])
-            paths.extend(_csv_list(getattr(args, "paths_csv", None)))
+            guids, paths = _collect_guids_paths(args)
             return svc.playlist_replace(
                 args.name,
                 guids=guids,
                 paths=paths,
                 confirm=bool(getattr(args, "confirm", False)),
+            )
+        if action == "delete":
+            return svc.playlist_delete(
+                args.name, confirm=bool(getattr(args, "confirm", False))
+            )
+        if action == "rename":
+            return svc.playlist_rename(args.name, args.new_name)
+        if action == "remove":
+            guids, paths = _collect_guids_paths(args)
+            return svc.playlist_remove(args.name, guids=guids, paths=paths)
+        if action == "move":
+            guids, paths = _collect_guids_paths(args)
+            return svc.playlist_move(
+                args.name,
+                guids=guids,
+                paths=paths,
+                delta=int(getattr(args, "delta", -1)),
+            )
+        if action == "shuffle":
+            return svc.playlist_shuffle(
+                args.name,
+                algorithm=str(getattr(args, "algorithm", "artist") or "artist"),
+                confirm=bool(getattr(args, "confirm", False)),
+                seed_guid=getattr(args, "seed_guid", None),
             )
         if action == "push":
             return svc.playlist_push(args.name, confirm=bool(args.confirm))
@@ -319,30 +417,61 @@ def dispatch(svc: HeadlessService, args: argparse.Namespace) -> AgentResult:
     if group == "config":
         if action == "get":
             return svc.config_get(args.key)
+        if action == "patch":
+            raw = getattr(args, "updates_json", "") or ""
+            try:
+                updates = json.loads(raw)
+            except json.JSONDecodeError as e:
+                return AgentResult(
+                    ok=False,
+                    code="USAGE",
+                    message=f"updates must be JSON object: {e}",
+                    exit_code=int(ExitCode.USAGE),
+                )
+            if not isinstance(updates, dict):
+                return AgentResult(
+                    ok=False,
+                    code="USAGE",
+                    message="updates must be a JSON object",
+                    exit_code=int(ExitCode.USAGE),
+                )
+            return svc.config_patch(updates)
 
     if group == "device":
         if action == "status":
             return svc.device_status()
+        if action == "list-known":
+            return svc.device_list_known()
         if action == "connect":
             return svc.device_connect()
         if action == "disconnect":
             return svc.device_disconnect()
         if action == "info":
             return svc.device_info()
+        if action == "refresh-index":
+            return svc.device_refresh_index()
         if action == "inventory":
-            return svc.device_inventory(limit=args.limit)
+            return svc.device_inventory(
+                limit=int(getattr(args, "limit", 200) or 200),
+                offset=int(getattr(args, "offset", 0) or 0),
+                parent_id=getattr(args, "parent_id", None),
+                name_contains=getattr(args, "name_contains", None),
+                guid=getattr(args, "guid", None),
+                serial=getattr(args, "serial", None),
+            )
         if action == "delete":
             return svc.device_delete(args.object_id, confirm=bool(args.confirm))
 
     if group == "sync":
-        guids = list(args.guids or [])
-        guids.extend(_csv_list(getattr(args, "guids_csv", None)))
+        guids, paths = _collect_guids_paths(args)
         return svc.sync_tracks(
             guids=guids,
-            paths=list(args.paths or []),
+            paths=paths,
             artist=args.artist,
             album=args.album,
             playlist=getattr(args, "playlist", None),
+            entire_library=bool(getattr(args, "entire_library", False)),
+            path_prefix=getattr(args, "path_prefix", None),
             mode=args.mode,
             dry_run=bool(args.dry_run),
             confirm=bool(args.confirm),

@@ -121,7 +121,7 @@ Suggested PR sizing: **one row in “PRs” tables ≈ one PR** unless noted “
 
 **Notes:** Reuse exclusions from config/index if already stored. Long scans: Phase 2 may add progress; Phase 1 can block until done with clear JSON summary.
 
-**Acceptance:** Fresh data dir → set root → scan → `library search` returns tracks. Tests with temp trees.
+**Acceptance:** Fresh data dir → set root → scan → `library search` returns tracks. Tests with temp trees. **Done (Milestone B).**
 
 ### PR 1.2 — Config patch (allowlisted keys)
 
@@ -137,7 +137,7 @@ Suggested PR sizing: **one row in “PRs” tables ≈ one PR** unless noted “
 - Document that `stable_mode: true` implies CMD transport for sync (same as GUI)
 - Prefer patch over full replace to avoid wiping nested encode objects
 
-**Acceptance:** Round-trip get → patch → get; invalid key rejected; tests without device.
+**Acceptance:** Round-trip get → patch → get; invalid key rejected; tests without device. **Done (Milestone B).**
 
 ### PR 1.3 — Device index refresh + known devices
 
@@ -148,7 +148,7 @@ Suggested PR sizing: **one row in “PRs” tables ≈ one PR** unless noted “
 
 **Risks (document on tool + agent-interface):** Full file listing can be slow; USB exclusive; do not run concurrent with GUI; may stress flaky devices — prefer after quiet reconnect if prior fatal.
 
-**Acceptance:** Mock or documented manual path; confirm not required (read/seed) unless we treat seed as heavy — **no confirm** is OK for refresh; still needs lock.
+**Acceptance:** Mock or documented manual path; confirm not required (read/seed) unless we treat seed as heavy — **no confirm** is OK for refresh; still needs lock. **Done (Milestone B).**
 
 ### PR 1.4 — Richer cached inventory query
 
@@ -160,7 +160,7 @@ Extend `device_inventory` (or add `device_inventory_query`):
 
 Still **cache-only** by default. Live walk only via `device_refresh_index`.
 
-**Acceptance:** Pagination tests on synthetic device_index rows.
+**Acceptance:** Pagination tests on synthetic device_index rows. **Done (Milestone B).**
 
 ### PR 1.5 — Host playlist lifecycle
 
@@ -174,7 +174,7 @@ Still **cache-only** by default. Live walk only via `device_refresh_index`.
 
 Keep existing create/add/replace/push/sync `--playlist`.
 
-**Acceptance:** Full CRUD tests on temp index DB; shuffle deterministic seed if API allows.
+**Acceptance:** Full CRUD tests on temp index DB; shuffle deterministic seed if API allows. **Done (Milestone B).**
 
 ### PR 1.6 — Sync conveniences (optional same phase)
 
@@ -183,13 +183,13 @@ Keep existing create/add/replace/push/sync `--playlist`.
 | `sync_tracks` + `scope: entire_library` or `library_sync` | All indexed tracks; force dry-run first habit via docs; require confirm; default batch_size like playlist |
 | `path_prefix` / `folder` | Expand to tracks under host directory |
 
-Can ship as 1.6 or early Phase 2 if 1.1–1.5 already large.
+Can ship as 1.6 or early Phase 2 if 1.1–1.5 already large. **Done (Milestone B):** `entire_library` + `path_prefix`.
 
 ### Phase 1 exit criteria
 
-- Headless bootstrap: roots → scan → playlist → dry-run sync → refresh index → inventory query.
-- Config knobs agents need without hand-editing JSON.
-- Playlist management parity with common GUI playlist tab ops (except device-side edit).
+- [x] Headless bootstrap: roots → scan → playlist → dry-run sync → refresh index → inventory query.
+- [x] Config knobs agents need without hand-editing JSON.
+- [x] Playlist management parity with common GUI playlist tab ops (except device-side edit).
 
 ---
 
@@ -364,12 +364,12 @@ Each PR: catalog + CLI + MCP + tests + hazard table rows.
 
 ### Milestone B — Headless daily driver (Phase 1)
 
-- [ ] PR 1.1 Library scan/roots
-- [ ] PR 1.2 Config patch
-- [ ] PR 1.3 Device refresh index
-- [ ] PR 1.4 Inventory query
-- [ ] PR 1.5 Playlist lifecycle
-- [ ] PR 1.6 Entire/folder sync (optional)
+- [x] PR 1.1 Library scan/roots
+- [x] PR 1.2 Config patch
+- [x] PR 1.3 Device refresh index
+- [x] PR 1.4 Inventory query
+- [x] PR 1.5 Playlist lifecycle
+- [x] PR 1.6 Entire/folder sync
 
 ### Milestone C — Full product agent (Phase 2)
 
@@ -414,3 +414,4 @@ Each PR: catalog + CLI + MCP + tests + hazard table rows.
 |------|------|
 | 2026-08-11 | Plan created from CLI/MCP gap review. P0.1: **hide** art experiment (do not MCP-wire). P2 enrich: mandatory risk docs. |
 | 2026-08-11 | Milestone A shipped: art tools off agent surface; playlist_replace confirm; catalog↔MCP/CLI parity tests; docs. |
+| 2026-08-11 | Milestone B shipped: library roots/scan; config_patch; refresh-index; inventory filters; playlist CRUD/reorder/shuffle; entire_library + path_prefix sync. |

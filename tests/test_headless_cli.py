@@ -488,17 +488,36 @@ class AgentSurfaceParityTests(unittest.TestCase):
             # Satisfy required positionals / flags so parse succeeds.
             if group == "library" and action == "search":
                 argv.append("q")
+            elif group == "library" and action == "add-root":
+                argv.append("/tmp")
+            elif group == "library" and action == "remove-root":
+                argv.extend(["/tmp", "--confirm"])
+            elif group == "library" and action == "set-roots":
+                argv.append("--confirm")
             elif group == "playlist" and action in (
                 "show",
                 "create",
                 "add",
                 "replace",
                 "push",
+                "delete",
+                "remove",
+                "move",
+                "shuffle",
             ):
                 argv.append("Name")
+            elif group == "playlist" and action == "rename":
+                argv.extend(["Old", "New"])
+            elif group == "config" and action == "patch":
+                argv.append("{}")
             elif group == "device" and action == "delete":
                 argv.extend(["1", "--confirm"])
-            if group == "playlist" and action in ("replace", "push"):
+            if group == "playlist" and action in (
+                "replace",
+                "push",
+                "delete",
+                "shuffle",
+            ):
                 argv.append("--confirm")
             args = parser.parse_args(argv)
             self.assertEqual(args.group, group)
@@ -609,6 +628,245 @@ class CliMainTests(unittest.TestCase):
             self.assertEqual(
                 payload["data"]["batch_size"], DEFAULT_PLAYLIST_BATCH_SIZE
             )
+
+
+class MilestoneBLibraryConfigTests(unittest.TestCase):
+    def test_scan_add_root_and_search(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp)
+            root = data / "Music"
+            root.mkdir()
+            f = root / "song.mp3"
+            f.write_bytes(b"ID3")
+            svc = HeadlessService(data_dir=data)
+            added = svc.library_add_root(str(root), rescan=True)
+            self.assertTrue(added.ok, msg=added.message)
+            self.assertGreaterEqual(added.data["track_count"], 1)
+            search = svc.library_search("song")
+            self.assertTrue(search.ok)
+            self.assertGreaterEqual(search.data["total_matched"], 1)
+            roots = svc.library_list_roots()
+            self.assertEqual(roots.data["roots"], [str(root)])
+
+    def test_remove_last_root_requires_confirm(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp)
+            root = data / "Music"
+            root.mkdir()
+            (root / "a.mp3").write_bytes(b"x")
+            svc = HeadlessService(data_dir=data)
+            self.assertTrue(svc.library_add_root(str(root)).ok)
+            gated = svc.library_remove_root(str(root), confirm=False)
+            self.assertFalse(gated.ok)
+            self.assertEqual(gated.exit_code, int(ExitCode.CONFIRM_REQUIRED))
+            cleared = svc.library_remove_root(str(root), confirm=True, rescan=False)
+            self.assertTrue(cleared.ok)
+            self.assertEqual(cleared.data["roots"], [])
+
+    def test_config_patch_allowlist_and_roundtrip(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp)
+            svc = HeadlessService(data_dir=data)
+            bad = svc.config_patch({"not_a_key": True})
+            self.assertFalse(bad.ok)
+            self.assertEqual(bad.exit_code, int(ExitCode.USAGE))
+            patched = svc.config_patch(
+                {"stable_mode": True, "sync_album_art": False, "send_format": "mp3"}
+            )
+            self.assertTrue(patched.ok, msg=patched.message)
+            self.assertEqual(patched.data["mode"], "stable")
+            self.assertIn("stable_mode", patched.data["changed"])
+            got = svc.config_get("stable_mode")
+            self.assertTrue(got.ok)
+            self.assertTrue(got.data["value"])
+            # Round-trip off
+            off = svc.config_patch({"stable_mode": False})
+            self.assertTrue(off.ok)
+            self.assertEqual(off.data["mode"], "experimental")
+
+
+class MilestoneBInventoryPlaylistSyncTests(unittest.TestCase):
+    def test_inventory_pagination_and_filters(self) -> None:
+        from mtpmanager.domain.models import FileEntry
+        from mtpmanager.infra.device_index import replace_device_listing
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp)
+            index = data / "library_index.db"
+            serial = "TESTSERIAL001"
+            g1 = new_track_guid()
+            g2 = new_track_guid()
+            files = [
+                FileEntry(
+                    item_id=1,
+                    name=f"{g1}.mp3",
+                    parent_id=100,
+                    storage_id=1,
+                    filesize=10,
+                    filetype=1,
+                ),
+                FileEntry(
+                    item_id=2,
+                    name=f"{g2}.mp3",
+                    parent_id=100,
+                    storage_id=1,
+                    filesize=20,
+                    filetype=1,
+                ),
+                FileEntry(
+                    item_id=3,
+                    name="folder",
+                    parent_id=0,
+                    storage_id=1,
+                    filesize=0,
+                    filetype=2,
+                ),
+            ]
+            replace_device_listing(serial, files, path=index, source="list")
+            svc = HeadlessService(data_dir=data)
+            page = svc.device_inventory(limit=1, offset=0, serial=serial)
+            self.assertTrue(page.ok)
+            self.assertEqual(page.data["total"], 3)
+            self.assertEqual(page.data["returned"], 1)
+            page2 = svc.device_inventory(limit=1, offset=1, serial=serial)
+            self.assertEqual(page2.data["returned"], 1)
+            self.assertNotEqual(
+                page.data["files"][0]["item_id"], page2.data["files"][0]["item_id"]
+            )
+            by_parent = svc.device_inventory(parent_id=100, serial=serial)
+            self.assertEqual(by_parent.data["total"], 2)
+            by_guid = svc.device_inventory(guid=g1, serial=serial)
+            self.assertEqual(by_guid.data["total"], 1)
+            self.assertEqual(by_guid.data["files"][0]["name"], f"{g1}.mp3")
+            known = svc.device_list_known()
+            self.assertTrue(known.ok)
+            self.assertGreaterEqual(known.data["count"], 1)
+
+    def test_device_refresh_index_mocked(self) -> None:
+        from mtpmanager.domain.models import FileEntry
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp)
+            svc = HeadlessService(data_dir=data)
+            not_conn = svc.device_refresh_index()
+            self.assertFalse(not_conn.ok)
+            self.assertEqual(not_conn.code, "NOT_CONNECTED")
+
+            mock_dev = MagicMock()
+            listed = [
+                FileEntry(
+                    item_id=9,
+                    name=f"{new_track_guid()}.mp3",
+                    parent_id=100,
+                    storage_id=1,
+                    filesize=1,
+                    filetype=1,
+                )
+            ]
+            svc._device = mock_dev
+            svc._connected = True
+            svc._device_serial = "MOCKSERIAL"
+            svc._session_lock.try_acquire("cli-test")
+            with patch(
+                "mtpmanager.headless.service.device_list_files",
+                return_value=listed,
+            ):
+                result = svc.device_refresh_index()
+            self.assertTrue(result.ok, msg=result.message)
+            self.assertEqual(result.data["written"], 1)
+            inv = svc.device_inventory(serial="MOCKSERIAL")
+            self.assertEqual(inv.data["total"], 1)
+            svc._session_lock.release()
+
+    def test_playlist_lifecycle_delete_rename_remove_move_shuffle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp)
+            root = data / "Music"
+            root.mkdir()
+            paths = []
+            guids = []
+            tracks = []
+            for i, title in enumerate(["A", "B", "C"], start=1):
+                f = root / f"{title}.mp3"
+                f.write_bytes(b"x")
+                g = new_track_guid()
+                t = _track(str(f), guid=g, title=title, artist=f"Art{i}")
+                paths.append(str(f))
+                guids.append(g)
+                tracks.append(t)
+            save_library_index(
+                Library(tracks=tracks, root_paths=[str(root)]),
+                path=data / "library_index.db",
+            )
+            svc = HeadlessService(data_dir=data)
+            self.assertTrue(svc.playlist_create("Mix").ok)
+            self.assertTrue(
+                svc.playlist_add("Mix", guids=guids).ok
+            )
+            gated = svc.playlist_delete("Mix", confirm=False)
+            self.assertEqual(gated.exit_code, int(ExitCode.CONFIRM_REQUIRED))
+
+            ren = svc.playlist_rename("Mix", "Road")
+            self.assertTrue(ren.ok)
+            self.assertEqual(ren.data["name"], "Road")
+
+            rem = svc.playlist_remove("Road", guids=[guids[0]])
+            self.assertTrue(rem.ok)
+            self.assertEqual(rem.data["track_count"], 2)
+
+            shown = svc.playlist_show("Road")
+            order_before = list(shown.data["paths"])
+            moved = svc.playlist_move("Road", paths=[order_before[-1]], delta=-1)
+            self.assertTrue(moved.ok)
+            after_move = svc.playlist_show("Road").data["paths"]
+            self.assertEqual(len(after_move), 2)
+
+            shuf_gate = svc.playlist_shuffle("Road", confirm=False)
+            self.assertEqual(shuf_gate.exit_code, int(ExitCode.CONFIRM_REQUIRED))
+            shuf = svc.playlist_shuffle(
+                "Road", algorithm="artist", confirm=True, seed_guid=guids[1]
+            )
+            self.assertTrue(shuf.ok)
+            self.assertEqual(shuf.data["algorithm"], "artist")
+
+            deleted = svc.playlist_delete("Road", confirm=True)
+            self.assertTrue(deleted.ok)
+            miss = svc.playlist_show("Road")
+            self.assertFalse(miss.ok)
+
+    def test_sync_entire_library_and_path_prefix_dry_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp)
+            root = data / "Music"
+            sub = root / "Band"
+            sub.mkdir(parents=True)
+            f1 = sub / "a.mp3"
+            f2 = root / "other.mp3"
+            f1.write_bytes(b"a")
+            f2.write_bytes(b"b")
+            g1 = new_track_guid()
+            g2 = new_track_guid()
+            save_library_index(
+                Library(
+                    tracks=[
+                        _track(str(f1), guid=g1, title="A"),
+                        _track(str(f2), guid=g2, title="B"),
+                    ],
+                    root_paths=[str(root)],
+                ),
+                path=data / "library_index.db",
+            )
+            svc = HeadlessService(data_dir=data)
+            entire = svc.sync_tracks(entire_library=True, dry_run=True)
+            self.assertTrue(entire.ok)
+            self.assertEqual(entire.data["track_count"], 2)
+            self.assertEqual(
+                entire.data["batch_size"], DEFAULT_PLAYLIST_BATCH_SIZE
+            )
+            prefix = svc.sync_tracks(path_prefix=str(sub), dry_run=True)
+            self.assertTrue(prefix.ok)
+            self.assertEqual(prefix.data["track_count"], 1)
+            self.assertEqual(prefix.data["tracks"][0]["guid"], g1)
 
 
 if __name__ == "__main__":

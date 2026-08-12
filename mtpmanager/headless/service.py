@@ -11,24 +11,43 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
+from mtpmanager.app.album_art_device import push_album_art_for_tracks
 from mtpmanager.app.cancellation import JobCancelled
 from mtpmanager.app.device_ops import connect as device_connect
 from mtpmanager.app.device_ops import delete_object as device_delete_object
 from mtpmanager.app.device_ops import disconnect as device_disconnect
 from mtpmanager.app.device_ops import get_device_info, get_device_identity
-from mtpmanager.app.album_art_device import push_album_art_for_tracks
+from mtpmanager.app.device_ops import list_files as device_list_files
 from mtpmanager.app.playlist_device import push_playlist_to_device
+from mtpmanager.app.scan_library import scan_library_roots
 from mtpmanager.app.transfer import transfer_tracks
+from mtpmanager.domain.audio_encode import (
+    AudioEncodeSettings,
+    clamp_settings_for_format,
+    settings_from_legacy_format,
+)
 from mtpmanager.domain.device_profile import match_device_profile
 from mtpmanager.domain.device_profiles import BUILTIN_PROFILES, GENERIC, ZEN_VISION_M
-from mtpmanager.domain.library import primary_artist
+from mtpmanager.domain.library import normalize_library_roots, path_under_root, primary_artist
 from mtpmanager.domain.library_search import filter_library_tracks_scored
 from mtpmanager.domain.models import Track, TrackMetadata
 from mtpmanager.domain.playlist_m3u import parse_m3u
+from mtpmanager.domain.playlist_shuffle import (
+    merge_shuffle,
+    rng_from_seed_track,
+    spotify_shuffle,
+)
 from mtpmanager.domain.track_id import is_track_guid
 from mtpmanager.headless.dto import AgentResult, ExitCode, fail, ok, to_jsonable
 from mtpmanager.headless.tools import tools_as_dict
-from mtpmanager.infra.app_config import load_app_config
+from mtpmanager.infra.app_config import (
+    VALID_SEND_FORMATS,
+    load_app_config,
+    normalize_max_new_per_show,
+    normalize_schedule_days,
+    normalize_schedule_time,
+    save_app_config,
+)
 from mtpmanager.infra.app_paths import default_data_dir
 from mtpmanager.infra.device_index import (
     DEFAULT_MUSIC_FOLDER_ID,
@@ -37,21 +56,30 @@ from mtpmanager.infra.device_index import (
     list_cached_files,
     list_known_devices,
     record_send,
+    replace_device_listing,
 )
 from mtpmanager.infra.device_session_lock import DeviceSessionBusy, DeviceSessionLock
 from mtpmanager.infra.ffmpeg_transcode import FFmpegTranscoder
 from mtpmanager.infra.library_index import (
     get_tracks_by_guids,
     index_path,
+    load_exclusion_paths,
     load_library_index,
+    save_library_index,
+    untrack_library_roots,
 )
 from mtpmanager.infra.logging_setup import default_log_dir
 from mtpmanager.infra.playlists import (
     append_tracks_to_playlist,
     create_playlist,
+    delete_playlist,
     get_playlist_by_name,
     list_playlists,
+    move_paths_in_playlist,
+    remove_paths_from_playlist,
+    rename_playlist,
     replace_playlist_tracks,
+    resolve_playlist_tracks,
 )
 from mtpmanager.infra.remote_naming import build_remote_path, split_remote_path
 from mtpmanager.ports.transport import TransportError
@@ -74,6 +102,38 @@ _MODE_ALIASES: dict[str, str] = {
     "cmd": "stable",
     "mtp-sendtr": "stable",
 }
+
+# Allowlisted keys for config_patch (agent-safe). Nested objects are replaced
+# wholly when provided (audio_encode dict → AudioEncodeSettings).
+_CONFIG_PATCH_BOOL: frozenset[str] = frozenset(
+    {
+        "stable_mode",
+        "sync_album_art",
+        "enable_experimental_tools",
+        "store_tracks_in_artist_folder",
+        "store_tracks_in_album_folder",
+        "store_podcasts_in_show_folders",
+        "allow_video_podcasts_to_sync",
+        "sync_audio_podcasts_as_video",
+        "keep_downloaded_podcasts",
+        "podcast_auto_enabled",
+        "podcast_auto_sync_to_device",
+        "podcast_tracknumber_as_date",
+        "podcast_title_date_prefix",
+        "always_show_playback_controls",
+        "show_broken_video_presets",
+    }
+)
+_CONFIG_PATCH_OTHER: frozenset[str] = frozenset(
+    {
+        "send_format",
+        "audio_encode",
+        "podcast_schedule_time",
+        "podcast_schedule_days",
+        "podcast_max_new_per_show",
+    }
+)
+CONFIG_PATCH_ALLOWED_KEYS: frozenset[str] = _CONFIG_PATCH_BOOL | _CONFIG_PATCH_OTHER
 
 
 def normalize_transfer_mode(mode: str | None) -> str | None:
@@ -244,6 +304,179 @@ class HeadlessService:
             if rp:
                 roots = [str(rp)]
         return ok({"roots": roots, "track_count": len(lib.tracks)})
+
+    def _current_library_roots(self) -> list[str]:
+        lib = load_library_index(
+            path=self._index_path,
+            drop_missing_files=False,
+            keep_missing_if_roots_unreachable=True,
+        )
+        if lib is None:
+            return []
+        roots = list(getattr(lib, "root_paths", None) or [])
+        if not roots:
+            rp = getattr(lib, "root_path", None)
+            if rp:
+                roots = [str(rp)]
+        return normalize_library_roots(roots)
+
+    def library_set_roots(
+        self,
+        roots: Sequence[str],
+        *,
+        rescan: bool = True,
+        confirm: bool = False,
+    ) -> AgentResult:
+        """Replace library root list. Empty roots requires confirm (clears index tracks)."""
+        new_roots = normalize_library_roots(roots or [])
+        if not new_roots and not confirm:
+            return fail(
+                "CONFIRM_REQUIRED",
+                "Pass confirm=true to clear all library roots "
+                "(untracks all indexed media)",
+                exit_code=ExitCode.CONFIRM_REQUIRED,
+                data={"roots": []},
+            )
+        old = self._current_library_roots()
+        removed = [r for r in old if r not in set(new_roots)]
+        if removed:
+            untrack_library_roots(
+                removed, final_roots=new_roots, path=self._index_path
+            )
+        elif not new_roots:
+            # Explicit clear when old was already empty or only confirm-clear.
+            untrack_library_roots(old, final_roots=[], path=self._index_path)
+        else:
+            # Adding/replacing without removals: still persist roots via scan or meta.
+            # If not rescanning, write empty library with new roots by loading + save.
+            if not rescan:
+                lib = load_library_index(
+                    path=self._index_path,
+                    drop_missing_files=False,
+                    keep_missing_if_roots_unreachable=True,
+                )
+                tracks = list(lib.tracks) if lib is not None else []
+                # Drop tracks not under any remaining root.
+                keep = [
+                    t
+                    for t in tracks
+                    if any(path_under_root(t.path or "", r) for r in new_roots)
+                ]
+                from mtpmanager.domain.library import Library
+
+                save_library_index(
+                    Library(tracks=keep, root_paths=list(new_roots)),
+                    path=self._index_path,
+                )
+        self._library_cache = None
+        data: dict[str, Any] = {
+            "roots": new_roots,
+            "removed_roots": removed,
+            "rescanned": False,
+            "track_count": 0,
+        }
+        if rescan and new_roots:
+            scan = self.library_scan(roots=new_roots)
+            if not scan.ok:
+                return scan
+            data["rescanned"] = True
+            data["track_count"] = int(scan.data.get("track_count") or 0)
+            data["roots"] = list(scan.data.get("roots") or new_roots)
+            return ok(data, message=scan.message or "Library roots updated")
+        if rescan and not new_roots:
+            data["rescanned"] = True
+            data["track_count"] = 0
+            return ok(data, message="Library roots cleared")
+        # rescan=false: count tracked
+        roots_result = self.library_list_roots()
+        data["track_count"] = int(roots_result.data.get("track_count") or 0)
+        data["roots"] = list(roots_result.data.get("roots") or new_roots)
+        return ok(data, message="Library roots updated")
+
+    def library_add_root(self, root: str, *, rescan: bool = True) -> AgentResult:
+        clean = os.path.normpath((root or "").strip())
+        if not clean:
+            return fail("USAGE", "root path is required", exit_code=ExitCode.USAGE)
+        if not os.path.isdir(clean):
+            return fail(
+                "NOT_FOUND",
+                f"Root is not a directory: {clean}",
+                exit_code=ExitCode.NOT_FOUND,
+                data={"root": clean},
+            )
+        current = self._current_library_roots()
+        if clean in current:
+            if rescan:
+                return self.library_scan(roots=current)
+            return ok(
+                {"roots": current, "added": False, "track_count": 0},
+                message="Root already configured",
+            )
+        return self.library_set_roots(current + [clean], rescan=rescan, confirm=True)
+
+    def library_remove_root(
+        self,
+        root: str,
+        *,
+        rescan: bool = True,
+        confirm: bool = False,
+    ) -> AgentResult:
+        clean = os.path.normpath((root or "").strip())
+        if not clean:
+            return fail("USAGE", "root path is required", exit_code=ExitCode.USAGE)
+        current = self._current_library_roots()
+        if clean not in current:
+            # Also try case-sensitive exact among normed
+            return fail(
+                "NOT_FOUND",
+                f"Root not in library: {clean}",
+                exit_code=ExitCode.NOT_FOUND,
+                data={"roots": current},
+            )
+        remaining = [r for r in current if r != clean]
+        if not remaining and not confirm:
+            return fail(
+                "CONFIRM_REQUIRED",
+                "Pass confirm=true to remove the last library root",
+                exit_code=ExitCode.CONFIRM_REQUIRED,
+                data={"root": clean, "roots": current},
+            )
+        return self.library_set_roots(remaining, rescan=rescan, confirm=True)
+
+    def library_scan(
+        self,
+        *,
+        roots: Sequence[str] | None = None,
+    ) -> AgentResult:
+        """Scan library roots and rewrite the SQLite index (assigns/preserves GUIDs)."""
+        if roots is not None and len(list(roots)) > 0:
+            scan_roots = normalize_library_roots(roots)
+        else:
+            scan_roots = self._current_library_roots()
+        if not scan_roots:
+            return fail(
+                "USAGE",
+                "No library roots; set roots first (library set-roots / add-root)",
+                exit_code=ExitCode.USAGE,
+            )
+        missing = [r for r in scan_roots if not os.path.isdir(r)]
+        exclusions = load_exclusion_paths(path=self._index_path)
+        try:
+            lib = scan_library_roots(scan_roots, exclusions=exclusions)
+            save_library_index(lib, path=self._index_path)
+        except Exception as e:
+            logger.exception("library_scan failed")
+            return fail("ERROR", str(e), exit_code=ExitCode.ERROR)
+        self._library_cache = None
+        return ok(
+            {
+                "roots": list(lib.root_paths),
+                "track_count": len(lib.tracks),
+                "exclusions": len(exclusions),
+                "unreachable_roots": missing,
+            },
+            message=f"Scanned {len(lib.tracks)} track(s) under {len(lib.root_paths)} root(s)",
+        )
 
     def library_search(
         self,
@@ -561,6 +794,250 @@ class HeadlessService:
             ),
         )
 
+    def playlist_delete(self, name: str, *, confirm: bool = False) -> AgentResult:
+        clean = (name or "").strip()
+        if not clean:
+            return fail(
+                "USAGE",
+                "playlist name is required",
+                exit_code=ExitCode.USAGE,
+            )
+        if not confirm:
+            return fail(
+                "CONFIRM_REQUIRED",
+                "Pass confirm=true to delete a host playlist",
+                exit_code=ExitCode.CONFIRM_REQUIRED,
+                data={"name": clean},
+            )
+        pl = get_playlist_by_name(clean, path=self._index_path)
+        if pl is None:
+            return fail(
+                "NOT_FOUND",
+                f"Playlist not found: {clean!r}",
+                exit_code=ExitCode.NOT_FOUND,
+            )
+        ok_del = delete_playlist(pl.id, path=self._index_path)
+        if not ok_del:
+            return fail(
+                "ERROR",
+                f"Failed to delete playlist {pl.name!r}",
+                exit_code=ExitCode.ERROR,
+            )
+        return ok(
+            {"id": pl.id, "name": pl.name, "deleted": True},
+            message=f"Deleted playlist {pl.name!r}",
+        )
+
+    def playlist_rename(self, name: str, new_name: str) -> AgentResult:
+        clean = (name or "").strip()
+        target = (new_name or "").strip()
+        if not clean or not target:
+            return fail(
+                "USAGE",
+                "name and new_name are required",
+                exit_code=ExitCode.USAGE,
+            )
+        pl = get_playlist_by_name(clean, path=self._index_path)
+        if pl is None:
+            return fail(
+                "NOT_FOUND",
+                f"Playlist not found: {clean!r}",
+                exit_code=ExitCode.NOT_FOUND,
+            )
+        try:
+            updated = rename_playlist(pl.id, target, path=self._index_path)
+        except ValueError as e:
+            msg = str(e)
+            if "already exists" in msg.lower():
+                return fail("CONFLICT", msg, exit_code=ExitCode.ERROR)
+            return fail("USAGE", msg, exit_code=ExitCode.USAGE)
+        except Exception as e:
+            logger.exception("playlist_rename failed")
+            return fail("ERROR", str(e), exit_code=ExitCode.ERROR)
+        return ok(
+            self._playlist_summary(updated),
+            message=f"Renamed playlist to {updated.name!r}",
+        )
+
+    def playlist_remove(
+        self,
+        name: str,
+        *,
+        guids: Sequence[str] | None = None,
+        paths: Sequence[str] | None = None,
+    ) -> AgentResult:
+        """Remove tracks from a host playlist by GUID and/or path."""
+        clean = (name or "").strip()
+        if not clean:
+            return fail(
+                "USAGE",
+                "playlist name is required",
+                exit_code=ExitCode.USAGE,
+            )
+        pl = get_playlist_by_name(clean, path=self._index_path)
+        if pl is None:
+            return fail(
+                "NOT_FOUND",
+                f"Playlist not found: {clean!r}",
+                exit_code=ExitCode.NOT_FOUND,
+            )
+        selected, err = self._resolve_tracks_by_guid_path(guids=guids, paths=paths)
+        if err is not None:
+            return err
+        if not selected:
+            return fail(
+                "USAGE",
+                "No tracks resolved; pass guids and/or paths to remove",
+                exit_code=ExitCode.USAGE,
+            )
+        remove_paths = [os.path.normpath(t.path or "") for t in selected if t.path]
+        try:
+            updated = remove_paths_from_playlist(
+                pl.id, remove_paths, path=self._index_path
+            )
+        except ValueError as e:
+            return fail("ERROR", str(e), exit_code=ExitCode.ERROR)
+        except Exception as e:
+            logger.exception("playlist_remove failed")
+            return fail("ERROR", str(e), exit_code=ExitCode.ERROR)
+        summary = self._playlist_summary(updated)
+        summary["removed"] = len(remove_paths)
+        return ok(
+            summary,
+            message=f"Removed {len(remove_paths)} path(s) from {updated.name!r}",
+        )
+
+    def playlist_move(
+        self,
+        name: str,
+        *,
+        guids: Sequence[str] | None = None,
+        paths: Sequence[str] | None = None,
+        delta: int = -1,
+    ) -> AgentResult:
+        """Move tracks up (delta<0) or down (delta>0) in host playlist order."""
+        clean = (name or "").strip()
+        if not clean:
+            return fail(
+                "USAGE",
+                "playlist name is required",
+                exit_code=ExitCode.USAGE,
+            )
+        try:
+            d = int(delta)
+        except (TypeError, ValueError):
+            return fail("USAGE", "delta must be an integer", exit_code=ExitCode.USAGE)
+        if d == 0:
+            return fail(
+                "USAGE",
+                "delta must be non-zero (negative=up, positive=down)",
+                exit_code=ExitCode.USAGE,
+            )
+        pl = get_playlist_by_name(clean, path=self._index_path)
+        if pl is None:
+            return fail(
+                "NOT_FOUND",
+                f"Playlist not found: {clean!r}",
+                exit_code=ExitCode.NOT_FOUND,
+            )
+        selected, err = self._resolve_tracks_by_guid_path(guids=guids, paths=paths)
+        if err is not None:
+            return err
+        if not selected:
+            return fail(
+                "USAGE",
+                "No tracks resolved; pass guids and/or paths to move",
+                exit_code=ExitCode.USAGE,
+            )
+        move_list = [os.path.normpath(t.path or "") for t in selected if t.path]
+        try:
+            updated = move_paths_in_playlist(
+                pl.id, move_list, delta=d, path=self._index_path
+            )
+        except ValueError as e:
+            return fail("ERROR", str(e), exit_code=ExitCode.ERROR)
+        except Exception as e:
+            logger.exception("playlist_move failed")
+            return fail("ERROR", str(e), exit_code=ExitCode.ERROR)
+        summary = self._playlist_summary(updated)
+        summary["moved"] = len(move_list)
+        summary["delta"] = d
+        return ok(summary, message=f"Moved {len(move_list)} track(s) in {updated.name!r}")
+
+    def playlist_shuffle(
+        self,
+        name: str,
+        *,
+        algorithm: str = "artist",
+        confirm: bool = False,
+        seed_guid: str | None = None,
+    ) -> AgentResult:
+        """Shuffle host playlist order (artist merge or Spotify-style)."""
+        clean = (name or "").strip()
+        if not clean:
+            return fail(
+                "USAGE",
+                "playlist name is required",
+                exit_code=ExitCode.USAGE,
+            )
+        if not confirm:
+            return fail(
+                "CONFIRM_REQUIRED",
+                "Pass confirm=true to overwrite host playlist order",
+                exit_code=ExitCode.CONFIRM_REQUIRED,
+                data={"name": clean},
+            )
+        pl = get_playlist_by_name(clean, path=self._index_path)
+        if pl is None:
+            return fail(
+                "NOT_FOUND",
+                f"Playlist not found: {clean!r}",
+                exit_code=ExitCode.NOT_FOUND,
+            )
+        algo = (algorithm or "artist").strip().lower()
+        tracks = resolve_playlist_tracks(pl, path=self._index_path)
+        if not tracks:
+            return ok(
+                self._playlist_summary(pl),
+                message="Playlist empty; nothing to shuffle",
+            )
+        seed_track = None
+        sg = (seed_guid or "").strip()
+        if sg:
+            for t in tracks:
+                if (t.guid or "").lower() == sg.lower():
+                    seed_track = t
+                    break
+        if seed_track is None:
+            seed_track = tracks[0]
+        rng = rng_from_seed_track(seed_track, extra=algo)
+        if algo in ("artist", "merge", "merge_shuffle", "merge_artist"):
+            shuffled = merge_shuffle(tracks, rng=rng)
+            algo_wire = "artist"
+        elif algo in ("spotify", "spotify_shuffle", "dither"):
+            shuffled = spotify_shuffle(tracks, rng=rng)
+            algo_wire = "spotify"
+        else:
+            return fail(
+                "USAGE",
+                "algorithm must be artist|merge or spotify",
+                exit_code=ExitCode.USAGE,
+            )
+        try:
+            updated = replace_playlist_tracks(
+                pl.id, shuffled, path=self._index_path
+            )
+        except Exception as e:
+            logger.exception("playlist_shuffle failed")
+            return fail("ERROR", str(e), exit_code=ExitCode.ERROR)
+        summary = self._playlist_summary(updated)
+        summary["algorithm"] = algo_wire
+        summary["seed_guid"] = seed_track.guid or ""
+        return ok(
+            summary,
+            message=f"Shuffled {updated.name!r} ({algo_wire})",
+        )
+
     def config_get(self, key: str | None = None) -> AgentResult:
         cfg = self._config()
         raw = asdict(cfg)
@@ -575,6 +1052,114 @@ class HeadlessService:
                 )
             return ok({"key": k, "value": to_jsonable(raw[k])})
         return ok({"config": to_jsonable(raw), "mode": cfg.active_mode()})
+
+    def config_patch(self, updates: dict[str, Any] | None) -> AgentResult:
+        """Patch allowlisted config keys; saves config.json."""
+        if not updates or not isinstance(updates, dict):
+            return fail(
+                "USAGE",
+                "updates object is required (allowlisted keys only)",
+                exit_code=ExitCode.USAGE,
+                data={"allowed_keys": sorted(CONFIG_PATCH_ALLOWED_KEYS)},
+            )
+        unknown = [k for k in updates if k not in CONFIG_PATCH_ALLOWED_KEYS]
+        if unknown:
+            return fail(
+                "USAGE",
+                f"Unknown or disallowed config key(s): {unknown!r}",
+                exit_code=ExitCode.USAGE,
+                data={
+                    "unknown": unknown,
+                    "allowed_keys": sorted(CONFIG_PATCH_ALLOWED_KEYS),
+                },
+            )
+        cfg = self._config()
+        changed: list[str] = []
+        try:
+            for key, value in updates.items():
+                if key in _CONFIG_PATCH_BOOL:
+                    setattr(cfg, key, bool(value))
+                    changed.append(key)
+                    continue
+                if key == "send_format":
+                    fmt = str(value or "").strip().lower().lstrip(".")
+                    if fmt not in VALID_SEND_FORMATS:
+                        return fail(
+                            "USAGE",
+                            f"send_format must be one of {sorted(VALID_SEND_FORMATS)}",
+                            exit_code=ExitCode.USAGE,
+                        )
+                    # Keep encode recipe aligned with format when only format changes.
+                    if (
+                        cfg.audio_encode is None
+                        or cfg.audio_encode.normalized_format() != fmt
+                    ):
+                        cfg.apply_audio_encode(settings_from_legacy_format(fmt))
+                    else:
+                        cfg.send_format = fmt
+                    changed.append(key)
+                    continue
+                if key == "audio_encode":
+                    if value is None:
+                        cfg.audio_encode = None
+                        cfg.send_format = cfg.normalized_send_format()
+                    elif isinstance(value, dict):
+                        settings = clamp_settings_for_format(
+                            AudioEncodeSettings.from_dict(value)
+                        )
+                        cfg.apply_audio_encode(settings)
+                    else:
+                        return fail(
+                            "USAGE",
+                            "audio_encode must be an object or null",
+                            exit_code=ExitCode.USAGE,
+                        )
+                    changed.append(key)
+                    continue
+                if key == "podcast_schedule_time":
+                    cfg.podcast_schedule_time = normalize_schedule_time(value)
+                    changed.append(key)
+                    continue
+                if key == "podcast_schedule_days":
+                    cfg.podcast_schedule_days = tuple(normalize_schedule_days(value))
+                    changed.append(key)
+                    continue
+                if key == "podcast_max_new_per_show":
+                    cfg.podcast_max_new_per_show = normalize_max_new_per_show(value)
+                    changed.append(key)
+                    continue
+        except Exception as e:
+            logger.exception("config_patch apply failed")
+            return fail("ERROR", str(e), exit_code=ExitCode.ERROR)
+
+        # Album folder implies artist folder (same as save_app_config).
+        if cfg.store_tracks_in_album_folder and not cfg.store_tracks_in_artist_folder:
+            cfg.store_tracks_in_artist_folder = True
+            if "store_tracks_in_artist_folder" not in changed:
+                changed.append("store_tracks_in_artist_folder")
+
+        try:
+            dest = save_app_config(cfg, path=self.data_dir / "config.json")
+        except Exception as e:
+            logger.exception("config_patch save failed")
+            return fail("ERROR", str(e), exit_code=ExitCode.ERROR)
+
+        note = ""
+        if cfg.stable_mode:
+            note = (
+                "stable_mode=true: sync uses mtp-sendtr (Stable); "
+                "PyMTP device admin is unavailable while Stable is on (GUI parity)."
+            )
+        return ok(
+            {
+                "changed": changed,
+                "mode": cfg.active_mode(),
+                "config_path": str(dest),
+                "config": to_jsonable(asdict(cfg)),
+                "note": note,
+            },
+            message=f"Updated {len(changed)} config key(s)",
+        )
 
     # --- device ------------------------------------------------------------
 
@@ -663,40 +1248,146 @@ class HeadlessService:
             logger.exception("device_info failed")
             return fail("DEVICE_ERROR", str(e), exit_code=ExitCode.ERROR)
 
-    def device_inventory(self, *, limit: int = 200) -> AgentResult:
-        """Cache-only inventory (no USB walk)."""
-        lim = max(1, min(int(limit or 200), 5000))
-        serial = self._device_serial
+    def device_list_known(self) -> AgentResult:
+        """Known device serials from the local device index (no USB)."""
         devices = list_known_devices(path=self._index_path)
-        if not serial and devices:
+        return ok({"known_devices": devices, "count": len(devices)})
+
+    def device_refresh_index(self) -> AgentResult:
+        """Full list_files → replace SQLite device cache (USB; needs connect).
+
+        Slow on large libraries; exclusive USB (quit GUI first). Prefer after a
+        quiet reconnect if a prior transfer hit session poison.
+        """
+        if not self._connected or self._device is None:
+            return fail(
+                "NOT_CONNECTED",
+                "Not connected; run device connect first",
+                exit_code=ExitCode.ERROR,
+            )
+        busy = self._require_session_lock("cli-refresh-index")
+        if busy is not None:
+            return busy
+        try:
+            if not self._device_serial:
+                try:
+                    identity = get_device_identity(self._device)
+                    self._device_serial = str(identity.serial or "")
+                except Exception:
+                    logger.debug("identity before refresh failed", exc_info=True)
+            if not self._device_serial:
+                return fail(
+                    "DEVICE_ERROR",
+                    "Device serial unknown; cannot write device index",
+                    exit_code=ExitCode.ERROR,
+                )
+            files = device_list_files(self._device)
+            written = replace_device_listing(
+                self._device_serial,
+                files,
+                path=self._index_path,
+                source="list",
+            )
+            return ok(
+                {
+                    "serial": self._device_serial,
+                    "listed": len(files),
+                    "written": int(written),
+                    "note": (
+                        "Full USB list_files completed; cache replaced. "
+                        "Do not run concurrent with the GUI."
+                    ),
+                },
+                message=f"Device index refreshed ({written} file(s))",
+            )
+        except TransportError as e:
+            logger.exception("device_refresh_index transport error")
+            return fail(
+                "TRANSPORT_FATAL",
+                str(e),
+                exit_code=ExitCode.TRANSPORT_FATAL,
+            )
+        except Exception as e:
+            logger.exception("device_refresh_index failed")
+            return fail("DEVICE_ERROR", str(e), exit_code=ExitCode.ERROR)
+
+    def device_inventory(
+        self,
+        *,
+        limit: int = 200,
+        offset: int = 0,
+        parent_id: int | None = None,
+        name_contains: str | None = None,
+        guid: str | None = None,
+        serial: str | None = None,
+    ) -> AgentResult:
+        """Cache-only inventory (no USB walk). Supports offset/limit and filters."""
+        lim = max(1, min(int(limit or 200), 5000))
+        off = max(0, int(offset or 0))
+        serial_s = (serial or "").strip() or self._device_serial
+        devices = list_known_devices(path=self._index_path)
+        if not serial_s and devices:
             # Prefer last known device when not connected.
-            serial = str(devices[0].get("serial") or "")
-        if not serial:
+            serial_s = str(devices[0].get("serial") or "")
+        if not serial_s:
             return ok(
                 {
                     "serial": "",
                     "files": [],
+                    "total": 0,
+                    "offset": off,
+                    "returned": 0,
                     "known_devices": devices,
-                    "note": "No serial; connect once or seed device index from GUI",
+                    "note": (
+                        "No serial; connect and device refresh-index, "
+                        "or seed from GUI"
+                    ),
                 }
             )
-        files = list_cached_files(serial, path=self._index_path)
+        files = list_cached_files(serial_s, path=self._index_path)
+        if parent_id is not None:
+            pid = int(parent_id)
+            files = [f for f in files if int(f.parent_id or 0) == pid]
+        needle = (name_contains or "").strip().casefold()
+        if needle:
+            files = [f for f in files if needle in (f.name or "").casefold()]
+        g = (guid or "").strip().lower()
+        if g:
+            # Match GUID stem in ObjectFileName (32 hex + optional extension).
+            def _name_guid(name: str) -> str:
+                stem = (name or "").rsplit(".", 1)[0]
+                return stem.lower()
+
+            files = [
+                f
+                for f in files
+                if g == _name_guid(f.name or "") or g in (f.name or "").lower()
+            ]
+        page = files[off : off + lim]
         rows = [
             {
                 "item_id": f.item_id,
                 "name": f.name,
                 "parent_id": f.parent_id,
+                "storage_id": f.storage_id,
                 "filesize": f.filesize,
                 "filetype": f.filetype,
             }
-            for f in files[:lim]
+            for f in page
         ]
         return ok(
             {
-                "serial": serial,
+                "serial": serial_s,
                 "total": len(files),
+                "offset": off,
+                "limit": lim,
                 "returned": len(rows),
                 "files": rows,
+                "filters": {
+                    "parent_id": parent_id,
+                    "name_contains": name_contains or "",
+                    "guid": guid or "",
+                },
                 "known_devices": devices,
             }
         )
@@ -1121,6 +1812,8 @@ class HeadlessService:
         artist: str | None = None,
         album: str | None = None,
         playlist: str | None = None,
+        entire_library: bool = False,
+        path_prefix: str | None = None,
     ) -> tuple[list[Track], list[str], str | None, AgentResult | None]:
         """Resolve selection. Returns tracks, unresolved_paths, playlist_name, err."""
         selected: list[Track] = []
@@ -1135,6 +1828,34 @@ class HeadlessService:
             seen.add(key)
             selected.append(t)
 
+        tracks = self._load_tracks()
+
+        if entire_library:
+            for t in tracks:
+                _add(t)
+            if not selected:
+                return [], [], None, fail(
+                    "USAGE",
+                    "Library index is empty; scan library roots first",
+                    exit_code=ExitCode.USAGE,
+                )
+            return selected, unresolved, playlist_name, None
+
+        prefix = os.path.normpath((path_prefix or "").strip()) if path_prefix else ""
+        if prefix:
+            for t in tracks:
+                p = os.path.normpath(t.path or "")
+                if p == prefix or path_under_root(p, prefix):
+                    _add(t)
+            if not selected:
+                return [], [], None, fail(
+                    "NOT_FOUND",
+                    f"No indexed tracks under path_prefix={prefix!r}",
+                    exit_code=ExitCode.NOT_FOUND,
+                    data={"path_prefix": prefix},
+                )
+            # path_prefix may combine with other selectors; continue.
+
         pl_name = (playlist or "").strip()
         if pl_name:
             pl_tracks, pl_unresolved, resolved_name, err = self._resolve_playlist_tracks(
@@ -1147,7 +1868,6 @@ class HeadlessService:
             for t in pl_tracks:
                 _add(t)
 
-        tracks = self._load_tracks()
         by_guid = {t.guid: t for t in tracks if t.guid}
         by_path = {os.path.normpath(t.path or ""): t for t in tracks}
 
@@ -1206,7 +1926,8 @@ class HeadlessService:
                 )
             return [], unresolved, playlist_name, fail(
                 "USAGE",
-                "No tracks resolved; pass --playlist, guids, paths, and/or artist/album",
+                "No tracks resolved; pass --playlist, --entire-library, "
+                "--path-prefix, guids, paths, and/or artist/album",
                 exit_code=ExitCode.USAGE,
             )
         return selected, unresolved, playlist_name, None
@@ -1425,6 +2146,8 @@ class HeadlessService:
         artist: str | None = None,
         album: str | None = None,
         playlist: str | None = None,
+        entire_library: bool = False,
+        path_prefix: str | None = None,
         mode: str | None = None,
         dry_run: bool = False,
         confirm: bool = False,
@@ -1438,6 +2161,8 @@ class HeadlessService:
             artist=artist,
             album=album,
             playlist=playlist,
+            entire_library=bool(entire_library),
+            path_prefix=path_prefix,
         )
         if err is not None:
             return err
@@ -1508,11 +2233,12 @@ class HeadlessService:
             GENERIC.supported_audio_formats
         )
 
-        # Default batching for playlist-scoped sync (ZEN poison recovery).
+        # Default batching for large scopes (ZEN poison recovery).
+        bulk_scope = bool(playlist_name) or bool(entire_library) or bool(
+            (path_prefix or "").strip()
+        )
         if batch_size is None:
-            effective_batch = (
-                DEFAULT_PLAYLIST_BATCH_SIZE if playlist_name else 0
-            )
+            effective_batch = DEFAULT_PLAYLIST_BATCH_SIZE if bulk_scope else 0
         else:
             effective_batch = max(0, int(batch_size))
         quiet_s = (

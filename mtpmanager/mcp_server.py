@@ -45,6 +45,33 @@ def _handlers() -> dict[str, ToolHandler]:
     def library_list_roots(svc: HeadlessService, _args: dict[str, Any]) -> AgentResult:
         return svc.library_list_roots()
 
+    def library_set_roots(svc: HeadlessService, args: dict[str, Any]) -> AgentResult:
+        rescan_raw = args.get("rescan")
+        rescan = True if rescan_raw is None else bool(rescan_raw)
+        return svc.library_set_roots(
+            list(args.get("roots") or []),
+            rescan=rescan,
+            confirm=bool(args.get("confirm")),
+        )
+
+    def library_add_root(svc: HeadlessService, args: dict[str, Any]) -> AgentResult:
+        rescan_raw = args.get("rescan")
+        rescan = True if rescan_raw is None else bool(rescan_raw)
+        return svc.library_add_root(str(args.get("root") or ""), rescan=rescan)
+
+    def library_remove_root(svc: HeadlessService, args: dict[str, Any]) -> AgentResult:
+        rescan_raw = args.get("rescan")
+        rescan = True if rescan_raw is None else bool(rescan_raw)
+        return svc.library_remove_root(
+            str(args.get("root") or ""),
+            rescan=rescan,
+            confirm=bool(args.get("confirm")),
+        )
+
+    def library_scan(svc: HeadlessService, args: dict[str, Any]) -> AgentResult:
+        roots = args.get("roots")
+        return svc.library_scan(roots=list(roots) if roots else None)
+
     def library_search(svc: HeadlessService, args: dict[str, Any]) -> AgentResult:
         return svc.library_search(
             str(args.get("query") or ""),
@@ -84,11 +111,63 @@ def _handlers() -> dict[str, ToolHandler]:
             confirm=bool(args.get("confirm")),
         )
 
+    def playlist_delete(svc: HeadlessService, args: dict[str, Any]) -> AgentResult:
+        return svc.playlist_delete(
+            str(args.get("name") or ""),
+            confirm=bool(args.get("confirm")),
+        )
+
+    def playlist_rename(svc: HeadlessService, args: dict[str, Any]) -> AgentResult:
+        return svc.playlist_rename(
+            str(args.get("name") or ""),
+            str(args.get("new_name") or ""),
+        )
+
+    def playlist_remove(svc: HeadlessService, args: dict[str, Any]) -> AgentResult:
+        return svc.playlist_remove(
+            str(args.get("name") or ""),
+            guids=list(args.get("guids") or []),
+            paths=list(args.get("paths") or []),
+        )
+
+    def playlist_move(svc: HeadlessService, args: dict[str, Any]) -> AgentResult:
+        delta_raw = args.get("delta")
+        delta = -1 if delta_raw is None else int(delta_raw)
+        return svc.playlist_move(
+            str(args.get("name") or ""),
+            guids=list(args.get("guids") or []),
+            paths=list(args.get("paths") or []),
+            delta=delta,
+        )
+
+    def playlist_shuffle(svc: HeadlessService, args: dict[str, Any]) -> AgentResult:
+        return svc.playlist_shuffle(
+            str(args.get("name") or ""),
+            algorithm=str(args.get("algorithm") or "artist"),
+            confirm=bool(args.get("confirm")),
+            seed_guid=args.get("seed_guid"),
+        )
+
+    def playlist_push(svc: HeadlessService, args: dict[str, Any]) -> AgentResult:
+        return svc.playlist_push(
+            str(args.get("name") or ""),
+            confirm=bool(args.get("confirm")),
+        )
+
     def config_get(svc: HeadlessService, args: dict[str, Any]) -> AgentResult:
         return svc.config_get(args.get("key"))
 
+    def config_patch(svc: HeadlessService, args: dict[str, Any]) -> AgentResult:
+        updates = args.get("updates")
+        if not isinstance(updates, dict):
+            updates = {}
+        return svc.config_patch(updates)
+
     def device_status(svc: HeadlessService, _args: dict[str, Any]) -> AgentResult:
         return svc.device_status()
+
+    def device_list_known(svc: HeadlessService, _args: dict[str, Any]) -> AgentResult:
+        return svc.device_list_known()
 
     def device_connect(svc: HeadlessService, _args: dict[str, Any]) -> AgentResult:
         return svc.device_connect()
@@ -99,8 +178,20 @@ def _handlers() -> dict[str, ToolHandler]:
     def device_info(svc: HeadlessService, _args: dict[str, Any]) -> AgentResult:
         return svc.device_info()
 
+    def device_refresh_index(svc: HeadlessService, _args: dict[str, Any]) -> AgentResult:
+        return svc.device_refresh_index()
+
     def device_inventory(svc: HeadlessService, args: dict[str, Any]) -> AgentResult:
-        return svc.device_inventory(limit=int(args.get("limit") or 200))
+        parent_raw = args.get("parent_id")
+        parent_id = int(parent_raw) if parent_raw is not None else None
+        return svc.device_inventory(
+            limit=int(args.get("limit") or 200),
+            offset=int(args.get("offset") or 0),
+            parent_id=parent_id,
+            name_contains=args.get("name_contains"),
+            guid=args.get("guid"),
+            serial=args.get("serial"),
+        )
 
     def device_delete(svc: HeadlessService, args: dict[str, Any]) -> AgentResult:
         return svc.device_delete(
@@ -117,6 +208,8 @@ def _handlers() -> dict[str, ToolHandler]:
             artist=args.get("artist"),
             album=args.get("album"),
             playlist=args.get("playlist"),
+            entire_library=bool(args.get("entire_library")),
+            path_prefix=args.get("path_prefix"),
             mode=args.get("mode"),
             dry_run=bool(args.get("dry_run")),
             confirm=bool(args.get("confirm")),
@@ -124,16 +217,14 @@ def _handlers() -> dict[str, ToolHandler]:
             batch_size=batch_size,
         )
 
-    def playlist_push(svc: HeadlessService, args: dict[str, Any]) -> AgentResult:
-        return svc.playlist_push(
-            str(args.get("name") or ""),
-            confirm=bool(args.get("confirm")),
-        )
-
     return {
         "agent_doctor": agent_doctor,
         "agent_tools": agent_tools,
         "library_list_roots": library_list_roots,
+        "library_set_roots": library_set_roots,
+        "library_add_root": library_add_root,
+        "library_remove_root": library_remove_root,
+        "library_scan": library_scan,
         "library_search": library_search,
         "library_track": library_track,
         "playlist_list": playlist_list,
@@ -141,15 +232,23 @@ def _handlers() -> dict[str, ToolHandler]:
         "playlist_create": playlist_create,
         "playlist_add": playlist_add,
         "playlist_replace": playlist_replace,
+        "playlist_delete": playlist_delete,
+        "playlist_rename": playlist_rename,
+        "playlist_remove": playlist_remove,
+        "playlist_move": playlist_move,
+        "playlist_shuffle": playlist_shuffle,
+        "playlist_push": playlist_push,
         "config_get": config_get,
+        "config_patch": config_patch,
         "device_status": device_status,
+        "device_list_known": device_list_known,
         "device_connect": device_connect,
         "device_disconnect": device_disconnect,
         "device_info": device_info,
+        "device_refresh_index": device_refresh_index,
         "device_inventory": device_inventory,
         "device_delete": device_delete,
         "sync_tracks": sync_tracks,
-        "playlist_push": playlist_push,
     }
 
 
