@@ -40,6 +40,7 @@ from mtpmanager.domain.playlist_shuffle import (
 from mtpmanager.domain.track_id import is_track_guid
 from mtpmanager.headless.dto import AgentResult, ExitCode, fail, ok, to_jsonable
 from mtpmanager.headless.phase2 import Phase2Mixin
+from mtpmanager.headless.phase3 import Phase3Mixin
 from mtpmanager.headless.tools import tools_as_dict
 from mtpmanager.infra.sync_job import (
     load_sync_job,
@@ -176,7 +177,7 @@ def _track_dict(track: Track, *, score: float | None = None) -> dict[str, Any]:
     return d
 
 
-class HeadlessService(Phase2Mixin):
+class HeadlessService(Phase2Mixin, Phase3Mixin):
     """Composition root for agent-facing operations."""
 
     def __init__(self, *, data_dir: Path | None = None) -> None:

@@ -324,6 +324,87 @@ def _handlers() -> dict[str, ToolHandler]:
             batch_size=batch_size,
         )
 
+    def retail_package(svc: HeadlessService, args: dict[str, Any]) -> AgentResult:
+        return svc.retail_package(
+            str(args.get("export_path") or ""),
+            str(args.get("zip_path") or ""),
+            confirm=bool(args.get("confirm")),
+        )
+
+    def retail_restore(svc: HeadlessService, args: dict[str, Any]) -> AgentResult:
+        return svc.retail_restore(
+            str(args.get("package_path") or ""),
+            dry_run=bool(args.get("dry_run")),
+            confirm=bool(args.get("confirm")),
+        )
+
+    def device_shrink(svc: HeadlessService, args: dict[str, Any]) -> AgentResult:
+        return svc.device_shrink(
+            guids=list(args.get("guids") or []),
+            artist=args.get("artist"),
+            album=args.get("album"),
+            dry_run=bool(args.get("dry_run")),
+            confirm=bool(args.get("confirm")),
+        )
+
+    def device_delete_all_tracks(svc: HeadlessService, args: dict[str, Any]) -> AgentResult:
+        return svc.device_delete_all_tracks(
+            confirm=bool(args.get("confirm")),
+            confirm_phrase=str(args.get("confirm_phrase") or ""),
+        )
+
+    def device_create_folder(svc: HeadlessService, args: dict[str, Any]) -> AgentResult:
+        return svc.device_create_folder(
+            str(args.get("name") or ""),
+            parent_id=int(args.get("parent_id") or 100),
+            confirm=bool(args.get("confirm")),
+        )
+
+    def device_delete_bulk(svc: HeadlessService, args: dict[str, Any]) -> AgentResult:
+        return svc.device_delete_bulk(
+            artist=args.get("artist"),
+            album=args.get("album"),
+            object_ids=list(args.get("object_ids") or []),
+            dry_run=bool(args.get("dry_run")),
+            confirm=bool(args.get("confirm")),
+        )
+
+    def device_playlist_list(svc: HeadlessService, _args: dict[str, Any]) -> AgentResult:
+        return svc.device_playlist_list()
+
+    def device_playlist_show(svc: HeadlessService, args: dict[str, Any]) -> AgentResult:
+        return svc.device_playlist_show(str(args.get("name") or ""))
+
+    def device_playlist_update(svc: HeadlessService, args: dict[str, Any]) -> AgentResult:
+        tids = args.get("track_ids")
+        return svc.device_playlist_update(
+            str(args.get("name") or ""),
+            track_ids=list(tids) if tids is not None else None,
+            remove_indices=list(args.get("remove_indices") or []) or None,
+            move_indices=list(args.get("move_indices") or []) or None,
+            delta=int(args.get("delta") if args.get("delta") is not None else -1),
+            confirm=bool(args.get("confirm")),
+        )
+
+    def device_playlist_shuffle(svc: HeadlessService, args: dict[str, Any]) -> AgentResult:
+        seed_raw = args.get("seed_index")
+        seed_index = int(seed_raw) if seed_raw is not None else None
+        return svc.device_playlist_shuffle(
+            str(args.get("name") or ""),
+            algorithm=str(args.get("algorithm") or "artist"),
+            confirm=bool(args.get("confirm")),
+            seed_index=seed_index,
+        )
+
+    def device_playlist_recreate_host(
+        svc: HeadlessService, args: dict[str, Any]
+    ) -> AgentResult:
+        return svc.device_playlist_recreate_host(
+            str(args.get("name") or ""),
+            host_name=args.get("host_name"),
+            confirm=bool(args.get("confirm")),
+        )
+
     return {
         "agent_doctor": agent_doctor,
         "agent_tools": agent_tools,
@@ -374,6 +455,17 @@ def _handlers() -> dict[str, ToolHandler]:
         "sync_job_status": sync_job_status,
         "sync_job_clear": sync_job_clear,
         "sync_resume": sync_resume,
+        "retail_package": retail_package,
+        "retail_restore": retail_restore,
+        "device_shrink": device_shrink,
+        "device_delete_all_tracks": device_delete_all_tracks,
+        "device_create_folder": device_create_folder,
+        "device_delete_bulk": device_delete_bulk,
+        "device_playlist_list": device_playlist_list,
+        "device_playlist_show": device_playlist_show,
+        "device_playlist_update": device_playlist_update,
+        "device_playlist_shuffle": device_playlist_shuffle,
+        "device_playlist_recreate_host": device_playlist_recreate_host,
     }
 
 

@@ -168,7 +168,28 @@ Risk classes: **R1** session poison · **R2** hang/metadata · **R3** USB exclus
 | `device pull` | R3, R4 | confirm; per-id results; prefer host library |
 | `device enrich-tags` | **R1, R2** | **Not for inventory**; confirm; ≤25 ids; abort on fatal; disconnect/quiet/reconnect after poison |
 | `device send-video` | R1, R3, R4 (encode) | dry-run; parent 120/124 only on agent API |
+| `device shrink` | R1, R3, R5 + quality loss | dry-run; small batches |
+| `device delete-all` | R1, R3, R5 extreme | experimental tools + phrase `DELETE ALL TRACKS` |
+| `device create-folder` | R3; ctypes string hazards | confirm; [pymtp-binding-hazards.md](./pymtp-binding-hazards.md) |
+| `device delete-bulk` | R1, R3, R5 | dry-run list first |
+| `device-playlist *` | R1, R3 | confirm on writes; list/show need connect |
+| `retail restore` | R1, R3, R5 | experimental; demo basenames (no GUID) |
 | See also | | [pymtp-binding-hazards.md](./pymtp-binding-hazards.md), bulk session poison debrief |
+
+### Phase 3 power tools (experimental / niche)
+
+| Command | Purpose |
+|---------|---------|
+| `retail package EXPORT ZIP --confirm` | Host zip from retail export (needs experimental tools) |
+| `retail restore PKG --dry-run` / `--confirm` | Restore demos to device |
+| `device shrink --artist X --dry-run` / `--confirm` | Re-encode on-device lower bitrate |
+| `device delete-all --confirm --confirm-phrase 'DELETE ALL TRACKS'` | Wipe all tracks |
+| `device create-folder NAME [--parent-id 100] --confirm` | Create MTP folder |
+| `device delete-bulk --artist X --dry-run` / `--object-id N --confirm` | Scoped bulk delete |
+| `device-playlist list` / `show NAME` | On-device playlists |
+| `device-playlist update NAME … --confirm` | Membership / reorder |
+| `device-playlist shuffle NAME --confirm` | Artist or Spotify-style |
+| `device-playlist recreate-host NAME --confirm` | Device → host M3U |
 
 Example agent flow:
 
@@ -242,7 +263,7 @@ Phased PR plan (P0–P3): **[plan-agent-interface-phases.md](./plan-agent-interf
 | **A (Phase 0)** | Done — art experiment hidden; docs; `playlist_replace` confirm; catalog↔MCP tests |
 | **B (Phase 1)** | Done — library scan/roots; config patch; refresh-index; inventory filters; playlist lifecycle; entire/path sync |
 | **C (Phase 2)** | Done — podcasts; pull; enrich (**risk docs**); video; sync-job; MCP `--data-dir` |
-| **D (Phase 3)** | Retail, shrink, delete-all, create-folder, device playlist edit |
+| **D (Phase 3)** | Done — retail; shrink; delete-all; create-folder; bulk delete; device playlists |
 
 Historical shipped item (`sync --playlist`): [todo-agent-cli.md](./todo-agent-cli.md).
 

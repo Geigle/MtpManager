@@ -382,7 +382,12 @@ Each PR: catalog + CLI + MCP + tests + hazard table rows.
 
 ### Milestone D — Power tools (Phase 3)
 
-- [ ] PR 3.1–3.6 as needed
+- [x] PR 3.1 retail package/restore
+- [x] PR 3.2 device shrink
+- [x] PR 3.3 delete-all (phrase gate)
+- [x] PR 3.4 create-folder
+- [x] PR 3.5 device playlist list/show/update/shuffle/recreate-host
+- [x] PR 3.6 bulk delete by artist/album/object_ids
 
 ---
 
@@ -416,3 +421,4 @@ Each PR: catalog + CLI + MCP + tests + hazard table rows.
 | 2026-08-11 | Milestone A shipped: art tools off agent surface; playlist_replace confirm; catalog↔MCP/CLI parity tests; docs. |
 | 2026-08-11 | Milestone B shipped: library roots/scan; config_patch; refresh-index; inventory filters; playlist CRUD/reorder/shuffle; entire_library + path_prefix sync. |
 | 2026-08-11 | Milestone C shipped: podcasts; pull; enrich (R1/R2 docs); video; sync-job; MCP --data-dir; 49 agent tools. |
+| 2026-08-11 | Milestone D shipped: retail; shrink; delete-all; create-folder; bulk delete; device playlists; 60 agent tools. |

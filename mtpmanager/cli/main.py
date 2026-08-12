@@ -299,6 +299,53 @@ def build_parser() -> argparse.ArgumentParser:
     gvid = send_vid.add_mutually_exclusive_group()
     gvid.add_argument("--dry-run", action="store_true")
     gvid.add_argument("--confirm", action="store_true")
+    shrink = dev_sub.add_parser(
+        "shrink",
+        help="Re-encode on-device tracks lower bitrate (quality loss; R1/R3/R5)",
+    )
+    shrink.add_argument(
+        "--guid",
+        action="append",
+        default=[],
+        dest="guids",
+        help="Track GUID (repeatable)",
+    )
+    shrink.add_argument("--artist", default=None)
+    shrink.add_argument("--album", default=None)
+    gsh = shrink.add_mutually_exclusive_group()
+    gsh.add_argument("--dry-run", action="store_true")
+    gsh.add_argument("--confirm", action="store_true")
+    del_all = dev_sub.add_parser(
+        "delete-all",
+        help='Delete ALL tracks (experimental; phrase "DELETE ALL TRACKS")',
+    )
+    del_all.add_argument("--confirm", action="store_true")
+    del_all.add_argument(
+        "--confirm-phrase",
+        default="",
+        dest="confirm_phrase",
+        help='Must be exactly: DELETE ALL TRACKS',
+    )
+    mkdir = dev_sub.add_parser("create-folder", help="Create MTP folder")
+    mkdir.add_argument("name")
+    mkdir.add_argument("--parent-id", type=int, default=100, dest="parent_id")
+    mkdir.add_argument("--confirm", action="store_true")
+    bulk = dev_sub.add_parser(
+        "delete-bulk",
+        help="Bulk delete by artist/album or object ids (prefer --dry-run)",
+    )
+    bulk.add_argument("--artist", default=None)
+    bulk.add_argument("--album", default=None)
+    bulk.add_argument(
+        "--object-id",
+        action="append",
+        type=int,
+        default=[],
+        dest="object_ids",
+    )
+    gbulk = bulk.add_mutually_exclusive_group()
+    gbulk.add_argument("--dry-run", action="store_true")
+    gbulk.add_argument("--confirm", action="store_true")
     # Album-art probe/experiment: HeadlessService only (dev). Not CLI tools.
 
     # podcast (host + pending device)
@@ -367,6 +414,75 @@ def build_parser() -> argparse.ArgumentParser:
     gsj = sj_rs.add_mutually_exclusive_group()
     gsj.add_argument("--dry-run", action="store_true")
     gsj.add_argument("--confirm", action="store_true")
+
+    # retail (experimental)
+    retail = sub.add_parser("retail", help="Retail package/restore (experimental)")
+    retail_sub = retail.add_subparsers(dest="action", required=True)
+    r_pkg = retail_sub.add_parser("package", help="Zip retail export folder")
+    r_pkg.add_argument("export_path")
+    r_pkg.add_argument("zip_path")
+    r_pkg.add_argument("--confirm", action="store_true")
+    r_res = retail_sub.add_parser("restore", help="Restore package to device")
+    r_res.add_argument("package_path")
+    gr = r_res.add_mutually_exclusive_group()
+    gr.add_argument("--dry-run", action="store_true")
+    gr.add_argument("--confirm", action="store_true")
+
+    # device-playlist
+    dpl = sub.add_parser("device-playlist", help="On-device playlist edit")
+    dpl_sub = dpl.add_subparsers(dest="action", required=True)
+    dpl_sub.add_parser("list", help="List device playlists")
+    dpl_show = dpl_sub.add_parser("show", help="Show playlist track ids")
+    dpl_show.add_argument("name")
+    dpl_up = dpl_sub.add_parser("update", help="Rewrite membership/order")
+    dpl_up.add_argument("name")
+    dpl_up.add_argument(
+        "--track-id",
+        action="append",
+        type=int,
+        default=[],
+        dest="track_ids",
+        help="Full replace with these object ids (repeatable)",
+    )
+    dpl_up.add_argument(
+        "--remove-index",
+        action="append",
+        type=int,
+        default=[],
+        dest="remove_indices",
+    )
+    dpl_up.add_argument(
+        "--move-index",
+        action="append",
+        type=int,
+        default=[],
+        dest="move_indices",
+    )
+    dpl_up.add_argument("--delta", type=int, default=-1)
+    dpl_up.add_argument("--confirm", action="store_true")
+    dpl_sh = dpl_sub.add_parser("shuffle", help="Shuffle device playlist")
+    dpl_sh.add_argument("name")
+    dpl_sh.add_argument(
+        "--algorithm",
+        choices=("artist", "merge", "spotify"),
+        default="artist",
+        help="artist/merge = merge-shuffle; spotify = dithered",
+    )
+    dpl_sh.add_argument(
+        "--seed-index",
+        type=int,
+        default=None,
+        dest="seed_index",
+        help="0-based seed track index (default 0; -1 = last track)",
+    )
+    dpl_sh.add_argument("--confirm", action="store_true")
+    dpl_rc = dpl_sub.add_parser(
+        "recreate-host",
+        help="Copy device playlist to host M3U",
+    )
+    dpl_rc.add_argument("name")
+    dpl_rc.add_argument("--host-name", default=None, dest="host_name")
+    dpl_rc.add_argument("--confirm", action="store_true")
 
     # sync
     sync = sub.add_parser("sync", help="Transfer tracks to device")
@@ -591,6 +707,76 @@ def dispatch(svc: HeadlessService, args: argparse.Namespace) -> AgentResult:
                 dry_run=bool(getattr(args, "dry_run", False)),
                 confirm=bool(getattr(args, "confirm", False)),
                 title=getattr(args, "title", None),
+            )
+        if action == "shrink":
+            return svc.device_shrink(
+                guids=list(getattr(args, "guids", None) or []),
+                artist=getattr(args, "artist", None),
+                album=getattr(args, "album", None),
+                dry_run=bool(getattr(args, "dry_run", False)),
+                confirm=bool(getattr(args, "confirm", False)),
+            )
+        if action == "delete-all":
+            return svc.device_delete_all_tracks(
+                confirm=bool(getattr(args, "confirm", False)),
+                confirm_phrase=str(getattr(args, "confirm_phrase", "") or ""),
+            )
+        if action == "create-folder":
+            return svc.device_create_folder(
+                args.name,
+                parent_id=int(getattr(args, "parent_id", 100) or 100),
+                confirm=bool(getattr(args, "confirm", False)),
+            )
+        if action == "delete-bulk":
+            return svc.device_delete_bulk(
+                artist=getattr(args, "artist", None),
+                album=getattr(args, "album", None),
+                object_ids=list(getattr(args, "object_ids", None) or []),
+                dry_run=bool(getattr(args, "dry_run", False)),
+                confirm=bool(getattr(args, "confirm", False)),
+            )
+
+    if group == "retail":
+        if action == "package":
+            return svc.retail_package(
+                args.export_path,
+                args.zip_path,
+                confirm=bool(args.confirm),
+            )
+        if action == "restore":
+            return svc.retail_restore(
+                args.package_path,
+                dry_run=bool(getattr(args, "dry_run", False)),
+                confirm=bool(getattr(args, "confirm", False)),
+            )
+
+    if group == "device-playlist":
+        if action == "list":
+            return svc.device_playlist_list()
+        if action == "show":
+            return svc.device_playlist_show(args.name)
+        if action == "update":
+            tids = list(getattr(args, "track_ids", None) or [])
+            return svc.device_playlist_update(
+                args.name,
+                track_ids=tids or None,
+                remove_indices=list(getattr(args, "remove_indices", None) or []) or None,
+                move_indices=list(getattr(args, "move_indices", None) or []) or None,
+                delta=int(getattr(args, "delta", -1)),
+                confirm=bool(args.confirm),
+            )
+        if action == "shuffle":
+            return svc.device_playlist_shuffle(
+                args.name,
+                algorithm=str(getattr(args, "algorithm", "artist") or "artist"),
+                confirm=bool(args.confirm),
+                seed_index=getattr(args, "seed_index", None),
+            )
+        if action == "recreate-host":
+            return svc.device_playlist_recreate_host(
+                args.name,
+                host_name=getattr(args, "host_name", None),
+                confirm=bool(args.confirm),
             )
 
     if group == "podcast":

@@ -516,6 +516,33 @@ class AgentSurfaceParityTests(unittest.TestCase):
                 argv.extend(["1", "--confirm"])
             elif group == "device" and action == "send-video":
                 argv.extend(["/tmp/x.avi", "--dry-run"])
+            elif group == "device" and action == "shrink":
+                argv.extend(["--artist", "X", "--dry-run"])
+            elif group == "device" and action == "delete-all":
+                argv.extend(
+                    ["--confirm", "--confirm-phrase", "DELETE ALL TRACKS"]
+                )
+            elif group == "device" and action == "create-folder":
+                argv.extend(["Folder", "--confirm"])
+            elif group == "device" and action == "delete-bulk":
+                argv.extend(["--object-id", "1", "--dry-run"])
+            elif group == "retail" and action == "package":
+                argv.extend(["/tmp/export", "/tmp/out.zip", "--confirm"])
+            elif group == "retail" and action == "restore":
+                argv.extend(["/tmp/pkg.zip", "--dry-run"])
+            elif group == "device-playlist" and action in (
+                "show",
+                "update",
+                "shuffle",
+                "recreate-host",
+            ):
+                argv.append("Name")
+            elif group == "device-playlist" and action in (
+                "update",
+                "shuffle",
+                "recreate-host",
+            ):
+                argv.append("--confirm")
             elif group == "podcast" and action == "show":
                 argv.extend(["--id", "1"])
             elif group == "podcast" and action in (
@@ -548,6 +575,13 @@ class AgentSurfaceParityTests(unittest.TestCase):
             ):
                 argv.append("--confirm")
             if group == "podcast" and action == "unsubscribe":
+                if "--confirm" not in argv:
+                    argv.append("--confirm")
+            if group == "device-playlist" and action in (
+                "update",
+                "shuffle",
+                "recreate-host",
+            ):
                 if "--confirm" not in argv:
                     argv.append("--confirm")
             args = parser.parse_args(argv)
@@ -659,6 +693,58 @@ class CliMainTests(unittest.TestCase):
             self.assertEqual(
                 payload["data"]["batch_size"], DEFAULT_PLAYLIST_BATCH_SIZE
             )
+
+
+class MilestoneDPhase3Tests(unittest.TestCase):
+    def test_experimental_gates_and_delete_all_phrase(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp)
+            svc = HeadlessService(data_dir=data)
+            # experimental off by default
+            r = svc.retail_package("/tmp/a", "/tmp/b.zip", confirm=True)
+            self.assertFalse(r.ok)
+            self.assertEqual(r.exit_code, int(ExitCode.USAGE))
+            svc.config_patch({"enable_experimental_tools": True})
+            # still needs confirm for package when paths bad - after experimental
+            r2 = svc.retail_package("/nope", "/tmp/b.zip", confirm=False)
+            self.assertEqual(r2.exit_code, int(ExitCode.CONFIRM_REQUIRED))
+            r3 = svc.device_delete_all_tracks(confirm=True, confirm_phrase="nope")
+            self.assertEqual(r3.exit_code, int(ExitCode.CONFIRM_REQUIRED))
+            r4 = svc.device_create_folder("X", confirm=False)
+            self.assertEqual(r4.exit_code, int(ExitCode.CONFIRM_REQUIRED))
+
+    def test_bulk_delete_dry_run_by_object_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            svc = HeadlessService(data_dir=Path(tmp))
+            plan = svc.device_delete_bulk(object_ids=[10, 20, 10], dry_run=True)
+            self.assertTrue(plan.ok)
+            self.assertEqual(plan.data["count"], 2)
+            gate = svc.device_delete_bulk(object_ids=[10], confirm=False)
+            self.assertEqual(gate.exit_code, int(ExitCode.CONFIRM_REQUIRED))
+
+    def test_shrink_dry_run_missing_serial(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp)
+            root = data / "Music"
+            root.mkdir()
+            f = root / "a.mp3"
+            f.write_bytes(b"x")
+            g = new_track_guid()
+            save_library_index(
+                Library(tracks=[_track(str(f), guid=g)], root_paths=[str(root)]),
+                path=data / "library_index.db",
+            )
+            svc = HeadlessService(data_dir=data)
+            r = svc.device_shrink(guids=[g], dry_run=True)
+            # no serial in empty device index
+            self.assertFalse(r.ok)
+            self.assertIn("serial", (r.message or "").lower())
+
+    def test_device_playlist_update_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            svc = HeadlessService(data_dir=Path(tmp))
+            r = svc.device_playlist_update("Rock", confirm=False)
+            self.assertEqual(r.exit_code, int(ExitCode.CONFIRM_REQUIRED))
 
 
 class MilestoneCPhase2Tests(unittest.TestCase):
