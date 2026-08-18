@@ -1029,6 +1029,52 @@ def record_device_album(
         conn.close()
 
 
+def clear_device_album(
+    serial: str,
+    album_key: str,
+    *,
+    path: Path | None = None,
+) -> bool:
+    """Remove the host ``device_albums`` row for *album_key*. Returns True if a row was deleted."""
+    key = device_serial_key(serial=serial)
+    ak = str(album_key or "").strip()
+    if not ak:
+        return False
+    conn, _ = _open(path)
+    try:
+        cur = conn.execute(
+            "DELETE FROM device_albums WHERE serial = ? AND album_key = ?",
+            (key, ak),
+        )
+        conn.commit()
+        return int(cur.rowcount or 0) > 0
+    finally:
+        conn.close()
+
+
+def clear_device_album_by_id(
+    serial: str,
+    album_id: int,
+    *,
+    path: Path | None = None,
+) -> int:
+    """Delete host cache rows pointing at MTP *album_id*. Returns rows removed."""
+    key = device_serial_key(serial=serial)
+    oid = int(album_id or 0)
+    if oid <= 0:
+        return 0
+    conn, _ = _open(path)
+    try:
+        cur = conn.execute(
+            "DELETE FROM device_albums WHERE serial = ? AND album_id = ?",
+            (key, oid),
+        )
+        conn.commit()
+        return int(cur.rowcount or 0)
+    finally:
+        conn.close()
+
+
 def list_known_devices(*, path: Path | None = None) -> list[dict[str, object]]:
     """Return known device rows for diagnostics / future picker UI."""
     conn, _ = _open(path)

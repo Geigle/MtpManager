@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 from collections.abc import Callable
 from tkinter import DISABLED, NORMAL, filedialog, messagebox
 
@@ -12,7 +13,12 @@ from mtpmanager.app import device_ops
 from mtpmanager.app import retail_ops
 from mtpmanager.app.artist_folders import ensure_album_folder, ensure_artist_folder
 from mtpmanager.app.cancellation import JobCancelled
-from mtpmanager.app.album_art_device import push_album_art_for_tracks
+from mtpmanager.app.album_art_device import (
+    album_display_fields,
+    album_grouping_key,
+    push_album_art_for_tracks,
+    remove_device_album_art,
+)
 from mtpmanager.app.device_io_gate import DEFAULT_USB_QUIET_S, DeviceIoGate
 from mtpmanager.infra.device_session_lock import DeviceSessionLock
 from mtpmanager.app.playlist_device import (
@@ -145,6 +151,7 @@ from mtpmanager.infra.ffmpeg_transcode import FFmpegTranscoder
 from mtpmanager.infra.library_index import (
     exclude_library_paths,
     get_tracks_by_guids,
+    get_tracks_by_paths,
     list_library_exclusions,
     load_exclusion_paths,
     load_library_index,
@@ -152,6 +159,7 @@ from mtpmanager.infra.library_index import (
     save_library_index,
     untrack_library_roots,
 )
+from mtpmanager.infra import private_hooks
 from mtpmanager.domain.playlist_shuffle import (
     merge_shuffle,
     rng_from_seed_track,
@@ -222,7 +230,7 @@ from mtpmanager.ui.formatting import (
     multi_selection_detail,
     track_selection_detail,
 )
-from mtpmanager.ui.window import MainWindow
+from mtpmanager.ui.window import CTX_DEVICE_UPDATE_GUIDS, MainWindow
 
 logger = logging.getLogger(__name__)
 
@@ -341,6 +349,8 @@ class AppController:
         self._device_tree_refresh_after_id: str | None = None
         self._device_context_tree = None
         self._device_context_row: str | None = None
+        # Set True only when private GUID adapter menu item is installed.
+        self._device_update_guids_menu = False
         # Live Music/Video/TV folder ids from list_folders name match.
         self._folder_layout: DeviceFolderLayout = legacy_zen_vision_m_layout()
         # folder_id → parent_id from last list_folders (podcast show folders).
@@ -620,6 +630,7 @@ class AppController:
             on_shrink=self.action_shrink_device_selection,
             on_delete_artist=self.action_device_delete_artist_group,
             on_delete_album=self.action_device_delete_album_group,
+            on_remove_album_art=self.action_device_remove_album_art,
             on_delete_folder=self.action_device_delete_folder_group,
             on_add_artist_to_playlist=self.action_device_add_selected_to_playlist,
             on_add_album_to_playlist=self.action_device_add_selected_to_playlist,
@@ -627,6 +638,20 @@ class AppController:
             on_device_info=self.on_device_info,
             on_delete_all=self.action_delete_all_tracks,
         )
+        # Optional private GUID adapter: one extra device-track action when present.
+        self._device_update_guids_menu = False
+        self._device_update_guids_menu_index: int | None = None
+        if private_hooks.library_guid_adapter() is not None:
+            if w.ensure_device_update_guids_command(
+                self.action_device_update_guids_selected
+            ):
+                self._device_update_guids_menu = True
+                try:
+                    self._device_update_guids_menu_index = int(
+                        w.menu_device_track_ctx.index(CTX_DEVICE_UPDATE_GUIDS)
+                    )
+                except Exception:
+                    self._device_update_guids_menu_index = None
         w.set_sort_heading_handler(self.on_sort_heading)
         w.set_cancel_job_command(self.on_cancel_job)
         # Context menu: Button-3 (most platforms), Button-2.
@@ -3725,18 +3750,18 @@ class AppController:
         except Exception:
             label = "group"
         try:
-            # Group menus: index 0 = Add to playlist, 2 = Delete.
+            # Delete is always the last entry on these group menus.
             if "group_artist" in tagset:
                 self.win.menu_device_artist_ctx.entryconfig(
-                    2, label=f"Delete all from {label}…"
+                    "end", label=f"Delete all from {label}…"
                 )
             elif "group_album" in tagset:
                 self.win.menu_device_album_ctx.entryconfig(
-                    2, label=f"Delete album {label}…"
+                    "end", label=f"Delete album {label}…"
                 )
             elif "group_folder" in tagset:
                 self.win.menu_device_folder_ctx.entryconfig(
-                    2, label=f"Delete all in {label}…"
+                    "end", label=f"Delete all in {label}…"
                 )
         except Exception:
             pass
@@ -3775,9 +3800,9 @@ class AppController:
                         else "Add to Device Playlist…"
                     ),
                 )
-                # Index 7: Delete (after second separator).
+                # Delete is always the last entry (Update GUIDs inserts before it).
                 self.win.menu_device_track_ctx.entryconfig(
-                    7,
+                    "end",
                     label=f"Delete {n} {noun} from device…",
                 )
             else:
@@ -3797,10 +3822,45 @@ class AppController:
                     5, label="Add to Device Playlist…"
                 )
                 self.win.menu_device_track_ctx.entryconfig(
-                    7, label="Delete from device…"
+                    "end", label="Delete from device…"
                 )
         except Exception:
             pass
+        if getattr(self, "_device_update_guids_menu", False):
+            try:
+                idx = self._device_update_guids_menu_index
+                if idx is None:
+                    idx = int(
+                        self.win.menu_device_track_ctx.index(
+                            CTX_DEVICE_UPDATE_GUIDS
+                        )
+                    )
+                obsolete = private_hooks.obsolete_guid_paths()
+                matched = 0
+                for t in tracks:
+                    g = (t.guid or "").strip().lower()
+                    if g and g in obsolete:
+                        matched += 1
+                if matched == 0 and tracks:
+                    for ref in self._device_refs_for_tracks(tracks):
+                        g = guid_from_remote_name(getattr(ref, "name", None))
+                        if g and g in obsolete:
+                            matched += 1
+                if matched:
+                    noun = "track" if matched == 1 else "tracks"
+                    self.win.menu_device_track_ctx.entryconfig(
+                        idx,
+                        label=f"Update GUIDs… ({matched} {noun})",
+                        state="normal",
+                    )
+                else:
+                    self.win.menu_device_track_ctx.entryconfig(
+                        idx,
+                        label=CTX_DEVICE_UPDATE_GUIDS,
+                        state="disabled",
+                    )
+            except Exception:
+                pass
         # Group menus: keep Add label count-aware when selection expands.
         try:
             if "group_artist" in tagset and n >= 1:
@@ -5984,7 +6044,12 @@ class AppController:
         return True
 
     def _publish_album_art_after_sync(self, paths: list[str]) -> None:
-        """After successful music transfer: create/update albums + JPEG samples."""
+        """After successful music transfer: create/update albums + JPEG samples.
+
+        Must not overlap other MTP abstract-list work (playlist create/update).
+        Callers that also publish a device playlist should chain this from that
+        job's completion so both hold :class:`DeviceIoGate` in sequence.
+        """
         if not paths:
             return
         if not self._should_push_album_art():
@@ -6000,10 +6065,15 @@ class AppController:
         serial = self._device_serial or device_serial_key()
 
         def work():
-            if not self._device_io.try_acquire("album-art-push"):
-                raise RuntimeError(
-                    f"Device is busy ({self._device_io.holder or 'unknown'})."
-                )
+            # Wait briefly if playlist publish (or another job) still holds the
+            # gate — never touch libmtp without ownership.
+            deadline = time.monotonic() + 60.0
+            while not self._device_io.try_acquire("album-art-push"):
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(
+                        f"Device is busy ({self._device_io.holder or 'unknown'})."
+                    )
+                time.sleep(0.25)
             try:
                 return push_album_art_for_tracks(
                     device=self.device,
@@ -6058,13 +6128,35 @@ class AppController:
             name="device-album-art",
         )
 
-    def _publish_pending_device_playlist(self) -> None:
-        """After a successful playlist track sync, create/update MTP playlist."""
+    def _publish_pending_device_playlist(
+        self,
+        *,
+        on_finished: Callable[[], None] | None = None,
+    ) -> None:
+        """After a successful playlist track sync, create/update MTP playlist.
+
+        Holds :class:`DeviceIoGate` for the whole publish. Optional
+        *on_finished* runs on the UI thread after success, failure, or skip
+        (used to chain album-art push so it cannot race abstract-list I/O).
+        """
         pending = self._pending_device_playlist
         self._pending_device_playlist = None
+
+        def _finish() -> None:
+            if on_finished is None:
+                return
+            try:
+                on_finished()
+            except Exception:
+                logger.debug(
+                    "playlist publish on_finished failed", exc_info=True
+                )
+
         if not pending or not pending.get("publish"):
+            _finish()
             return
         if self.win.active_mode() != "experimental":
+            _finish()
             return
         if not self.device.is_connected():
             messagebox.showwarning(
@@ -6073,51 +6165,64 @@ class AppController:
                 "on-device playlist creation.\n\n"
                 "Connect in Experimental mode and Sync playlist again.",
             )
+            _finish()
             return
         name = str(pending.get("name") or "playlist")
         guids = list(pending.get("guids") or [])
         serial = self._device_serial or device_serial_key()
 
         def work() -> object:
-            # Prefer real object ids; refresh listing if any GUID is unresolved.
-            _ids, missing = resolve_track_object_ids(serial, guids)
-            if missing:
-                logger.info(
-                    "Playlist publish: %d GUID(s) lack real item_id — "
-                    "refreshing device file list",
-                    len(missing),
+            if not self._device_io.try_acquire("device-playlist-publish"):
+                raise RuntimeError(
+                    f"Device is busy ({self._device_io.holder or 'unknown'})."
                 )
-                try:
-                    self.win.root.after(
-                        0,
-                        lambda: self.win.set_progress_status(
-                            "Refreshing device index for playlist…"
-                        ),
+            try:
+                # Prefer real object ids; refresh listing if any GUID is unresolved.
+                _ids, missing = resolve_track_object_ids(serial, guids)
+                if missing:
+                    logger.info(
+                        "Playlist publish: %d GUID(s) lack real item_id — "
+                        "refreshing device file list",
+                        len(missing),
                     )
-                except Exception:
-                    pass
-                try:
-                    files = self.device.list_files()
-                    replace_device_listing(serial, files, source="list")
-                except Exception:
-                    logger.warning(
-                        "Playlist publish: list_files refresh failed",
-                        exc_info=True,
-                    )
-            parent = playlists_parent_id(self._folder_layout)
-            return push_playlist_to_device(
-                device=self.device,
-                serial=serial,
-                name=name,
-                guids_in_order=guids,
-                parent_id=parent,
-            )
+                    try:
+                        self.win.root.after(
+                            0,
+                            lambda: self.win.set_progress_status(
+                                "Refreshing device index for playlist…"
+                            ),
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        files = self.device.list_files()
+                        replace_device_listing(serial, files, source="list")
+                    except Exception:
+                        logger.warning(
+                            "Playlist publish: list_files refresh failed",
+                            exc_info=True,
+                        )
+                parent = playlists_parent_id(self._folder_layout)
+                return push_playlist_to_device(
+                    device=self.device,
+                    serial=serial,
+                    name=name,
+                    guids_in_order=guids,
+                    parent_id=parent,
+                )
+            finally:
+                self._device_io.release(
+                    reason="device-playlist-publish",
+                    quiet_s=_DEVICE_USB_COOLDOWN_S,
+                )
 
         def on_done(result) -> None:
             try:
                 self.win.set_progress_status("")
             except Exception:
                 pass
+            # Release sequencing for album art before modal dialogs.
+            _finish()
             if result is None:
                 return
             verb = "Created" if result.created else "Updated"
@@ -6147,7 +6252,9 @@ class AppController:
                     pass
             self.win.root.after(
                 100,
-                lambda: self._refresh_device_playlists_tab(keep_selection=True),
+                lambda: self._refresh_device_playlists_tab(
+                    keep_selection=True
+                ),
             )
 
         def on_error(exc: BaseException) -> None:
@@ -6155,6 +6262,7 @@ class AppController:
                 self.win.set_progress_status("")
             except Exception:
                 pass
+            _finish()
             logger.exception("Device playlist publish failed")
             messagebox.showerror(
                 "Playlist on device",
@@ -10586,17 +10694,25 @@ class AppController:
             self._finish_sync_job_success()
             self._end_transfer_job()
             logger.info("Background batch finished: succeeded=%s", succeeded)
+            art_paths = list(job.paths) if job is not None else []
+
+            def maybe_album_art() -> None:
+                # Phase 2b: abstract album + cover art (ZEN: not on track objects).
+                # Music and podcasts: podcast show RSS art when episodes lack covers.
+                # Must run only after playlist publish releases DeviceIoGate —
+                # both use abstract-list APIs and concurrent use poisons the session.
+                if self._should_push_album_art():
+                    self._publish_album_art_after_sync(art_paths)
+
             # Phase 2 for playlist sync: MTP playlist object (Experimental).
             if kind == "playlist" or (
                 self._pending_device_playlist is not None
             ):
-                self._publish_pending_device_playlist()
-            # Phase 2b: abstract album + cover art (ZEN: not on track objects).
-            # Music and podcasts: podcast show RSS art is used when episode
-            # files lack embedded covers.
-            if self._should_push_album_art():
-                paths = list(job.paths) if job is not None else []
-                self._publish_album_art_after_sync(paths)
+                self._publish_pending_device_playlist(
+                    on_finished=maybe_album_art
+                )
+            else:
+                maybe_album_art()
             if self._pending_auto_podcast is not None:
                 self._finish_auto_podcast_device_batch(ok=True)
 
@@ -12876,6 +12992,179 @@ class AppController:
             refs, title="Delete from device", confirm=confirm
         )
 
+    def action_device_update_guids_selected(self) -> None:
+        """Delete on-device objects whose stems are obsolete GUIDs, then resync."""
+        title = "Update GUIDs"
+        if private_hooks.library_guid_adapter() is None:
+            return
+        if not self._require_device_ready():
+            return
+        if self._transfer_busy:
+            messagebox.showinfo(
+                title,
+                "A transfer or device job is already in progress.",
+            )
+            return
+
+        tree = self._device_context_tree or self.win.active_device_tree()
+        tracks = self._device_tracks_from_tree_selection(tree)
+        refs = self._device_refs_for_tracks(tracks)
+        obsolete = private_hooks.obsolete_guid_paths()
+        if not obsolete:
+            messagebox.showinfo(
+                title,
+                "No obsolete GUIDs are recorded for this library.",
+            )
+            return
+
+        # (ref, obsolete_guid, host_path)
+        planned: list[tuple[object, str, str]] = []
+        for ref in refs:
+            old_guid = guid_from_remote_name(getattr(ref, "name", None))
+            if not old_guid or old_guid not in obsolete:
+                continue
+            host_path = obsolete[old_guid]
+            planned.append((ref, old_guid, host_path))
+
+        if not planned:
+            messagebox.showinfo(
+                title,
+                "None of the selected on-device tracks match an obsolete GUID.",
+            )
+            return
+
+        host_paths = [p for _, _, p in planned]
+        by_path = {t.path: t for t in self.library.tracks if t.path}
+        missing = [p for p in host_paths if p not in by_path]
+        if missing:
+            by_path.update(get_tracks_by_paths(missing))
+
+        host_tracks: list[Track] = []
+        delete_refs: list = []
+        clear_guids: list[str] = []
+        skipped = 0
+        for ref, old_guid, host_path in planned:
+            host = by_path.get(host_path)
+            if host is None or not is_track_guid(host.guid):
+                skipped += 1
+                continue
+            delete_refs.append(ref)
+            host_tracks.append(host)
+            clear_guids.append(old_guid)
+
+        if not delete_refs:
+            messagebox.showinfo(
+                title,
+                "Obsolete GUID(s) found, but no matching host library tracks "
+                "are available to resync.",
+            )
+            return
+
+        n = len(delete_refs)
+        extra = f"\n\n({skipped} skipped — host file missing from library.)" if skipped else ""
+        if not messagebox.askyesno(
+            title,
+            f"Delete {n} on-device object(s) that still use obsolete GUIDs, "
+            f"then resync from the host library with the current GUIDs?\n\n"
+            f"This replaces the on-device files for those tracks.{extra}",
+            icon=messagebox.WARNING,
+            default=messagebox.NO,
+        ):
+            return
+
+        if not self._begin_transfer_job():
+            return
+        device = self.device
+        batch = list(delete_refs)
+        serial = self._device_serial or device_serial_key()
+        to_send = list(host_tracks)
+        guids_to_clear = list(clear_guids)
+
+        def work():
+            gen = self._bg.generation
+            report = self._bg.progress_callback(gen)
+            deleted = 0
+            deleted_ids: list[int] = []
+            failed_id = None
+            aborted = False
+            total = len(batch)
+            for i, ref in enumerate(batch):
+                if self._should_cancel_job():
+                    raise JobCancelled(f"{title} cancelled")
+                oid = int(ref.item_id or 0)
+                label = (ref.name or ref.title or f"id={oid}").strip()
+                report("progress", i, total, label)
+                try:
+                    device_ops.delete_object(device, oid)
+                except Exception as exc:
+                    logger.exception("Update GUIDs delete failed id=%s", oid)
+                    if isinstance(exc, TransportError) and exc.fatal:
+                        failed_id = oid
+                        aborted = True
+                        break
+                    failed_id = oid
+                    aborted = True
+                    break
+                deleted += 1
+                deleted_ids.append(oid)
+            report("progress", total, total, "done")
+            return {
+                "deleted": deleted,
+                "total": total,
+                "deleted_ids": deleted_ids,
+                "failed_id": failed_id,
+                "aborted": aborted,
+            }
+
+        def on_done(result) -> None:
+            self._end_transfer_job()
+            for oid in result.get("deleted_ids") or ():
+                try:
+                    remove_by_item_id(serial, int(oid))
+                except Exception:
+                    logger.debug(
+                        "device_index remove after Update GUIDs failed id=%s",
+                        oid,
+                        exc_info=True,
+                    )
+            self._schedule_device_music_tree_refresh(enrich_missing_tags=False)
+            if result.get("aborted"):
+                messagebox.showerror(
+                    f"{title} aborted",
+                    f"Deleted {result['deleted']} of {result['total']} "
+                    f"object(s).\nStopped at object id={result.get('failed_id')}.\n"
+                    "Resync was not started.",
+                )
+                return
+            private_hooks.clear_obsolete_guids(guids_to_clear)
+            # Start resync with current host GUIDs.
+            if not self._transfer_many(
+                to_send,
+                kind="update-guids",
+                label="Update GUIDs",
+            ):
+                messagebox.showinfo(
+                    title,
+                    f"Deleted {result['deleted']} object(s), but could not "
+                    "start the resync transfer.",
+                )
+
+        def on_error(exc: BaseException) -> None:
+            self._end_transfer_job()
+            if isinstance(exc, JobCancelled):
+                self._handle_job_cancelled(exc, title=f"{title} cancelled")
+                return
+            logger.exception("%s failed", title)
+            messagebox.showerror(title, str(exc))
+
+        self._bg.submit(
+            work,
+            on_done=on_done,
+            on_error=on_error,
+            on_progress=self._on_transfer_ui_event,
+            name="device-update-guids",
+        )
+
     def action_device_delete_artist_group(self) -> None:
         """Context menu: delete all tracks under a device artist group."""
         tree = self._device_context_tree or self.win.device_tree
@@ -12920,6 +13209,148 @@ class AppController:
                 f"Delete all {len(refs)} track(s) from album “{label}” "
                 f"on the device?\n\nThis cannot be undone from the app."
             ),
+        )
+
+    def action_device_remove_album_art(self) -> None:
+        """Context menu: delete abstract MTP album object + clear art cache.
+
+        Track files stay on the device. Next album-art sync will create a fresh
+        album object instead of updating a stale one after wipe/resync.
+        """
+        title = "Remove album art"
+        if not self._require_device_ready():
+            return
+        if self.win.active_mode() != "experimental":
+            messagebox.showinfo(
+                title,
+                "Removing on-device album art requires Experimental mode (PyMTP).",
+            )
+            return
+        if self._transfer_busy:
+            messagebox.showinfo(
+                title,
+                "A transfer or device job is already in progress.",
+            )
+            return
+
+        tree = self._device_context_tree or self.win.device_tree
+        iid = self._device_context_row
+        if not iid:
+            messagebox.showinfo(title, "No album group selected.")
+            return
+        tracks = self._device_tracks_under_iid(tree, iid)
+        if not tracks:
+            messagebox.showinfo(title, "No tracks under this album group.")
+            return
+
+        seed = tracks[0]
+        for t in tracks:
+            if album_grouping_key(t):
+                seed = t
+                break
+        key = album_grouping_key(seed)
+        if not key:
+            messagebox.showinfo(
+                title,
+                "This album has no album tag — nothing to remove.",
+            )
+            return
+        name, artist = album_display_fields(seed)
+        try:
+            values = tree.item(iid, "values") or ()
+            label = str(values[0] if values else name).strip() or name
+        except Exception:
+            label = name
+
+        if not messagebox.askyesno(
+            title,
+            f"Remove on-device cover art for “{label}”?\n\n"
+            "This deletes the Creative album object that holds the JPEG "
+            "(not the tracks). The host art cache for this album is cleared "
+            "so the next Sync album art pass can recreate it.",
+            icon=messagebox.WARNING,
+            default=messagebox.NO,
+        ):
+            return
+
+        serial = self._device_serial or device_serial_key()
+
+        def work():
+            if not self._device_io.try_acquire("device-remove-album-art"):
+                raise RuntimeError(
+                    f"Device is busy ({self._device_io.holder or 'unknown'})."
+                )
+            try:
+                return remove_device_album_art(
+                    device=self.device,
+                    serial=serial,
+                    album_key=key,
+                    name=name,
+                    artist=artist,
+                )
+            finally:
+                self._device_io.release(
+                    reason="device-remove-album-art",
+                    quiet_s=_DEVICE_USB_COOLDOWN_S,
+                )
+
+        def on_done(result) -> None:
+            try:
+                self.win.set_progress_status("")
+            except Exception:
+                pass
+            if result is None:
+                return
+            if result.error:
+                messagebox.showerror(
+                    title,
+                    f"Could not fully remove album art for “{label}”:\n\n"
+                    f"{result.error}\n\n"
+                    f"Cache cleared: {'yes' if result.cleared_cache else 'no'}",
+                )
+                return
+            if result.album_id <= 0 and not result.cleared_cache:
+                messagebox.showinfo(
+                    title,
+                    f"No cached album-art object for “{label}”.\n\n"
+                    "Nothing to delete. Sync album art on the next transfer "
+                    "will create a new album object if covers are available.",
+                )
+                return
+            bits = []
+            if result.deleted_object:
+                bits.append(f"deleted album object id={result.album_id}")
+            elif result.album_id > 0:
+                bits.append(
+                    f"album object id={result.album_id} was already gone"
+                )
+            if result.cleared_cache:
+                bits.append("cleared host art cache")
+            detail = "; ".join(bits) if bits else "done"
+            messagebox.showinfo(
+                title,
+                f"Removed album art for “{label}”.\n\n{detail}.\n\n"
+                "Re-sync tracks for this album (or any sync that includes them) "
+                "with Sync album art enabled to push a fresh cover.",
+            )
+
+        def on_error(exc: BaseException) -> None:
+            try:
+                self.win.set_progress_status("")
+            except Exception:
+                pass
+            logger.exception("Remove album art failed")
+            messagebox.showerror(title, str(exc))
+
+        try:
+            self.win.set_progress_status(f"Removing album art for “{label}”…")
+        except Exception:
+            pass
+        self._bg.submit(
+            work,
+            on_done=on_done,
+            on_error=on_error,
+            name="device-remove-album-art",
         )
 
     def action_device_delete_folder_group(self) -> None:

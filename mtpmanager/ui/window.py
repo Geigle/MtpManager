@@ -283,8 +283,11 @@ CTX_DEVICE_FETCH_TAGS = "Fetch track tags…"
 CTX_DEVICE_TRACK_INFO = "Track Info…"
 CTX_DEVICE_ADD_TO_PLAYLIST = "Add to Device Playlist…"
 CTX_DEVICE_SHRINK = "Shrink…"
+# Inserted only when an optional private GUID adapter is loaded (see controllers).
+CTX_DEVICE_UPDATE_GUIDS = "Update GUIDs…"
 CTX_DEVICE_DELETE_ARTIST = "Delete all from Artist…"
 CTX_DEVICE_DELETE_ALBUM = "Delete album from device…"
+CTX_DEVICE_REMOVE_ALBUM_ART = "Remove album art…"
 CTX_DEVICE_DELETE_FOLDER = "Delete all in folder…"
 CTX_DEVICE_ADD_ARTIST_TO_PLAYLIST = "Add Artist to Device Playlist…"
 CTX_DEVICE_ADD_ALBUM_TO_PLAYLIST = "Add Album to Device Playlist…"
@@ -659,6 +662,7 @@ class MainWindow:
             label=CTX_DEVICE_ADD_ALBUM_TO_PLAYLIST
         )
         self.menu_device_album_ctx.add_command(label=CTX_DEVICE_SHRINK)
+        self.menu_device_album_ctx.add_command(label=CTX_DEVICE_REMOVE_ALBUM_ART)
         self.menu_device_album_ctx.add_separator()
         self.menu_device_album_ctx.add_command(label=CTX_DEVICE_DELETE_ALBUM)
 
@@ -3938,6 +3942,7 @@ class MainWindow:
         on_shrink=None,
         on_delete_artist=None,
         on_delete_album=None,
+        on_remove_album_art=None,
         on_delete_folder=None,
         on_add_artist_to_playlist=None,
         on_add_album_to_playlist=None,
@@ -3999,6 +4004,10 @@ class MainWindow:
             self.menu_device_album_ctx.entryconfig(
                 CTX_DEVICE_DELETE_ALBUM, command=on_delete_album
             )
+        if on_remove_album_art is not None:
+            self.menu_device_album_ctx.entryconfig(
+                CTX_DEVICE_REMOVE_ALBUM_ART, command=on_remove_album_art
+            )
         if on_add_folder_to_playlist is not None:
             self.menu_device_folder_ctx.entryconfig(
                 CTX_DEVICE_ADD_FOLDER_TO_PLAYLIST,
@@ -4016,6 +4025,31 @@ class MainWindow:
             self.menu_device_panel_ctx.entryconfig(
                 CTX_DEVICE_DELETE_ALL, command=on_delete_all
             )
+
+    def ensure_device_update_guids_command(self, command) -> bool:
+        """Insert device-track ``Update GUIDs…`` once (optional private adapter).
+
+        Returns True when the item is present and wired. Absent by default so
+        builds without the private package never show the action.
+        """
+        menu = self.menu_device_track_ctx
+        try:
+            menu.index(CTX_DEVICE_UPDATE_GUIDS)
+            menu.entryconfig(CTX_DEVICE_UPDATE_GUIDS, command=command)
+            return True
+        except Exception:
+            pass
+        try:
+            idx = menu.index(CTX_DEVICE_DELETE)
+        except Exception:
+            idx = "end"
+        try:
+            menu.insert_command(
+                idx, label=CTX_DEVICE_UPDATE_GUIDS, command=command
+            )
+            return True
+        except Exception:
+            return False
 
     def popup_device_context(self, event) -> str | None:
         """Show on-device media context menu for the row under the pointer."""

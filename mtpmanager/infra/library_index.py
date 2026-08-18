@@ -38,6 +38,7 @@ from mtpmanager.domain.library import (
 from mtpmanager.domain.models import Track, TrackMetadata
 from mtpmanager.domain.track_id import is_track_guid, new_track_guid
 from mtpmanager.infra.app_paths import default_data_dir
+from mtpmanager.infra import private_hooks
 
 logger = logging.getLogger(__name__)
 
@@ -375,6 +376,8 @@ def save_library_index(
     try:
         _init_schema(conn)
         path_map = _load_path_guid_map(conn)
+        # Optional private adapter may override path→guid (e.g. portable sidecars).
+        path_map = private_hooks.enrich_path_guid_map(library.tracks, path_map)
         assigned = ensure_track_guids(library.tracks, path_to_guid=path_map)
         library.tracks[:] = assigned
 
@@ -386,6 +389,16 @@ def save_library_index(
 
         with conn:
             _set_library_meta_roots(conn, roots, now=now)
+
+            # Path is UNIQUE: if a path's GUID changed, drop the old row first
+            # so the upsert can insert the new primary key (obsolete ids may
+            # be retained by a private adapter outside SQLite).
+            for t in assigned:
+                if is_track_guid(t.guid):
+                    conn.execute(
+                        "DELETE FROM tracks WHERE path = ? AND guid != ?",
+                        (t.path, t.guid),
+                    )
 
             for t in assigned:
                 _upsert_tracked_track(conn, t, now=now)
@@ -425,6 +438,7 @@ def save_library_index(
         library.root_paths,
         dest,
     )
+    private_hooks.after_library_saved(library.tracks)
     return dest
 
 
@@ -867,6 +881,38 @@ def get_tracks_by_guids(
         return {str(r["guid"]): _track_from_row(r) for r in rows}
     except sqlite3.Error as e:
         logger.warning("get_tracks_by_guids failed: %s", e)
+        return {}
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def get_tracks_by_paths(
+    paths: Collection[str],
+    *,
+    path: Path | None = None,
+) -> dict[str, Track]:
+    """Return ``{path: Track}`` for known host paths (missing omitted)."""
+    if not paths:
+        return {}
+    dest = path if path is not None else index_path()
+    if not dest.is_file():
+        return {}
+    clean = [p for p in paths if isinstance(p, str) and p]
+    if not clean:
+        return {}
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = _connect(dest)
+        _init_schema(conn)
+        placeholders = ",".join("?" * len(clean))
+        rows = conn.execute(
+            f"SELECT * FROM tracks WHERE path IN ({placeholders})",
+            clean,
+        ).fetchall()
+        return {str(r["path"]): _track_from_row(r) for r in rows}
+    except sqlite3.Error as e:
+        logger.warning("get_tracks_by_paths failed: %s", e)
         return {}
     finally:
         if conn is not None:

@@ -28,6 +28,9 @@ from mtpmanager.infra.album_art import (
     prepare_device_cover_jpeg_from_image_file,
 )
 from mtpmanager.infra.device_index import (
+    clear_device_album,
+    clear_device_album_by_id,
+    files_by_item_ids,
     get_device_album,
     item_ids_for_guids,
     record_device_album,
@@ -442,8 +445,18 @@ def push_album_art_for_tracks(
 
         try:
             if album_id > 0:
-                # Merge membership: keep prior order, append new ids.
-                merged = list(prior_ids)
+                # Keep only prior track ids that still exist on-device. After a
+                # wipe/resync, cached priors are usually dead object ids; merging
+                # them produced “successful” art on an album the player ignores.
+                live_prior: list[int] = []
+                if prior_ids:
+                    still = files_by_item_ids(
+                        serial, prior_ids, path=index_path
+                    )
+                    live_prior = [
+                        tid for tid in prior_ids if tid in still
+                    ]
+                merged = list(live_prior)
                 have = set(merged)
                 for tid in track_ids:
                     if tid not in have:
@@ -564,3 +577,118 @@ def push_album_art_for_tracks(
         result.error_count,
     )
     return result
+
+
+@dataclass(frozen=True)
+class RemoveAlbumArtResult:
+    """Outcome of deleting one on-device abstract album + clearing host cache."""
+
+    album_key: str
+    name: str
+    artist: str
+    album_id: int
+    deleted_object: bool
+    cleared_cache: bool
+    error: str = ""
+
+    @property
+    def ok(self) -> bool:
+        # Cache clear alone is success when there was nothing on-device to delete.
+        return not self.error and (self.deleted_object or self.cleared_cache or self.album_id <= 0)
+
+
+def remove_device_album_art(
+    *,
+    device,
+    serial: str,
+    album_key: str,
+    name: str = "",
+    artist: str = "",
+    index_path: Path | None = None,
+) -> RemoveAlbumArtResult:
+    """Delete the cached MTP album object (cover container) and drop host cache.
+
+    Does **not** delete track files. After a wipe/resync the host may still
+    point at a stale ``album_id``; removing it forces the next art push to
+    ``create_album`` instead of ``update_album`` / re-sample a dead object.
+    """
+    serial = str(serial or "").strip()
+    key = str(album_key or "").strip()
+    if not serial or not key:
+        return RemoveAlbumArtResult(
+            album_key=key,
+            name=name,
+            artist=artist,
+            album_id=0,
+            deleted_object=False,
+            cleared_cache=False,
+            error="Missing serial or album key",
+        )
+
+    cached = get_device_album(serial, key, path=index_path)
+    album_id = int(cached["album_id"]) if cached else 0
+    disp_name = name or (str(cached["name"]) if cached else "") or "Album"
+    disp_artist = artist or (str(cached["artist"]) if cached else "") or ""
+
+    deleted = False
+    err = ""
+    if album_id > 0:
+        try:
+            # Prefer device_ops-style delete when present; fall back to port method.
+            if callable(getattr(device, "delete_object", None)):
+                device.delete_object(int(album_id))
+            else:
+                raise TransportError(
+                    f"Device cannot delete album object id={album_id}"
+                )
+            deleted = True
+            logger.info(
+                "remove_album_art deleted album_id=%s key=%r name=%r",
+                album_id,
+                key,
+                disp_name,
+            )
+        except TransportError as e:
+            # Object may already be gone after a wipe — still clear cache.
+            err = str(e)
+            logger.warning(
+                "remove_album_art delete failed id=%s name=%r: %s",
+                album_id,
+                disp_name,
+                e,
+            )
+        except Exception as e:
+            err = f"{type(e).__name__}: {e}"
+            logger.warning(
+                "remove_album_art delete failed id=%s name=%r: %s",
+                album_id,
+                disp_name,
+                e,
+            )
+
+    cleared = clear_device_album(serial, key, path=index_path)
+    if album_id > 0:
+        # Also drop any other keys that still point at the same MTP id.
+        extra = clear_device_album_by_id(serial, album_id, path=index_path)
+        if extra:
+            cleared = True
+
+    # If delete failed because the object is gone, treat cache clear as recovery.
+    if err and cleared and not deleted:
+        logger.info(
+            "remove_album_art cleared stale cache after delete error "
+            "id=%s key=%r",
+            album_id,
+            key,
+        )
+        err = ""
+
+    return RemoveAlbumArtResult(
+        album_key=key,
+        name=disp_name,
+        artist=disp_artist,
+        album_id=album_id,
+        deleted_object=deleted,
+        cleared_cache=cleared,
+        error=err,
+    )
