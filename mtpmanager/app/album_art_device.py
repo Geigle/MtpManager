@@ -692,3 +692,62 @@ def remove_device_album_art(
         cleared_cache=cleared,
         error=err,
     )
+
+
+@dataclass
+class RemoveAlbumArtBatchResult:
+    """Outcomes for a multi-album remove pass."""
+
+    albums: list[RemoveAlbumArtResult] = field(default_factory=list)
+
+    @property
+    def ok_count(self) -> int:
+        return sum(1 for a in self.albums if a.ok)
+
+    @property
+    def deleted_count(self) -> int:
+        return sum(1 for a in self.albums if a.deleted_object)
+
+    @property
+    def cleared_count(self) -> int:
+        return sum(1 for a in self.albums if a.cleared_cache)
+
+    @property
+    def error_count(self) -> int:
+        return sum(1 for a in self.albums if a.error)
+
+    @property
+    def noop_count(self) -> int:
+        return sum(
+            1
+            for a in self.albums
+            if a.ok and a.album_id <= 0 and not a.cleared_cache
+        )
+
+
+def remove_device_album_art_many(
+    *,
+    device,
+    serial: str,
+    albums: Sequence[tuple[str, str, str]],
+    index_path: Path | None = None,
+) -> RemoveAlbumArtBatchResult:
+    """Remove art for many ``(album_key, name, artist)`` rows (deduped by key)."""
+    out = RemoveAlbumArtBatchResult()
+    seen: set[str] = set()
+    for raw_key, name, artist in albums:
+        key = str(raw_key or "").strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.albums.append(
+            remove_device_album_art(
+                device=device,
+                serial=serial,
+                album_key=key,
+                name=name,
+                artist=artist,
+                index_path=index_path,
+            )
+        )
+    return out

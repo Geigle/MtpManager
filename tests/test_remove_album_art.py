@@ -7,8 +7,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from mtpmanager.app.album_art_device import remove_device_album_art
-from mtpmanager.domain.track_id import new_track_guid
+from mtpmanager.app.album_art_device import (
+    remove_device_album_art,
+    remove_device_album_art_many,
+)
 from mtpmanager.infra.device_index import (
     clear_device_album,
     get_device_album,
@@ -91,6 +93,35 @@ class RemoveAlbumArtTests(unittest.TestCase):
             )
             self.assertTrue(clear_device_album(serial, key, path=db))
             self.assertFalse(clear_device_album(serial, key, path=db))
+
+    def test_remove_many_dedupes_and_batches(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "library_index.db"
+            serial = "batch-serial"
+            upsert_device(serial, name="ZEN", path=db)
+            k1, k2 = "a\0one", "b\0two"
+            record_device_album(
+                serial, album_key=k1, album_id=10, name="One", path=db
+            )
+            record_device_album(
+                serial, album_key=k2, album_id=20, name="Two", path=db
+            )
+            device = MagicMock()
+            result = remove_device_album_art_many(
+                device=device,
+                serial=serial,
+                albums=[
+                    (k1, "One", "A"),
+                    (k1, "One", "A"),  # dup
+                    (k2, "Two", "B"),
+                ],
+                index_path=db,
+            )
+            self.assertEqual(len(result.albums), 2)
+            self.assertEqual(result.deleted_count, 2)
+            self.assertEqual(device.delete_object.call_count, 2)
+            self.assertIsNone(get_device_album(serial, k1, path=db))
+            self.assertIsNone(get_device_album(serial, k2, path=db))
 
 
 if __name__ == "__main__":

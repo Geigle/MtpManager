@@ -17,7 +17,7 @@ from mtpmanager.app.album_art_device import (
     album_display_fields,
     album_grouping_key,
     push_album_art_for_tracks,
-    remove_device_album_art,
+    remove_device_album_art_many,
 )
 from mtpmanager.app.device_io_gate import DEFAULT_USB_QUIET_S, DeviceIoGate
 from mtpmanager.infra.device_session_lock import DeviceSessionLock
@@ -3759,6 +3759,21 @@ class AppController:
                 self.win.menu_device_album_ctx.entryconfig(
                     "end", label=f"Delete album {label}…"
                 )
+                # Index 2 = Remove album art (Add, Shrink, Remove, sep, Delete).
+                try:
+                    album_n = len(
+                        self._device_album_art_targets_from_selection(tree)
+                    )
+                    remove_label = (
+                        f"Remove album art for {album_n} albums…"
+                        if album_n > 1
+                        else "Remove album art…"
+                    )
+                    self.win.menu_device_album_ctx.entryconfig(
+                        2, label=remove_label
+                    )
+                except Exception:
+                    pass
             elif "group_folder" in tagset:
                 self.win.menu_device_folder_ctx.entryconfig(
                     "end", label=f"Delete all in {label}…"
@@ -13211,11 +13226,59 @@ class AppController:
             ),
         )
 
-    def action_device_remove_album_art(self) -> None:
-        """Context menu: delete abstract MTP album object + clear art cache.
+    def _device_album_art_targets_from_selection(
+        self, tree
+    ) -> list[tuple[str, str, str, str]]:
+        """Unique album-art targets from the device tree selection.
 
-        Track files stay on the device. Next album-art sync will create a fresh
-        album object instead of updating a stale one after wipe/resync.
+        Returns ``(album_key, name, artist, label)`` for each selected album
+        group (and the context row). Dedupes by ``album_key``.
+        """
+        iids: list[str] = []
+        try:
+            iids = [str(x) for x in (tree.selection() or ()) if x]
+        except Exception:
+            iids = []
+        ctx = self._device_context_row
+        if ctx and ctx not in iids:
+            iids.insert(0, str(ctx))
+
+        out: list[tuple[str, str, str, str]] = []
+        seen: set[str] = set()
+        for iid in iids:
+            tags: set[str] = set()
+            try:
+                tags = set(tree.item(iid, "tags") or ())
+            except Exception:
+                pass
+            if "group_album" not in tags:
+                continue
+            tracks = self._device_tracks_under_iid(tree, iid)
+            if not tracks:
+                continue
+            seed = tracks[0]
+            for t in tracks:
+                if album_grouping_key(t):
+                    seed = t
+                    break
+            key = album_grouping_key(seed)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            name, artist = album_display_fields(seed)
+            try:
+                values = tree.item(iid, "values") or ()
+                label = str(values[0] if values else name).strip() or name
+            except Exception:
+                label = name
+            out.append((key, name, artist, label))
+        return out
+
+    def action_device_remove_album_art(self) -> None:
+        """Context menu: delete abstract MTP album object(s) + clear art cache.
+
+        Supports multi-select of on-device album groups. Track files stay on the
+        device. Next album-art sync creates fresh album objects.
         """
         title = "Remove album art"
         if not self._require_device_ready():
@@ -13234,46 +13297,43 @@ class AppController:
             return
 
         tree = self._device_context_tree or self.win.device_tree
-        iid = self._device_context_row
-        if not iid:
-            messagebox.showinfo(title, "No album group selected.")
-            return
-        tracks = self._device_tracks_under_iid(tree, iid)
-        if not tracks:
-            messagebox.showinfo(title, "No tracks under this album group.")
-            return
-
-        seed = tracks[0]
-        for t in tracks:
-            if album_grouping_key(t):
-                seed = t
-                break
-        key = album_grouping_key(seed)
-        if not key:
+        targets = self._device_album_art_targets_from_selection(tree)
+        if not targets:
             messagebox.showinfo(
                 title,
-                "This album has no album tag — nothing to remove.",
+                "Select one or more on-device album groups first.",
             )
             return
-        name, artist = album_display_fields(seed)
-        try:
-            values = tree.item(iid, "values") or ()
-            label = str(values[0] if values else name).strip() or name
-        except Exception:
-            label = name
 
+        n = len(targets)
+        if n == 1:
+            label = targets[0][3]
+            confirm = (
+                f"Remove on-device cover art for “{label}”?\n\n"
+                "This deletes the Creative album object that holds the JPEG "
+                "(not the tracks). The host art cache for this album is cleared "
+                "so the next Sync album art pass can recreate it."
+            )
+        else:
+            preview = ", ".join(t[3] for t in targets[:5])
+            if n > 5:
+                preview += f", … (+{n - 5} more)"
+            confirm = (
+                f"Remove on-device cover art for {n} albums?\n\n"
+                f"{preview}\n\n"
+                "Deletes the Creative album objects that hold JPEGs "
+                "(not the tracks) and clears the host art cache for each."
+            )
         if not messagebox.askyesno(
             title,
-            f"Remove on-device cover art for “{label}”?\n\n"
-            "This deletes the Creative album object that holds the JPEG "
-            "(not the tracks). The host art cache for this album is cleared "
-            "so the next Sync album art pass can recreate it.",
+            confirm,
             icon=messagebox.WARNING,
             default=messagebox.NO,
         ):
             return
 
         serial = self._device_serial or device_serial_key()
+        album_rows = [(k, name, artist) for k, name, artist, _lbl in targets]
 
         def work():
             if not self._device_io.try_acquire("device-remove-album-art"):
@@ -13281,12 +13341,10 @@ class AppController:
                     f"Device is busy ({self._device_io.holder or 'unknown'})."
                 )
             try:
-                return remove_device_album_art(
+                return remove_device_album_art_many(
                     device=self.device,
                     serial=serial,
-                    album_key=key,
-                    name=name,
-                    artist=artist,
+                    albums=album_rows,
                 )
             finally:
                 self._device_io.release(
@@ -13301,37 +13359,35 @@ class AppController:
                 pass
             if result is None:
                 return
-            if result.error:
+            total = len(result.albums)
+            deleted = int(result.deleted_count)
+            cleared = int(result.cleared_count)
+            errors = int(result.error_count)
+            noop = int(result.noop_count)
+            if errors and deleted == 0 and cleared == 0:
+                first_err = next(
+                    (a.error for a in result.albums if a.error), "unknown error"
+                )
                 messagebox.showerror(
                     title,
-                    f"Could not fully remove album art for “{label}”:\n\n"
-                    f"{result.error}\n\n"
-                    f"Cache cleared: {'yes' if result.cleared_cache else 'no'}",
+                    f"Could not remove album art ({errors}/{total} failed).\n\n"
+                    f"{first_err}",
                 )
                 return
-            if result.album_id <= 0 and not result.cleared_cache:
-                messagebox.showinfo(
-                    title,
-                    f"No cached album-art object for “{label}”.\n\n"
-                    "Nothing to delete. Sync album art on the next transfer "
-                    "will create a new album object if covers are available.",
-                )
-                return
-            bits = []
-            if result.deleted_object:
-                bits.append(f"deleted album object id={result.album_id}")
-            elif result.album_id > 0:
-                bits.append(
-                    f"album object id={result.album_id} was already gone"
-                )
-            if result.cleared_cache:
-                bits.append("cleared host art cache")
-            detail = "; ".join(bits) if bits else "done"
+            parts = [
+                f"{deleted} album object(s) deleted",
+                f"{cleared} cache row(s) cleared",
+            ]
+            if noop:
+                parts.append(f"{noop} had nothing cached")
+            if errors:
+                parts.append(f"{errors} failed")
             messagebox.showinfo(
                 title,
-                f"Removed album art for “{label}”.\n\n{detail}.\n\n"
-                "Re-sync tracks for this album (or any sync that includes them) "
-                "with Sync album art enabled to push a fresh cover.",
+                "Remove album art finished.\n\n"
+                + "; ".join(parts)
+                + ".\n\n"
+                "Re-sync albums with Sync album art enabled to push fresh covers.",
             )
 
         def on_error(exc: BaseException) -> None:
@@ -13343,7 +13399,14 @@ class AppController:
             messagebox.showerror(title, str(exc))
 
         try:
-            self.win.set_progress_status(f"Removing album art for “{label}”…")
+            if n == 1:
+                self.win.set_progress_status(
+                    f"Removing album art for “{targets[0][3]}”…"
+                )
+            else:
+                self.win.set_progress_status(
+                    f"Removing album art for {n} albums…"
+                )
         except Exception:
             pass
         self._bg.submit(
