@@ -522,6 +522,29 @@ class VideoEncodeProfileProbeTests(unittest.TestCase):
         self.assertEqual(opts["vtag"], "XVID")
         self.assertEqual(opts["qscale:v"], "5")
         self.assertIn("fps=30", opts["vf"])
+        self.assertNotIn("mbd", opts)
+
+    def test_build_output_options_slow_hq_mpeg4(self) -> None:
+        from dataclasses import replace
+
+        from mtpmanager.infra.ffmpeg_video import _build_output_options
+
+        slow = replace(ZEN_AVI_XVID_MP3, qscale_v=2, slow_encode=True)
+        opts = _build_output_options(slow, force_fps=None, container_ext="avi")
+        self.assertEqual(opts["qscale:v"], "2")
+        self.assertEqual(opts["mbd"], "rd")
+        self.assertEqual(opts["trellis"], "2")
+        self.assertEqual(opts["flags"], "+mv4+aic")
+        self.assertEqual(opts["cmp"], "2")
+        self.assertEqual(opts["subcmp"], "2")
+
+        # Slow flags must not attach to WMV even if the flag is set.
+        wmv_slow = replace(ZEN_WMV_WMA, slow_encode=True)
+        wopts = _build_output_options(
+            wmv_slow, force_fps=None, container_ext="wmv"
+        )
+        self.assertNotIn("mbd", wopts)
+        self.assertEqual(wopts["b:v"], "480k")
 
     def test_vf_filter_qvga_and_qqvga(self) -> None:
         from mtpmanager.domain.video_encode import RES_QQVGA, RES_QVGA, apply_resolution

@@ -311,11 +311,12 @@ Debriefs remain the forensic narrative; this file is what we keep doing.
 
 1. **Allowed resolutions** from `domain/video_encode` catalog (ZEN: QQVGA / QVGA / VGA; default **QVGA**).
 2. **Audio** via the same preset ladder as music/podcasts, clamped to what the recipe can mux (AVI→MP3, WMV→WMA).
+3. **Video quality** for mpeg4/XviD: ``qscale:v`` (lower = higher quality; default 5) plus optional **slow encode** (`mbd=rd`, `trellis=2`, `+mv4+aic`, better cmp) to spend more CPU — especially useful at QQVGA/QVGA.
 
-Effective encode = recipe ⊕ selected resolution ⊕ `AudioEncodeSettings`. Last choices persist in `config.json`.
+Effective encode = recipe ⊕ resolution ⊕ quality ⊕ `AudioEncodeSettings`. Last Send Video choices persist in `config.json`.
 
-**Rationale:** Matches how still-video already overrides geometry separately; reuses proven audio UI; avoids tab combinatorial explosion.
+**Rationale:** Matches how still-video already overrides geometry separately; reuses proven audio UI; avoids tab combinatorial explosion; low-res encodes benefit from slower, higher-quality mpeg4 passes without bumping frame size.
 
-**Consequences:** Callers must `apply_resolution` / `apply_audio_settings` (or `effective_video_preset`) before match-skip / encode. Podcast full-motion video uses `PodcastVideoEncodeSettings` (Config → Podcast Settings + per-show Encode Settings), with precedence per-show → podcast default → device defaults — separate from library Send Video last-used keys. Still-from-audio ladder (`audio_podcast_still_*`) stays independent.
+**Consequences:** Callers must `apply_resolution` / `apply_audio_settings` / `apply_video_quality` (or `effective_video_preset`) before match-skip / encode. Podcast full-motion video uses `PodcastVideoEncodeSettings` (Config → Podcast Settings + per-show Encode Settings), with precedence per-show → podcast default → device defaults — separate from library Send Video last-used keys. Still-from-audio ladder (`audio_podcast_still_*`) stays independent. Bitrate recipes (WMV) ignore qscale; slow flags are mpeg4-only.
 
 **Source:** `domain/video_encode.py`, `device_profiles.py`, `dialogs.ask_video_destination`, `infra/ffmpeg_video.py`, `infra/podcast_index.py`.

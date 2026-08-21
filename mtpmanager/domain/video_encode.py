@@ -1,7 +1,8 @@
-"""Video encode resolutions and recipe ⊕ resolution ⊕ audio helpers.
+"""Video encode resolutions and recipe ⊕ resolution ⊕ audio ⊕ quality helpers.
 
 Send Video recipes (`VideoEncodePreset`) stay as container/codec tabs.
-Geometry and audio quality are orthogonal axes applied at encode time.
+Geometry, audio quality, and mpeg4 qscale/slow-encode are orthogonal axes
+applied at encode time.
 """
 
 from __future__ import annotations
@@ -19,6 +20,13 @@ from mtpmanager.domain.device_profile import VideoEncodePreset
 
 if TYPE_CHECKING:
     from mtpmanager.domain.device_profile import DeviceVideoOptions
+
+# mpeg4 ``-qscale:v``: lower = higher quality / larger files / more CPU work.
+DEFAULT_VIDEO_QSCALE = 5
+MIN_VIDEO_QSCALE = 2
+MAX_VIDEO_QSCALE = 15
+# Common picker values (Spinbox still allows the full 2–15 range in UI).
+VIDEO_QSCALE_CHOICES: tuple[int, ...] = (2, 3, 4, 5, 7, 10)
 
 
 @dataclass(frozen=True)
@@ -225,6 +233,46 @@ def default_video_audio_settings(
     )
 
 
+def clamp_video_qscale(value: object | None) -> int | None:
+    """Clamp mpeg4 ``-qscale:v`` to ``MIN_VIDEO_QSCALE``…``MAX_VIDEO_QSCALE``.
+
+    Returns ``None`` when *value* is missing or not a positive number.
+    """
+    if value is None or value == "":
+        return None
+    try:
+        n = int(float(value))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    if n <= 0:
+        return None
+    return max(MIN_VIDEO_QSCALE, min(MAX_VIDEO_QSCALE, n))
+
+
+def qscale_choice_label(qscale: int) -> str:
+    """Short UI label for a qscale picker row."""
+    q = int(qscale)
+    if q <= 2:
+        return f"{q} — highest quality (largest / slowest)"
+    if q <= 3:
+        return f"{q} — very high"
+    if q <= 4:
+        return f"{q} — high"
+    if q == DEFAULT_VIDEO_QSCALE:
+        return f"{q} — balanced (default)"
+    if q <= 7:
+        return f"{q} — smaller files"
+    return f"{q} — compact"
+
+
+def preset_supports_qscale(preset: VideoEncodePreset) -> bool:
+    """True when the recipe uses fixed-qscale video (mpeg4/XviD), not CBR."""
+    if preset.qscale_v is not None:
+        return True
+    codec = (preset.video_codec or "").strip().casefold()
+    return codec in ("mpeg4", "libxvid")
+
+
 def apply_resolution(
     preset: VideoEncodePreset,
     resolution: VideoResolution,
@@ -278,18 +326,49 @@ def apply_audio_settings(
     )
 
 
+def apply_video_quality(
+    preset: VideoEncodePreset,
+    *,
+    qscale_v: int | None = None,
+    slow_encode: bool | None = None,
+) -> VideoEncodePreset:
+    """Apply optional mpeg4 quality axes (qscale + slow encode flags).
+
+    *qscale_v* is ignored when the recipe is bitrate-only (e.g. WMV).
+    *slow_encode* only affects mpeg4-family codecs at encode time.
+    """
+    out = preset
+    q = clamp_video_qscale(qscale_v)
+    if q is not None and preset_supports_qscale(out):
+        out = replace(out, qscale_v=q, video_bitrate=None)
+    if slow_encode is not None:
+        out = replace(out, slow_encode=bool(slow_encode))
+    if out is not preset:
+        out = replace(
+            out,
+            video_detail=_video_detail_with_frame(out, out.width, out.height),
+        )
+    return out
+
+
 def effective_video_preset(
     preset: VideoEncodePreset,
     *,
     resolution: VideoResolution | None = None,
     audio_settings: AudioEncodeSettings | None = None,
+    qscale_v: int | None = None,
+    slow_encode: bool | None = None,
 ) -> VideoEncodePreset:
-    """Apply optional resolution and audio axes onto a recipe preset."""
+    """Apply optional resolution, audio, and quality axes onto a recipe preset."""
     out = preset
     if resolution is not None:
         out = apply_resolution(out, resolution)
     if audio_settings is not None:
         out = apply_audio_settings(out, audio_settings)
+    if qscale_v is not None or slow_encode is not None:
+        out = apply_video_quality(
+            out, qscale_v=qscale_v, slow_encode=slow_encode
+        )
     return out
 
 
@@ -304,6 +383,10 @@ class PodcastVideoEncodeSettings:
     preset_id: str | None = None
     resolution_id: str | None = None
     audio_encode: AudioEncodeSettings | None = None
+    # mpeg4 ``-qscale:v`` (lower = higher quality). None → recipe default.
+    qscale_v: int | None = None
+    # When True, enable slower high-quality mpeg4 encode flags.
+    slow_encode: bool | None = None
 
     def summary_line(self) -> str:
         parts: list[str] = []
@@ -311,6 +394,11 @@ class PodcastVideoEncodeSettings:
             parts.append(self.preset_id)
         if self.resolution_id:
             parts.append(self.resolution_id)
+        q = clamp_video_qscale(self.qscale_v)
+        if q is not None:
+            parts.append(f"qscale {q}")
+        if self.slow_encode:
+            parts.append("slow")
         if self.audio_encode is not None:
             parts.append(self.audio_encode.summary_line())
         return " · ".join(parts) if parts else "device defaults"
@@ -319,6 +407,10 @@ class PodcastVideoEncodeSettings:
         d: dict[str, Any] = {
             "preset_id": (self.preset_id or "").strip() or None,
             "resolution_id": (self.resolution_id or "").strip().casefold() or None,
+            "qscale_v": clamp_video_qscale(self.qscale_v),
+            "slow_encode": (
+                bool(self.slow_encode) if self.slow_encode is not None else None
+            ),
         }
         if self.audio_encode is not None:
             d["audio_encode"] = clamp_settings_for_format(self.audio_encode).to_dict()
@@ -335,19 +427,37 @@ class PodcastVideoEncodeSettings:
         preset_id = raw.get("preset_id") if "preset_id" in raw else None
         resolution_id = raw.get("resolution_id") if "resolution_id" in raw else None
         audio_raw = raw.get("audio_encode") if "audio_encode" in raw else None
+        qscale_raw = raw.get("qscale_v") if "qscale_v" in raw else None
+        slow_raw = raw.get("slow_encode") if "slow_encode" in raw else None
         pid = str(preset_id or "").strip() or None
         rid = str(resolution_id or "").strip().casefold() or None
         audio = None
         if isinstance(audio_raw, dict) and audio_raw:
             audio = clamp_settings_for_format(AudioEncodeSettings.from_dict(audio_raw))
-        if pid is None and rid is None and audio is None:
+        qscale = clamp_video_qscale(qscale_raw)
+        slow: bool | None
+        if slow_raw is None:
+            slow = None
+        else:
+            slow = bool(slow_raw)
+        if (
+            pid is None
+            and rid is None
+            and audio is None
+            and qscale is None
+            and slow is None
+        ):
             # Empty override object → treat as unset.
             if not any(k in known for k in raw):
                 return None
-            # Explicit empty axes still counts as an override shell only if
-            # caller stored something meaningful; bare {} → None above.
             return None
-        return cls(preset_id=pid, resolution_id=rid, audio_encode=audio)
+        return cls(
+            preset_id=pid,
+            resolution_id=rid,
+            audio_encode=audio,
+            qscale_v=qscale,
+            slow_encode=slow,
+        )
 
 
 def resolve_podcast_video_preset(
@@ -374,8 +484,17 @@ def resolve_podcast_video_preset(
     if settings is not None and settings.audio_encode is not None:
         audio = settings.audio_encode
 
+    qscale = clamp_video_qscale(settings.qscale_v) if settings is not None else None
+    slow = None
+    if settings is not None and settings.slow_encode is not None:
+        slow = bool(settings.slow_encode)
+
     return effective_video_preset(
-        base, resolution=resolution, audio_settings=audio
+        base,
+        resolution=resolution,
+        audio_settings=audio,
+        qscale_v=qscale,
+        slow_encode=slow,
     )
 
 
@@ -419,6 +538,8 @@ def _video_detail_with_frame(
         quality = f" · qscale {preset.qscale_v}"
     elif preset.video_bitrate:
         quality = f" · {preset.video_bitrate}"
+    if preset.slow_encode:
+        quality += " · slow HQ"
     return (
         f"{head}{tag} · {width}×{height} pad{quality} · yuv420p"
     )

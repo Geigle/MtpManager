@@ -430,6 +430,40 @@ def _audio_opts_for_video_mux(
     }
 
 
+def _mpeg4_slow_encode_opts() -> dict[str, str]:
+    """Extra ffmpeg flags for slower, higher-quality mpeg4 encodes.
+
+    Classic high-quality mpeg4 recipe: rate-distortion macroblock decisions,
+    quarter-pel + AIC, trellis quantization, and better comparison functions.
+    Meaningful at low resolutions where spending CPU improves clarity.
+    """
+    return {
+        "mbd": "rd",
+        "flags": "+mv4+aic",
+        "trellis": "2",
+        "cmp": "2",
+        "subcmp": "2",
+    }
+
+
+def _codec_supports_mpeg4_slow(profile: VideoEncodePreset | VideoEncodeProfile) -> bool:
+    codec = (profile.video_codec or "").strip().casefold()
+    return codec in ("mpeg4", "libxvid")
+
+
+def _append_video_rate_opts(
+    cmd: list[str], profile: VideoEncodePreset | VideoEncodeProfile
+) -> None:
+    """Append ``-qscale:v`` / ``-b:v`` and optional slow-encode flags to *cmd*."""
+    if profile.qscale_v is not None:
+        cmd += ["-qscale:v", str(int(profile.qscale_v))]
+    elif profile.video_bitrate:
+        cmd += ["-b:v", profile.video_bitrate]
+    if profile.slow_encode and _codec_supports_mpeg4_slow(profile):
+        for key, value in _mpeg4_slow_encode_opts().items():
+            cmd += [f"-{key}", value]
+
+
 def _build_output_options(
     profile: VideoEncodePreset | VideoEncodeProfile,
     *,
@@ -452,6 +486,8 @@ def _build_output_options(
         out["qscale:v"] = str(int(profile.qscale_v))
     elif profile.video_bitrate:
         out["b:v"] = profile.video_bitrate
+    if profile.slow_encode and _codec_supports_mpeg4_slow(profile):
+        out.update(_mpeg4_slow_encode_opts())
     return out
 
 
@@ -509,7 +545,7 @@ def convert_video_for_profile(
     logger.info(
         "Video convert start src=%s dest=%s preset=%s duration=%.1fs "
         "source_fps=%.3f max_fps=%s force_fps=%s ignore_max_fps=%s "
-        "frame=%sx%s aspect=%s audio=%s",
+        "frame=%sx%s qscale=%s slow=%s aspect=%s audio=%s",
         src_path,
         dest_path,
         profile.id,
@@ -520,6 +556,8 @@ def convert_video_for_profile(
         ignore_max_fps,
         profile.width,
         profile.height,
+        profile.qscale_v if profile.qscale_v is not None else profile.video_bitrate,
+        bool(profile.slow_encode),
         aspect.summary() if aspect is not None else "unknown",
         (
             audio_settings.summary_line()
@@ -685,10 +723,7 @@ def _build_audio_still_cmd(
     ]
     if profile.video_tag:
         cmd += ["-vtag", profile.video_tag]
-    if profile.qscale_v is not None:
-        cmd += ["-qscale:v", str(int(profile.qscale_v))]
-    elif profile.video_bitrate:
-        cmd += ["-b:v", profile.video_bitrate]
+    _append_video_rate_opts(cmd, profile)
 
     if copy_audio:
         cmd += ["-c:a", "copy"]

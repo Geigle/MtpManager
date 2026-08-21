@@ -49,10 +49,15 @@ from mtpmanager.domain.audio_encode import (
 from mtpmanager.domain.device_profile import DeviceVideoOptions, VideoEncodePreset
 from mtpmanager.domain.models import DeviceInfo
 from mtpmanager.domain.video_encode import (
+    DEFAULT_VIDEO_QSCALE,
+    VIDEO_QSCALE_CHOICES,
     PodcastVideoEncodeSettings,
     VideoResolution,
     audio_formats_for_video_preset,
+    clamp_video_qscale,
     default_video_audio_settings,
+    preset_supports_qscale,
+    qscale_choice_label,
 )
 from mtpmanager.infra.app_config import (
     ALL_DAY_KEYS,
@@ -1311,6 +1316,10 @@ class SendVideoDialogResult:
     resolution_id: str | None = None
     # Audio ladder settings (same model as music/podcasts); recipe-clamped.
     audio_encode: AudioEncodeSettings | None = None
+    # mpeg4 ``-qscale:v`` (lower = higher quality). None → recipe default.
+    qscale_v: int | None = None
+    # When True, spend more CPU on mpeg4 (mbd=rd, trellis, …).
+    slow_encode: bool = False
 
 
 def _pack_scrollable_dialog_body(
@@ -1426,6 +1435,8 @@ def _fill_preset_panel(
         lines.append(f"Video quality: qscale {preset.qscale_v}")
     elif preset.video_bitrate:
         lines.append(f"Video bitrate: {preset.video_bitrate}")
+    if preset.slow_encode:
+        lines.append("Encode effort: slow high-quality (more CPU)")
     if preset.broken:
         lines.append("⚠ Broken — does not play reliably on this device")
     elif preset.experimental:
@@ -1579,6 +1590,132 @@ def _pack_video_audio_encode_picker(
     return get_settings, reconfigure, set_enabled
 
 
+def _pack_video_quality_controls(
+    parent,
+    *,
+    initial_qscale: int | None,
+    initial_slow: bool,
+    supports_qscale: bool = True,
+) -> tuple[
+    Callable[[], tuple[int | None, bool]],
+    Callable[[bool], None],
+    Callable[[bool], None],
+]:
+    """Pack mpeg4 qscale + slow-encode controls.
+
+    Returns ``(get_quality, set_enabled, set_supports_qscale)``.
+    *get_quality* → ``(qscale_v | None, slow_encode)``.
+    """
+    frame = Frame(parent)
+    frame.pack(fill="x", pady=(6, 2))
+    Label(
+        frame,
+        text="Video quality",
+        font=("", 11, "bold"),
+        anchor="w",
+    ).pack(fill="x", pady=(0, 2))
+    Label(
+        frame,
+        text=(
+            "Lower qscale = higher quality (and larger files). "
+            "Slow encode spends more CPU — especially useful at QQVGA/QVGA."
+        ),
+        justify=LEFT,
+        wraplength=440,
+        **secondary_label_kwargs(),
+    ).pack(anchor="w", pady=(0, 4))
+
+    seed_q = clamp_video_qscale(initial_qscale) or DEFAULT_VIDEO_QSCALE
+    q_labels = [qscale_choice_label(q) for q in VIDEO_QSCALE_CHOICES]
+    q_label_to_val = dict(zip(q_labels, VIDEO_QSCALE_CHOICES))
+    q_val_to_label = dict(zip(VIDEO_QSCALE_CHOICES, q_labels))
+    if seed_q not in q_val_to_label:
+        custom = qscale_choice_label(seed_q)
+        q_labels = list(q_labels) + [custom]
+        q_label_to_val[custom] = seed_q
+        q_val_to_label[seed_q] = custom
+
+    row = Frame(frame)
+    row.pack(fill="x", pady=(0, 2))
+    Label(row, text="qscale:").pack(side=LEFT)
+    q_var = StringVar(value=q_val_to_label.get(seed_q, q_labels[0]))
+    q_combo = ttk.Combobox(
+        row,
+        textvariable=q_var,
+        values=q_labels,
+        state="readonly",
+        width=40,
+    )
+    q_combo.pack(side=LEFT, padx=(8, 0))
+
+    slow_var = BooleanVar(value=bool(initial_slow))
+    slow_cb = Checkbutton(
+        frame,
+        text="Slow high-quality encode (more CPU)",
+        variable=slow_var,
+        anchor="w",
+        justify=LEFT,
+    )
+    slow_cb.pack(fill="x", pady=(4, 0))
+
+    note = Label(
+        frame,
+        text=(
+            "qscale applies to mpeg4/XviD recipes. "
+            "Slow encode adds mbd=rd / trellis (mpeg4 only)."
+        ),
+        justify=LEFT,
+        wraplength=440,
+        **secondary_label_kwargs(),
+    )
+    note.pack(anchor="w", pady=(2, 0))
+
+    # Track whether the parent currently allows interaction.
+    enabled = {"on": True, "qscale_ok": bool(supports_qscale)}
+
+    def _refresh_states() -> None:
+        on = bool(enabled["on"])
+        q_ok = bool(enabled["qscale_ok"])
+        try:
+            q_combo.configure(
+                state=("readonly" if on and q_ok else DISABLED)
+            )
+        except Exception:
+            pass
+        try:
+            slow_cb.configure(state=("normal" if on else DISABLED))
+        except Exception:
+            pass
+        note.configure(
+            text=(
+                "qscale applies to mpeg4/XviD recipes. "
+                "Slow encode adds mbd=rd / trellis (mpeg4 only)."
+                if q_ok
+                else (
+                    "This recipe uses bitrate (not qscale). "
+                    "Slow flags apply only to mpeg4 codecs."
+                )
+            )
+        )
+
+    def get_quality() -> tuple[int | None, bool]:
+        q = q_label_to_val.get(str(q_var.get() or ""))
+        if q is None:
+            q = clamp_video_qscale(seed_q)
+        return clamp_video_qscale(q), bool(slow_var.get())
+
+    def set_enabled(on: bool) -> None:
+        enabled["on"] = bool(on)
+        _refresh_states()
+
+    def set_supports_qscale(ok: bool) -> None:
+        enabled["qscale_ok"] = bool(ok)
+        _refresh_states()
+
+    _refresh_states()
+    return get_quality, set_enabled, set_supports_qscale
+
+
 def _pack_video_encode_override_section(
     parent,
     *,
@@ -1591,7 +1728,7 @@ def _pack_video_encode_override_section(
     checkbox_text: str = "Use custom video encode",
     list_height: int = 4,
 ) -> tuple[BooleanVar, Callable[[], PodcastVideoEncodeSettings | None]]:
-    """Compact recipe + resolution + video-audio picker with enable checkbox.
+    """Compact recipe + resolution + quality + video-audio picker with enable checkbox.
 
     Returns ``(override_var, get_settings)``. When override is off,
     ``get_settings()`` returns ``None``. When *video_options* is missing,
@@ -1706,6 +1843,24 @@ def _pack_video_encode_override_section(
         )
         res_combo.pack(fill="x", pady=(0, 4))
 
+    # Video quality (qscale + slow encode)
+    seed_q = (
+        clamp_video_qscale(init.qscale_v)
+        if init is not None
+        else None
+    )
+    if seed_q is None:
+        seed_q = clamp_video_qscale(seed_preset.qscale_v) or DEFAULT_VIDEO_QSCALE
+    seed_slow = bool(init.slow_encode) if init is not None and init.slow_encode else False
+    quality_get, quality_set_enabled, quality_set_supports = (
+        _pack_video_quality_controls(
+            controls,
+            initial_qscale=seed_q,
+            initial_slow=seed_slow,
+            supports_qscale=preset_supports_qscale(seed_preset),
+        )
+    )
+
     # Audio ladder
     if init is not None and init.audio_encode is not None:
         audio_initial = resolve_settings(
@@ -1745,6 +1900,7 @@ def _pack_video_encode_override_section(
             audio_reconfigure(allowed, cur)
         else:
             audio_reconfigure(allowed, default_video_audio_settings(preset))
+        quality_set_supports(preset_supports_qscale(preset))
 
     recipe_combo.bind("<<ComboboxSelected>>", _on_recipe_change)
 
@@ -1757,10 +1913,13 @@ def _pack_video_encode_override_section(
             res_id = res_label_to_id.get(str(res_var.get() or ""))
             if not res_id and seed_res is not None:
                 res_id = seed_res.id
+        qscale, slow = quality_get()
         return PodcastVideoEncodeSettings(
             preset_id=preset.id,
             resolution_id=res_id,
             audio_encode=audio_get(),
+            qscale_v=qscale,
+            slow_encode=slow,
         )
 
     def set_controls_state() -> None:
@@ -1768,6 +1927,7 @@ def _pack_video_encode_override_section(
         recipe_combo.configure(state="readonly" if on else DISABLED)
         if res_combo is not None:
             res_combo.configure(state="readonly" if on else DISABLED)
+        quality_set_enabled(on)
         audio_set_enabled(on)
 
     override_var.trace_add("write", lambda *_a: set_controls_state())
@@ -1788,6 +1948,8 @@ def ask_video_destination(
     tv_folder_name: str = "TV",
     initial_resolution_id: str | None = None,
     initial_audio_encode: AudioEncodeSettings | None = None,
+    initial_qscale_v: int | None = None,
+    initial_slow_encode: bool = False,
 ) -> SendVideoDialogResult | None:
     """Ask Video/TV parent and optional device encode preset. None if cancelled.
 
@@ -1798,8 +1960,8 @@ def ask_video_destination(
     *video_folder_id* / *tv_folder_id* come from a live folder-name resolution
     when available; defaults fall back to legacy Vision:M ids (120 / 124).
 
-    *initial_resolution_id* / *initial_audio_encode* restore last Send Video
-    choices from Config when present.
+    *initial_resolution_id* / *initial_audio_encode* / quality args restore last
+    Send Video choices from Config when present.
     """
     vid = (
         int(video_folder_id)
@@ -1917,6 +2079,9 @@ def ask_video_destination(
     ] | None = None
     audio_set_enabled: Callable[[bool], None] | None = None
     audio_frame: Frame | None = None
+    quality_get: Callable[[], tuple[int | None, bool]] | None = None
+    quality_set_enabled: Callable[[bool], None] | None = None
+    quality_set_supports: Callable[[bool], None] | None = None
 
     def _sync_high_fps_for_preset(preset: VideoEncodePreset | None) -> None:
         if high_fps_cb is None:
@@ -1955,6 +2120,8 @@ def ask_video_destination(
         preset = _selected_preset()
         _sync_high_fps_for_preset(preset)
         _refresh_preset_panels()
+        if quality_set_supports is not None and preset is not None:
+            quality_set_supports(preset_supports_qscale(preset))
         if audio_reconfigure is not None and preset is not None:
             allowed = audio_formats_for_video_preset(preset)
             # Keep current picker choice when still valid; else recipe default.
@@ -1984,8 +2151,8 @@ def ask_video_destination(
             body,
             text=(
                 "Each tab is a container + video codec recipe. "
-                "Resolution and audio quality are chosen below "
-                "(same audio ladder as music/podcasts)."
+                "Resolution, video quality (qscale / slow encode), and "
+                "audio are chosen below (audio ladder matches music/podcasts)."
             ),
             justify=LEFT,
             wraplength=440,
@@ -2020,8 +2187,23 @@ def ask_video_destination(
             res_combo.pack(fill="x", pady=(0, 4))
             res_combo.bind("<<ComboboxSelected>>", _on_recipe_or_res_changed)
 
-        # Audio ladder (recipe-clamped).
+        # Video quality (qscale + slow encode) — especially useful at low res.
         seed_preset = default_preset or visible[0]
+        seed_q = clamp_video_qscale(initial_qscale_v)
+        if seed_q is None:
+            seed_q = (
+                clamp_video_qscale(seed_preset.qscale_v) or DEFAULT_VIDEO_QSCALE
+            )
+        quality_get, quality_set_enabled, quality_set_supports = (
+            _pack_video_quality_controls(
+                body,
+                initial_qscale=seed_q,
+                initial_slow=bool(initial_slow_encode),
+                supports_qscale=preset_supports_qscale(seed_preset),
+            )
+        )
+
+        # Audio ladder (recipe-clamped).
         if initial_audio_encode is not None:
             audio_initial = resolve_settings(
                 settings=initial_audio_encode,
@@ -2088,6 +2270,8 @@ def ask_video_destination(
                     res_combo.configure(state="readonly" if on else DISABLED)
                 except Exception:
                     pass
+            if quality_set_enabled is not None:
+                quality_set_enabled(on)
             if audio_set_enabled is not None:
                 audio_set_enabled(on)
             _sync_high_fps_for_preset(_selected_preset() if on else None)
@@ -2118,6 +2302,10 @@ def ask_video_destination(
         audio = None
         if do_encode and audio_get is not None:
             audio = audio_get()
+        qscale: int | None = None
+        slow = False
+        if do_encode and quality_get is not None:
+            qscale, slow = quality_get()
         result[0] = SendVideoDialogResult(
             parent_id=int(parent_id),
             encode_for_device=do_encode,
@@ -2127,6 +2315,8 @@ def ask_video_destination(
             ),
             resolution_id=res.id if res is not None else None,
             audio_encode=audio,
+            qscale_v=qscale,
+            slow_encode=bool(slow),
         )
         cleanup_scroll()
         dlg.destroy()
@@ -3366,9 +3556,10 @@ def show_podcast_settings_dialog(
             title="Podcast video encode",
             blurb=(
                 f"Optional default for video podcast episodes on {who}. "
-                "Recipe, resolution, and muxed audio (same ladder as Send Video). "
-                "When off, uses the device profile defaults (e.g. AVI·XviD · "
-                "QVGA). Per-show overrides: show context → Encode Settings…"
+                "Recipe, resolution, video quality (qscale / slow), and muxed "
+                "audio (same ladder as Send Video). When off, uses the device "
+                "profile defaults (e.g. AVI·XviD · QVGA). Per-show overrides: "
+                "show context → Encode Settings…"
             ),
             use_override=bool(use_podcast_video_encode_override),
             initial=podcast_video_encode,
@@ -3695,8 +3886,9 @@ def show_podcast_show_encode_dialog(
         body,
         title="Video encode",
         blurb=(
-            "Optional recipe / resolution / muxed audio for video episodes "
-            f"from this show. When off, uses: {video_inherit}."
+            "Optional recipe / resolution / quality (qscale / slow) / muxed "
+            f"audio for video episodes from this show. When off, uses: "
+            f"{video_inherit}."
         ),
         use_override=bool(use_video_override),
         initial=video_encode,

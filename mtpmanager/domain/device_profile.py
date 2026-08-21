@@ -47,6 +47,8 @@ class VideoEncodePreset:
     qscale_v: int | None = 5
     # Constant bitrate for video when not using qscale (e.g. "800k").
     video_bitrate: str | None = None
+    # When True (mpeg4/XviD), spend more CPU: mbd=rd, trellis, qpel/aic flags.
+    slow_encode: bool = False
     # Audio encoder / probe names.
     audio_codec: str = "libmp3lame"
     probe_audio_codec: str = "mp3"

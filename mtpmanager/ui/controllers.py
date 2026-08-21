@@ -12034,6 +12034,8 @@ class AppController:
             tv_folder_name=layout.name_for(layout.tv_id) or "TV",
             initial_resolution_id=self._config.video_encode_resolution_id,
             initial_audio_encode=self._config.video_audio_encode,
+            initial_qscale_v=self._config.video_encode_qscale_v,
+            initial_slow_encode=bool(self._config.video_encode_slow),
         )
         if opts is None:
             return
@@ -12056,12 +12058,18 @@ class AppController:
             if audio is None:
                 audio = default_video_audio_settings(base)
             preset = effective_video_preset(
-                base, resolution=resolution, audio_settings=audio
+                base,
+                resolution=resolution,
+                audio_settings=audio,
+                qscale_v=opts.qscale_v,
+                slow_encode=bool(opts.slow_encode),
             )
             try:
                 self._config.apply_video_encode_prefs(
                     resolution_id=opts.resolution_id,
                     audio_encode=audio,
+                    qscale_v=opts.qscale_v,
+                    slow_encode=bool(opts.slow_encode),
                 )
                 save_app_config(self._config)
             except Exception:
@@ -12080,6 +12088,12 @@ class AppController:
                 f"Resolution: {preset.width}×{preset.height}\n"
                 f"Audio: {preset.audio_detail or preset.probe_audio_codec}\n"
             )
+            if preset.qscale_v is not None:
+                encode_note += f"Video quality: qscale {preset.qscale_v}\n"
+            elif preset.video_bitrate:
+                encode_note += f"Video bitrate: {preset.video_bitrate}\n"
+            if preset.slow_encode:
+                encode_note += "Encode effort: slow high-quality\n"
             if ignore_max_fps:
                 encode_note += (
                     "Max fps cap: ignored (experimental — may not play)\n"

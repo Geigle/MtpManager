@@ -127,12 +127,34 @@ class ApplyAxesTests(unittest.TestCase):
             ZEN_AVI_XVID_MP3,
             resolution=RES_QVGA,
             audio_settings=audio,
+            qscale_v=2,
+            slow_encode=True,
         )
         self.assertEqual(p.width, 320)
         self.assertEqual(p.height, 240)
         self.assertEqual(p.audio_bitrate, "64k")
         self.assertEqual(p.audio_sample_rate, 22050)
         self.assertEqual(p.audio_channels, 1)
+        self.assertEqual(p.qscale_v, 2)
+        self.assertTrue(p.slow_encode)
+        self.assertIn("slow HQ", p.video_detail)
+
+    def test_apply_video_quality_clamps_and_skips_wmv_qscale(self) -> None:
+        from mtpmanager.domain.video_encode import apply_video_quality
+
+        hq = apply_video_quality(ZEN_AVI_XVID_MP3, qscale_v=2, slow_encode=True)
+        self.assertEqual(hq.qscale_v, 2)
+        self.assertTrue(hq.slow_encode)
+
+        # Out of range clamps.
+        soft = apply_video_quality(ZEN_AVI_XVID_MP3, qscale_v=99)
+        self.assertEqual(soft.qscale_v, 15)
+
+        # WMV is bitrate-only: qscale ignored; slow still stored on preset.
+        wmv = apply_video_quality(ZEN_WMV_WMA, qscale_v=2, slow_encode=True)
+        self.assertIsNone(wmv.qscale_v)
+        self.assertEqual(wmv.video_bitrate, "480k")
+        self.assertTrue(wmv.slow_encode)
 
 
 class PodcastVideoEncodeSettingsTests(unittest.TestCase):
@@ -143,15 +165,21 @@ class PodcastVideoEncodeSettingsTests(unittest.TestCase):
             preset_id="zen_avi_xvid_mp3",
             resolution_id="qvga",
             audio_encode=preset.settings,
+            qscale_v=3,
+            slow_encode=True,
         )
         again = PodcastVideoEncodeSettings.from_dict(s.to_dict())
         self.assertIsNotNone(again)
         assert again is not None
         self.assertEqual(again.preset_id, "zen_avi_xvid_mp3")
         self.assertEqual(again.resolution_id, "qvga")
+        self.assertEqual(again.qscale_v, 3)
+        self.assertTrue(again.slow_encode)
         self.assertIsNotNone(again.audio_encode)
         assert again.audio_encode is not None
         self.assertEqual(again.audio_encode.bitrate_kbps, 128)
+        self.assertIn("qscale 3", s.summary_line())
+        self.assertIn("slow", s.summary_line())
 
     def test_resolve_podcast_video_preset_axes(self) -> None:
         opts = ZEN_VISION_M.video_options
@@ -162,11 +190,15 @@ class PodcastVideoEncodeSettingsTests(unittest.TestCase):
             preset_id="zen_avi_divx_mp3",
             resolution_id="qqvga",
             audio_encode=preset.settings,
+            qscale_v=2,
+            slow_encode=True,
         )
         p = resolve_podcast_video_preset(opts, s)
         self.assertEqual(p.id, "zen_avi_divx_mp3")
         self.assertEqual((p.width, p.height), (160, 120))
         self.assertEqual(p.audio_bitrate, "64k")
+        self.assertEqual(p.qscale_v, 2)
+        self.assertTrue(p.slow_encode)
 
     def test_resolve_none_uses_device_defaults(self) -> None:
         opts = ZEN_VISION_M.video_options
@@ -176,6 +208,8 @@ class PodcastVideoEncodeSettingsTests(unittest.TestCase):
         dres = opts.default_resolution()
         assert dres is not None
         self.assertEqual((p.width, p.height), (dres.width, dres.height))
+        self.assertEqual(p.qscale_v, 5)
+        self.assertFalse(p.slow_encode)
 
 
 if __name__ == "__main__":

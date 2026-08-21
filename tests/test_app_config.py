@@ -52,6 +52,8 @@ class AppConfigTests(unittest.TestCase):
             cfg = AppConfig(
                 video_encode_resolution_id="qvga",
                 video_audio_encode=preset.settings,
+                video_encode_qscale_v=2,
+                video_encode_slow=True,
             )
             save_app_config(cfg, path=dest)
             loaded = load_app_config(path=dest)
@@ -60,6 +62,8 @@ class AppConfigTests(unittest.TestCase):
             assert loaded.video_audio_encode is not None
             self.assertEqual(loaded.video_audio_encode.preset_id, "mp3_cbr_128")
             self.assertEqual(loaded.video_audio_encode.bitrate_kbps, 128)
+            self.assertEqual(loaded.video_encode_qscale_v, 2)
+            self.assertTrue(loaded.video_encode_slow)
 
     def test_podcast_video_encode_round_trip(self) -> None:
         from mtpmanager.domain.audio_encode import get_preset
@@ -71,6 +75,8 @@ class AppConfigTests(unittest.TestCase):
             preset_id="zen_avi_divx_mp3",
             resolution_id="qqvga",
             audio_encode=preset.settings,
+            qscale_v=2,
+            slow_encode=True,
         )
         with tempfile.TemporaryDirectory() as tmp:
             dest = Path(tmp) / "config.json"
@@ -82,6 +88,8 @@ class AppConfigTests(unittest.TestCase):
             assert loaded.podcast_video_encode is not None
             self.assertEqual(loaded.podcast_video_encode.preset_id, "zen_avi_divx_mp3")
             self.assertEqual(loaded.podcast_video_encode.resolution_id, "qqvga")
+            self.assertEqual(loaded.podcast_video_encode.qscale_v, 2)
+            self.assertTrue(loaded.podcast_video_encode.slow_encode)
             assert loaded.podcast_video_encode.audio_encode is not None
             self.assertEqual(
                 loaded.podcast_video_encode.audio_encode.bitrate_kbps, 64
