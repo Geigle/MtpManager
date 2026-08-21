@@ -17,8 +17,10 @@ from collections.abc import Callable
 
 from ffmpeg import FFmpeg
 
+from mtpmanager.domain.audio_encode import AudioEncodeSettings
 from mtpmanager.domain.device_profile import VideoEncodePreset, VideoEncodeProfile
 from mtpmanager.infra.ffmpeg_exec import run_ffmpeg_builder
+from mtpmanager.infra.ffmpeg_transcode import build_ffmpeg_audio_options
 
 logger = logging.getLogger(__name__)
 
@@ -255,23 +257,69 @@ def _vf_filter(
     return ",".join(parts)
 
 
+# Keys from build_ffmpeg_audio_options that must not enter a video mux
+# (they drop or remux only audio / strip video).
+_AUDIO_ONLY_OPT_KEYS = frozenset(
+    {
+        "vn",
+        "sn",
+        "dn",
+        "map",
+        "map_metadata",
+        "map_chapters",
+    }
+)
+
+
+def _audio_opts_for_video_mux(
+    settings: AudioEncodeSettings | None,
+    profile: VideoEncodePreset | VideoEncodeProfile,
+) -> dict:
+    """Audio encoder options for a video container (never -vn / audio-only map).
+
+    Device video expects explicit sample rate / channel count (match-skip and
+    ZEN playback). When the music ladder leaves those as “keep source”, fall
+    back to the effective preset’s audio_* fields.
+    """
+    if settings is not None:
+        raw = build_ffmpeg_audio_options(settings)
+        out: dict = {}
+        for key, val in raw.items():
+            if key in _AUDIO_ONLY_OPT_KEYS:
+                continue
+            # Normalize codec key used by python-ffmpeg builders.
+            if key in ("codec:a", "c:a"):
+                out["c:a"] = val
+                continue
+            out[key] = val
+        if "ar" not in out:
+            out["ar"] = str(int(profile.audio_sample_rate))
+        if "ac" not in out:
+            out["ac"] = str(int(profile.audio_channels))
+        return out
+    return {
+        "c:a": profile.audio_codec,
+        "b:a": profile.audio_bitrate,
+        "ac": str(int(profile.audio_channels)),
+        "ar": str(int(profile.audio_sample_rate)),
+    }
+
+
 def _build_output_options(
     profile: VideoEncodePreset | VideoEncodeProfile,
     *,
     force_fps: float | None,
     container_ext: str,
+    audio_settings: AudioEncodeSettings | None = None,
 ) -> dict:
     """ffmpeg output options for AVI/mpeg4 or WMV/WMA-style presets."""
     out: dict = {
         "map": ["0:v:0", "0:a:0?"],
         "c:v": profile.video_codec,
         "vf": _vf_filter(profile, force_fps=force_fps),
-        "c:a": profile.audio_codec,
-        "b:a": profile.audio_bitrate,
-        "ac": str(int(profile.audio_channels)),
-        "ar": str(int(profile.audio_sample_rate)),
         "f": container_ext if container_ext != "wmv" else "asf",
     }
+    out.update(_audio_opts_for_video_mux(audio_settings, profile))
     if profile.video_tag:
         out["vtag"] = profile.video_tag
     if profile.qscale_v is not None:
@@ -289,11 +337,17 @@ def convert_video_for_profile(
     temp_dir: str | None = None,
     on_progress: ProgressCallback | None = None,
     ignore_max_fps: bool = False,
+    audio_settings: AudioEncodeSettings | None = None,
 ) -> str:
     """Re-encode *src_path* to the selected device video preset; return path.
 
     *ignore_max_fps*: when True, do not apply *profile.max_fps* (keep source
     rate even if above the device cap — experimental; may break playback).
+
+    *audio_settings*: when set, drives the audio encoder via the shared
+    ``AudioEncodeSettings`` ladder (same as music/podcasts). Video map is
+    preserved; audio-only flags from the audio builder are stripped.
+    When unset, uses *profile.audio_** fields (back-compat).
 
     *on_progress(done_sec, total_sec, message)* is optional (worker thread).
     Raises ``RuntimeError`` / ``OSError`` / ffmpeg errors on failure.
@@ -327,7 +381,8 @@ def convert_video_for_profile(
     force_fps = output_fps_for_source(source_fps, max_fps)
     logger.info(
         "Video convert start src=%s dest=%s preset=%s duration=%.1fs "
-        "source_fps=%.3f max_fps=%s force_fps=%s ignore_max_fps=%s",
+        "source_fps=%.3f max_fps=%s force_fps=%s ignore_max_fps=%s "
+        "frame=%sx%s audio=%s",
         src_path,
         dest_path,
         profile.id,
@@ -336,6 +391,13 @@ def convert_video_for_profile(
         f"{max_fps:g}" if max_fps > 0 else "none",
         f"{force_fps:g}" if force_fps is not None else "keep",
         ignore_max_fps,
+        profile.width,
+        profile.height,
+        (
+            audio_settings.summary_line()
+            if audio_settings is not None
+            else f"{profile.audio_codec}/{profile.audio_bitrate}"
+        ),
     )
     if on_progress is not None:
         try:
@@ -344,7 +406,10 @@ def convert_video_for_profile(
             logger.debug("video on_progress failed", exc_info=True)
 
     out_opts = _build_output_options(
-        profile, force_fps=force_fps, container_ext=ext
+        profile,
+        force_fps=force_fps,
+        container_ext=ext,
+        audio_settings=audio_settings,
     )
 
     ff = FFmpeg().option("y").input(src_path).output(dest_path, out_opts)

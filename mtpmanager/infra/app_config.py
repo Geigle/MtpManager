@@ -149,6 +149,10 @@ class AppConfig:
     store_tracks_in_album_folder: bool = False
     # When True, Send Video shows broken device presets (e.g. ZEN WMV·WMA).
     show_broken_video_presets: bool = False
+    # Last Send Video resolution catalog id (e.g. "qvga"); None → device default.
+    video_encode_resolution_id: str | None = None
+    # Last Send Video audio ladder settings (recipe-clamped at use time).
+    video_audio_encode: AudioEncodeSettings | None = None
     # When True, the bottom playback bar stays visible even when idle.
     always_show_playback_controls: bool = False
     # When True, create ZENcast/<show>/ folders for podcast sends (PyMTP; experimental).
@@ -292,6 +296,20 @@ class AppConfig:
             return
         self.podcast_audio_encode = clamp_settings_for_format(settings)
 
+    def apply_video_encode_prefs(
+        self,
+        *,
+        resolution_id: str | None = None,
+        audio_encode: AudioEncodeSettings | None = None,
+    ) -> None:
+        """Remember last Send Video resolution / audio choices."""
+        rid = (resolution_id or "").strip().casefold() or None
+        self.video_encode_resolution_id = rid
+        if audio_encode is None:
+            self.video_audio_encode = None
+        else:
+            self.video_audio_encode = clamp_settings_for_format(audio_encode)
+
     def active_mode(self) -> str:
         """Return ``\"stable\"`` or ``\"experimental\"``."""
         return "stable" if self.stable_mode else "experimental"
@@ -392,6 +410,11 @@ def load_app_config(*, path: Path | None = None) -> AppConfig:
         show_broken_video_presets=_as_bool(
             raw.get("show_broken_video_presets"), False
         ),
+        video_encode_resolution_id=(
+            str(raw.get("video_encode_resolution_id") or "").strip().casefold()
+            or None
+        ),
+        video_audio_encode=None,
         always_show_playback_controls=_as_bool(
             raw.get("always_show_playback_controls"), False
         ),
@@ -464,6 +487,11 @@ def load_app_config(*, path: Path | None = None) -> AppConfig:
         cfg.podcast_audio_encode = clamp_settings_for_format(
             cfg.podcast_audio_encode
         )
+    raw_video_audio = raw.get("video_audio_encode")
+    if isinstance(raw_video_audio, dict):
+        cfg.video_audio_encode = clamp_settings_for_format(
+            AudioEncodeSettings.from_dict(raw_video_audio)
+        )
     return cfg
 
 
@@ -484,6 +512,10 @@ def save_app_config(config: AppConfig, *, path: Path | None = None) -> Path:
         "store_tracks_in_artist_folder": artist,
         "store_tracks_in_album_folder": album,
         "show_broken_video_presets": bool(config.show_broken_video_presets),
+        "video_encode_resolution_id": (
+            str(config.video_encode_resolution_id or "").strip().casefold()
+            or None
+        ),
         "always_show_playback_controls": bool(
             config.always_show_playback_controls
         ),
@@ -529,6 +561,10 @@ def save_app_config(config: AppConfig, *, path: Path | None = None) -> Path:
     if config.audiobook_audio_encode is not None:
         payload["audiobook_audio_encode"] = clamp_settings_for_format(
             config.audiobook_audio_encode
+        ).to_dict()
+    if config.video_audio_encode is not None:
+        payload["video_audio_encode"] = clamp_settings_for_format(
+            config.video_audio_encode
         ).to_dict()
     if config.podcast_audio_encode is not None:
         payload["podcast_audio_encode"] = clamp_settings_for_format(

@@ -1242,6 +1242,7 @@ def prepare_and_send_video(
     preferred_basename: str | None = None,
     guid: str | None = None,
     allowed_parents: frozenset[int] | None = None,
+    audio_settings=None,
 ) -> SendVideoResult:
     """Optional device-profile encode, then :func:`send_video`.
 
@@ -1251,6 +1252,9 @@ def prepare_and_send_video(
 
     *ignore_max_fps*: when encoding, skip the profile's max_fps cap (keep
     source rate above the device limit — experimental).
+
+    *audio_settings*: optional ``AudioEncodeSettings`` for the shared music
+    ladder (VBR/CBR/channels/…). When unset, uses *encode_profile.audio_**.
 
     ObjectFileName is title/basename style. *guid* is not used for the wire
     name (see :func:`send_video`); callers record it in the host device index.
@@ -1323,6 +1327,7 @@ def prepare_and_send_video(
                     dest_path=temp_path,
                     on_progress=_enc_progress,
                     ignore_max_fps=skip_cap,
+                    audio_settings=audio_settings,
                 )
                 encoded = True
                 _emit("progress", 85, 100, "encode complete — sending…")

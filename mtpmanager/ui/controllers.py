@@ -3017,15 +3017,35 @@ class AppController:
         )
 
     def _podcast_video_encode_profile(self):
-        """Default XviD preset for ZEN Vision:M when sending video podcasts."""
+        """Default XviD preset for ZEN Vision:M when sending video podcasts.
+
+        Applies the device default resolution (QVGA on ZEN) and last/default
+        video audio settings so full-motion podcast video matches Send Video.
+        Still-from-audio jobs still override frame size via the still ladder.
+        """
+        from mtpmanager.domain.video_encode import (
+            default_video_audio_settings,
+            effective_video_preset,
+        )
+
         profile = self._active_profile
         if profile is None:
             return None
         opts = getattr(profile, "video_options", None)
         if opts is None:
             return None
-        preset = opts.default_preset()
-        return preset
+        base = opts.default_preset()
+        resolution = opts.default_resolution()
+        if self._config.video_encode_resolution_id:
+            picked = opts.resolution_by_id(self._config.video_encode_resolution_id)
+            if picked is not None:
+                resolution = picked
+        audio = self._config.video_audio_encode
+        if audio is None:
+            audio = default_video_audio_settings(base)
+        return effective_video_preset(
+            base, resolution=resolution, audio_settings=audio
+        )
 
     def _start_podcast_video_sync(self, video_jobs: list, *, label: str) -> None:
         """Encode (XviD default on ZEN) and send video podcasts under ZENcast."""
@@ -11944,6 +11964,8 @@ class AppController:
             tv_folder_id=layout.tv_id,
             video_folder_name=layout.name_for(layout.video_id) or "Video",
             tv_folder_name=layout.name_for(layout.tv_id) or "TV",
+            initial_resolution_id=self._config.video_encode_resolution_id,
+            initial_audio_encode=self._config.video_audio_encode,
         )
         if opts is None:
             return
@@ -11951,9 +11973,33 @@ class AppController:
         encode = bool(opts.encode_for_device) and video_options is not None
         preset = None
         if encode and video_options is not None:
-            preset = video_options.preset_by_id(opts.preset_id)
-            if preset is None:
-                preset = video_options.default_preset()
+            from mtpmanager.domain.video_encode import (
+                default_video_audio_settings,
+                effective_video_preset,
+            )
+
+            base = video_options.preset_by_id(opts.preset_id)
+            if base is None:
+                base = video_options.default_preset()
+            resolution = video_options.resolution_by_id(opts.resolution_id)
+            if resolution is None:
+                resolution = video_options.default_resolution()
+            audio = opts.audio_encode
+            if audio is None:
+                audio = default_video_audio_settings(base)
+            preset = effective_video_preset(
+                base, resolution=resolution, audio_settings=audio
+            )
+            try:
+                self._config.apply_video_encode_prefs(
+                    resolution_id=opts.resolution_id,
+                    audio_encode=audio,
+                )
+                save_app_config(self._config)
+            except Exception:
+                logger.debug(
+                    "persist video encode prefs failed", exc_info=True
+                )
         ignore_max_fps = bool(opts.ignore_max_fps) and encode and preset is not None
         folder_label = (
             layout.video_folder_label(parent)
@@ -11961,7 +12007,11 @@ class AppController:
             else layout.name_for(parent) or str(parent)
         )
         if encode and preset is not None:
-            encode_note = f"Encode: {preset.display_name}\n"
+            encode_note = (
+                f"Encode: {preset.display_name}\n"
+                f"Resolution: {preset.width}×{preset.height}\n"
+                f"Audio: {preset.audio_detail or preset.probe_audio_codec}\n"
+            )
             if ignore_max_fps:
                 encode_note += (
                     "Max fps cap: ignored (experimental — may not play)\n"
@@ -12005,6 +12055,7 @@ class AppController:
         title_map = dict(title_by_path)
         basename_map = dict(basename_by_path)
         do_encode = encode and preset is not None
+        video_audio = opts.audio_encode if do_encode else None
 
         def work(device):
             _ = device
@@ -12053,6 +12104,7 @@ class AppController:
                         preferred_basename=basename_map.get(path),
                         guid=guid_map.get(path),
                         allowed_parents=layout.video_parent_ids(),
+                        audio_settings=video_audio,
                     )
                 )
             return results

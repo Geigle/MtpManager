@@ -472,6 +472,39 @@ class VideoEncodeProfileProbeTests(unittest.TestCase):
         self.assertEqual(opts["qscale:v"], "5")
         self.assertIn("fps=30", opts["vf"])
 
+    def test_vf_filter_qvga_and_qqvga(self) -> None:
+        from mtpmanager.domain.video_encode import RES_QQVGA, RES_QVGA, apply_resolution
+        from mtpmanager.infra.ffmpeg_video import _vf_filter
+
+        qvga = apply_resolution(ZEN_AVI_XVID_MP3, RES_QVGA)
+        vf = _vf_filter(qvga)
+        self.assertIn("320:240", vf)
+        self.assertIn("pad=320:240", vf)
+
+        qqvga = apply_resolution(ZEN_AVI_XVID_MP3, RES_QQVGA)
+        vf2 = _vf_filter(qqvga)
+        self.assertIn("160:120", vf2)
+        self.assertIn("pad=160:120", vf2)
+
+    def test_build_output_options_merges_audio_settings_without_vn(self) -> None:
+        from mtpmanager.domain.audio_encode import get_preset
+        from mtpmanager.infra.ffmpeg_video import _build_output_options
+
+        audio = get_preset("mp3_cbr_64")
+        assert audio is not None
+        opts = _build_output_options(
+            ZEN_AVI_XVID_MP3,
+            force_fps=None,
+            container_ext="avi",
+            audio_settings=audio.settings,
+        )
+        self.assertEqual(opts["map"], ["0:v:0", "0:a:0?"])
+        self.assertNotIn("vn", opts)
+        self.assertEqual(opts["c:a"], "libmp3lame")
+        self.assertEqual(opts["b:a"], "64k")
+        self.assertIn("ar", opts)
+        self.assertIn("ac", opts)
+
 
 class AudioStillVideoEncodeTests(unittest.TestCase):
     """Live ffmpeg: audio + black/still → device AVI (experimental podcast path)."""

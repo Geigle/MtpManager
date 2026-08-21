@@ -4,9 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from mtpmanager.domain.library import extension_of
 from mtpmanager.domain.models import DeviceInfo
+
+if TYPE_CHECKING:
+    from mtpmanager.domain.video_encode import VideoResolution
 
 
 @dataclass(frozen=True)
@@ -95,11 +99,16 @@ class DeviceVideoOptions:
     """Device-specific Send Video options (absent on the generic profile).
 
     *presets* are mutually exclusive encode recipes shown as notebook tabs.
+    *allowed_resolutions* are orthogonal frame sizes the device offers
+    (see ``domain.video_encode``). Audio quality is chosen via the shared
+    ``AudioEncodeSettings`` ladder, clamped per recipe container.
     """
 
     device_display_name: str
     presets: tuple[VideoEncodePreset, ...]
     default_preset_id: str
+    allowed_resolutions: tuple[VideoResolution, ...] = ()
+    default_resolution_id: str = ""
 
     def default_preset(self) -> VideoEncodePreset:
         p = self.preset_by_id(self.default_preset_id)
@@ -124,6 +133,30 @@ class DeviceVideoOptions:
         if include_broken:
             return self.presets
         return tuple(p for p in self.presets if not p.broken)
+
+    def resolution_by_id(
+        self, resolution_id: str | None
+    ) -> VideoResolution | None:
+        if not resolution_id:
+            return None
+        key = str(resolution_id).strip().casefold()
+        for r in self.allowed_resolutions:
+            if r.id.casefold() == key:
+                return r
+        return None
+
+    def default_resolution(self) -> VideoResolution | None:
+        """Preferred frame size, or first allowed, or None if unset."""
+        r = self.resolution_by_id(self.default_resolution_id)
+        if r is not None:
+            return r
+        if self.allowed_resolutions:
+            return self.allowed_resolutions[0]
+        return None
+
+    def visible_resolutions(self) -> tuple[VideoResolution, ...]:
+        """Resolutions offered in Send Video (empty → hide picker)."""
+        return self.allowed_resolutions
 
 
 @dataclass(frozen=True)

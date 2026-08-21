@@ -65,10 +65,18 @@ class DeviceProfileTests(unittest.TestCase):
         self.assertEqual(ve.container, "avi")
         self.assertEqual(ve.video_codec, "mpeg4")
         self.assertEqual(ve.video_tag, "XVID")
+        # Recipe literals keep retail 640×480; runtime default is QVGA.
         self.assertEqual(ve.width, 640)
         self.assertEqual(ve.height, 480)
         self.assertEqual(ve.max_fps, 30.0)
         self.assertEqual(ve.probe_audio_codec, "mp3")
+        res_ids = [r.id for r in opts.allowed_resolutions]
+        self.assertEqual(res_ids, ["qqvga", "qvga", "vga"])
+        self.assertEqual(opts.default_resolution_id, "qvga")
+        dres = opts.default_resolution()
+        self.assertIsNotNone(dres)
+        assert dres is not None
+        self.assertEqual((dres.width, dres.height), (320, 240))
         wmv = opts.preset_by_id("zen_wmv_wma")
         assert wmv is not None
         self.assertEqual(wmv.container, "wmv")

@@ -75,7 +75,7 @@ Do **not**:
 | Track listing / media filter (ZEN) | `domain/device_media.py` + `pymtp_device.list_tracks` (filelisting + media filter). Device tree uses listing + host GUID join only — **no** auto `get_track_metadata`. Explicit: Device track context **Fetch track tags…** → `enrich_track_refs_with_embedded_fallback` (metadata then download/mutagen) + `tests/test_enrich_tracks.py` |
 | Headless CLI / MCP for agents | `mtpmanager/headless/` + `mtpmanager/cli/` + `mcp_server.py`; cross-process USB lock `infra/device_session_lock.py`; [docs/agent-interface.md](docs/agent-interface.md) |
 | Export map / retail zip / restore | `infra/device_export_map.py`, `infra/retail_package.py`, `app/retail_ops.py` + `tests/test_device_export_map.py`, `tests/test_retail_package.py` |
-| Send Video (Video 120 / TV 124) | `DeviceVideoOptions` + presets in `device_profile.py` / `device_profiles.py`; encode `infra/ffmpeg_video.py`; `app/device_ops.prepare_and_send_video`; notebook UI `dialogs.ask_video_destination`; `tests/test_send_video.py` |
+| Send Video (Video 120 / TV 124) | Recipe tabs + resolutions in `device_profile.py` / `device_profiles.py`; catalog + `apply_resolution` / `apply_audio_settings` in `domain/video_encode.py`; encode `infra/ffmpeg_video.py`; `app/device_ops.prepare_and_send_video`; UI `dialogs.ask_video_destination` (resolution + music-ladder audio); `tests/test_video_encode.py`, `tests/test_send_video.py` |
 
 ---
 

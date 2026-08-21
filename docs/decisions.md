@@ -300,3 +300,22 @@ Debriefs remain the forensic narrative; this file is what we keep doing.
 **Consequences:** Transfer/playing row colors (O8) unchanged. Hover tips still use explicit light-panel colors (required for help-window chrome). KDE/GNOME theme picking remains phase 4b/4c.
 
 **Source:** [ui-visual-pass.md](./ui-visual-pass.md); `ui/chrome.py`, `ui/window.py`, `ui/dialogs.py`.
+
+---
+
+## D21 — Video encode: orthogonal resolution + audio ladder
+
+**Context:** ZEN Vision:M Send Video recipes hardcoded **640×480** (retail / A/V Out) and fixed 128 kbps stereo audio. The device panel is **320×240**; smaller frames (e.g. 160×120) are useful for storage. Multiplying recipe tabs per size would explode the notebook. Music/podcasts already share `AudioEncodeSettings`.
+
+**Decision:** Keep recipe tabs as **container + video codec** only. Add orthogonal axes on `DeviceVideoOptions`:
+
+1. **Allowed resolutions** from `domain/video_encode` catalog (ZEN: QQVGA / QVGA / VGA; default **QVGA**).
+2. **Audio** via the same preset ladder as music/podcasts, clamped to what the recipe can mux (AVI→MP3, WMV→WMA).
+
+Effective encode = recipe ⊕ selected resolution ⊕ `AudioEncodeSettings`. Last choices persist in `config.json`.
+
+**Rationale:** Matches how still-video already overrides geometry separately; reuses proven audio UI; avoids tab combinatorial explosion.
+
+**Consequences:** Callers must `apply_resolution` / `apply_audio_settings` (or `effective_video_preset`) before match-skip / encode. Podcast full-motion video picks up the device default resolution (QVGA) unless overridden. Still-from-audio ladder (`audio_podcast_still_*`) stays independent.
+
+**Source:** `domain/video_encode.py`, `device_profiles.py`, `dialogs.ask_video_destination`, `infra/ffmpeg_video.py`.

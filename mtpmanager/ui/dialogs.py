@@ -47,6 +47,11 @@ from mtpmanager.domain.audio_encode import (
 )
 from mtpmanager.domain.device_profile import DeviceVideoOptions, VideoEncodePreset
 from mtpmanager.domain.models import DeviceInfo
+from mtpmanager.domain.video_encode import (
+    VideoResolution,
+    audio_formats_for_video_preset,
+    default_video_audio_settings,
+)
 from mtpmanager.infra.app_config import (
     ALL_DAY_KEYS,
     DEFAULT_PODCAST_SCHEDULE_TIME,
@@ -1300,17 +1305,42 @@ class SendVideoDialogResult:
     preset_id: str | None = None
     # When True, encode ignores preset.max_fps (e.g. try 60 fps on ZEN).
     ignore_max_fps: bool = False
+    # Orthogonal frame size (catalog id, e.g. "qvga").
+    resolution_id: str | None = None
+    # Audio ladder settings (same model as music/podcasts); recipe-clamped.
+    audio_encode: AudioEncodeSettings | None = None
 
 
-def _fill_preset_panel(parent: Frame, preset: VideoEncodePreset) -> None:
+def _fill_preset_panel(
+    parent: Frame,
+    preset: VideoEncodePreset,
+    *,
+    resolution: VideoResolution | None = None,
+) -> None:
     """Render container / video / audio detail blocks for one preset tab."""
     for child in parent.winfo_children():
         child.destroy()
 
+    frame_note = (
+        resolution.summary_line()
+        if resolution is not None
+        else "pad to selected frame (see Resolution below)"
+    )
+    video_text = preset.video_detail or preset.video_codec
+    if resolution is not None and "pad to selected frame" in video_text:
+        video_text = video_text.replace(
+            "pad to selected frame",
+            f"{resolution.width}×{resolution.height} pad",
+        )
+
     sections = (
         ("Container", preset.container_detail or preset.container.upper()),
-        ("Video codec", preset.video_detail or preset.video_codec),
-        ("Audio codec", preset.audio_detail or preset.probe_audio_codec),
+        ("Video codec", video_text),
+        ("Frame size", frame_note),
+        (
+            "Audio (default for recipe)",
+            preset.audio_detail or preset.probe_audio_codec,
+        ),
     )
     for title, text in sections:
         Label(parent, text=title, font=("", 11, "bold"), anchor="w").pack(
@@ -1335,10 +1365,6 @@ def _fill_preset_panel(parent: Frame, preset: VideoEncodePreset) -> None:
         extra.append(f"Video quality: qscale {preset.qscale_v}")
     elif preset.video_bitrate:
         extra.append(f"Video bitrate: {preset.video_bitrate}")
-    extra.append(
-        f"Audio: {preset.audio_bitrate} · {preset.audio_sample_rate} Hz · "
-        f"{preset.audio_channels} channel(s)"
-    )
     if preset.broken:
         extra.append("⚠ Broken — does not play reliably on this device")
     elif preset.experimental:
@@ -1356,6 +1382,145 @@ def _fill_preset_panel(parent: Frame, preset: VideoEncodePreset) -> None:
     ).pack(fill="x", padx=(8, 0), pady=(0, 6))
 
 
+def _pack_video_audio_encode_picker(
+    parent,
+    *,
+    initial: AudioEncodeSettings,
+    allowed_send_formats: frozenset[str] | None,
+    list_height: int = 4,
+) -> tuple[Callable[[], AudioEncodeSettings], Callable[[frozenset[str] | None, AudioEncodeSettings | None], None], Callable[[bool], None]]:
+    """Always-on format + quality ladder (music/podcast presets).
+
+    Returns ``(get_settings, reconfigure, set_enabled)``.
+    *reconfigure(allowed, settings=None)* refreshes the format list when the
+    recipe tab changes; optional *settings* selects a matching preset.
+    """
+    controls = Frame(parent)
+    controls.pack(fill="x", pady=(0, 4))
+
+    fmt_row = Frame(controls)
+    fmt_row.pack(fill="x", pady=(0, 4))
+    Label(fmt_row, text="Audio format:").pack(side=LEFT)
+
+    state: dict = {
+        "allowed": formats_allowed(allowed_send_formats),
+        "preset_ids": [],
+        "initial": initial,
+    }
+    fmt_keys = list(state["allowed"])
+    fmt_labels = [format_display_name(f) for f in fmt_keys]
+    label_to_key = dict(zip(fmt_labels, fmt_keys))
+    key_to_label = dict(zip(fmt_keys, fmt_labels))
+    ui_fmt = initial.normalized_format()
+    if ui_fmt not in fmt_keys:
+        ui_fmt = fmt_keys[0] if fmt_keys else "mp3"
+    fmt_var = StringVar(
+        value=key_to_label.get(ui_fmt, fmt_labels[0] if fmt_labels else "MP3")
+    )
+    fmt_combo = ttk.Combobox(
+        fmt_row,
+        textvariable=fmt_var,
+        values=fmt_labels,
+        state="readonly",
+        width=16,
+    )
+    fmt_combo.pack(side=LEFT, padx=(8, 0))
+
+    Label(controls, text="Audio quality:", anchor="w").pack(fill="x")
+    preset_frame = Frame(controls)
+    preset_frame.pack(fill="x", pady=(2, 0))
+    preset_scroll = Scrollbar(preset_frame)
+    preset_scroll.pack(side=RIGHT, fill=Y)
+    preset_list = Listbox(
+        preset_frame,
+        height=list_height,
+        exportselection=False,
+        yscrollcommand=preset_scroll.set,
+        width=52,
+    )
+    preset_list.pack(side=LEFT, fill="x", expand=True)
+    preset_scroll.config(command=preset_list.yview)
+
+    def current_fmt_key() -> str:
+        lab = str(fmt_var.get() or "")
+        keys = list(state["allowed"])
+        return label_to_key.get(lab, keys[0] if keys else "mp3")
+
+    def refill_presets(*, select_id: str | None = None) -> None:
+        preset_list.delete(0, END)
+        state["preset_ids"] = []
+        fmt = current_fmt_key()
+        ladder = presets_for_format(fmt)
+        want = select_id
+        if want and not any(p.id == want for p in ladder):
+            want = None
+        chosen_idx = 0
+        init = state["initial"]
+        for i, p in enumerate(ladder):
+            preset_list.insert(END, p.display_name)
+            state["preset_ids"].append(p.id)
+            if want and p.id == want:
+                chosen_idx = i
+            elif not want and p.id == init.preset_id:
+                chosen_idx = i
+        if state["preset_ids"]:
+            preset_list.selection_clear(0, END)
+            preset_list.selection_set(chosen_idx)
+            preset_list.see(chosen_idx)
+
+    def get_settings() -> AudioEncodeSettings:
+        sel = preset_list.curselection()
+        ids = state["preset_ids"]
+        allowed = frozenset(state["allowed"]) if state["allowed"] else None
+        if sel and ids:
+            pid = ids[int(sel[0])]
+            preset = get_preset(pid)
+            if preset is not None:
+                return resolve_settings(
+                    settings=preset.settings,
+                    allowed_formats=allowed,
+                )
+        return resolve_settings(
+            settings=state["initial"],
+            send_format=current_fmt_key(),
+            allowed_formats=allowed,
+        )
+
+    def reconfigure(
+        allowed: frozenset[str] | None,
+        settings: AudioEncodeSettings | None = None,
+    ) -> None:
+        nonlocal label_to_key, key_to_label
+        state["allowed"] = formats_allowed(allowed)
+        if settings is not None:
+            state["initial"] = resolve_settings(
+                settings=settings, allowed_formats=allowed
+            )
+        keys = list(state["allowed"])
+        labels = [format_display_name(f) for f in keys]
+        label_to_key = dict(zip(labels, keys))
+        key_to_label = dict(zip(keys, labels))
+        fmt_combo.configure(values=labels)
+        s = state["initial"]
+        fmt = s.normalized_format()
+        if fmt not in keys:
+            fmt = keys[0] if keys else "mp3"
+        fmt_var.set(key_to_label.get(fmt, labels[0] if labels else "MP3"))
+        refill_presets(select_id=s.preset_id)
+
+    def set_enabled(on: bool) -> None:
+        state_s = "readonly" if on else DISABLED
+        fmt_combo.configure(state=state_s)
+        preset_list.configure(state=NORMAL if on else DISABLED)
+
+    def on_fmt_change(_e=None) -> None:
+        refill_presets()
+
+    fmt_combo.bind("<<ComboboxSelected>>", on_fmt_change)
+    refill_presets(select_id=initial.preset_id)
+    return get_settings, reconfigure, set_enabled
+
+
 def ask_video_destination(
     parent,
     *,
@@ -1367,6 +1532,8 @@ def ask_video_destination(
     tv_folder_id: int | None = None,
     video_folder_name: str = "Video",
     tv_folder_name: str = "TV",
+    initial_resolution_id: str | None = None,
+    initial_audio_encode: AudioEncodeSettings | None = None,
 ) -> SendVideoDialogResult | None:
     """Ask Video/TV parent and optional device encode preset. None if cancelled.
 
@@ -1376,6 +1543,9 @@ def ask_video_destination(
 
     *video_folder_id* / *tv_folder_id* come from a live folder-name resolution
     when available; defaults fall back to legacy Vision:M ids (120 / 124).
+
+    *initial_resolution_id* / *initial_audio_encode* restore last Send Video
+    choices from Config when present.
     """
     vid = (
         int(video_folder_id)
@@ -1437,10 +1607,12 @@ def ask_video_destination(
     notebook: ttk.Notebook | None = None
     preset_by_tab: dict[int, VideoEncodePreset] = {}
     default_preset: VideoEncodePreset | None = None
+    resolutions: tuple[VideoResolution, ...] = ()
     if has_options and video_options is not None:
         default_preset = video_options.default_preset()
         if default_preset not in visible:
             default_preset = visible[0]
+        resolutions = video_options.visible_resolutions()
 
     def _selected_preset() -> VideoEncodePreset | None:
         if notebook is None or not has_options:
@@ -1450,6 +1622,42 @@ def ask_video_destination(
         except Exception:
             return default_preset
         return preset_by_tab.get(idx, default_preset)
+
+    # Resolution combobox state
+    res_ids: list[str] = [r.id for r in resolutions]
+    res_labels = [r.summary_line() for r in resolutions]
+    res_label_to_id = dict(zip(res_labels, res_ids))
+    res_id_to_label = dict(zip(res_ids, res_labels))
+    initial_res: VideoResolution | None = None
+    if video_options is not None and resolutions:
+        initial_res = video_options.resolution_by_id(initial_resolution_id)
+        if initial_res is None:
+            initial_res = video_options.default_resolution()
+    res_var = StringVar(
+        value=(
+            res_id_to_label.get(initial_res.id, res_labels[0])
+            if initial_res is not None and res_labels
+            else ""
+        )
+    )
+    res_combo: ttk.Combobox | None = None
+
+    def _selected_resolution() -> VideoResolution | None:
+        if not resolutions:
+            return None
+        rid = res_label_to_id.get(str(res_var.get() or ""))
+        if video_options is not None and rid:
+            found = video_options.resolution_by_id(rid)
+            if found is not None:
+                return found
+        return initial_res or (resolutions[0] if resolutions else None)
+
+    audio_get: Callable[[], AudioEncodeSettings] | None = None
+    audio_reconfigure: Callable[
+        [frozenset[str] | None, AudioEncodeSettings | None], None
+    ] | None = None
+    audio_set_enabled: Callable[[bool], None] | None = None
+    audio_frame: Frame | None = None
 
     def _sync_high_fps_for_preset(preset: VideoEncodePreset | None) -> None:
         if high_fps_cb is None:
@@ -1473,8 +1681,29 @@ def ask_video_destination(
             except Exception:
                 pass
 
-    def _on_tab_changed(_event=None) -> None:
-        _sync_high_fps_for_preset(_selected_preset())
+    def _refresh_preset_panels() -> None:
+        res = _selected_resolution()
+        if notebook is None:
+            return
+        for i, preset in preset_by_tab.items():
+            try:
+                tab = notebook.nametowidget(notebook.tabs()[i])
+            except Exception:
+                continue
+            _fill_preset_panel(tab, preset, resolution=res)
+
+    def _on_recipe_or_res_changed(_event=None) -> None:
+        preset = _selected_preset()
+        _sync_high_fps_for_preset(preset)
+        _refresh_preset_panels()
+        if audio_reconfigure is not None and preset is not None:
+            allowed = audio_formats_for_video_preset(preset)
+            # Keep current picker choice when still valid; else recipe default.
+            cur = audio_get() if audio_get is not None else None
+            if cur is not None and cur.normalized_format() in allowed:
+                audio_reconfigure(allowed, cur)
+            else:
+                audio_reconfigure(allowed, default_video_audio_settings(preset))
 
     if has_options and video_options is not None:
         Label(
@@ -1495,9 +1724,9 @@ def ask_video_destination(
         Label(
             body,
             text=(
-                "Each tab is a mutually exclusive format recipe "
-                "(container + video + audio). Default is "
-                "AVI · XviD / MPEG-4 SP · MP3."
+                "Each tab is a container + video codec recipe. "
+                "Resolution and audio quality are chosen below "
+                "(same audio ladder as music/podcasts)."
             ),
             justify=LEFT,
             wraplength=440,
@@ -1509,12 +1738,63 @@ def ask_video_destination(
         for i, preset in enumerate(visible):
             tab = Frame(notebook, padx=10, pady=6)
             notebook.add(tab, text=preset.tab_label)
-            _fill_preset_panel(tab, preset)
+            _fill_preset_panel(tab, preset, resolution=initial_res)
             preset_by_tab[i] = preset
             if default_preset is not None and preset.id == default_preset.id:
                 notebook.select(i)
 
-        notebook.bind("<<NotebookTabChanged>>", _on_tab_changed)
+        notebook.bind("<<NotebookTabChanged>>", _on_recipe_or_res_changed)
+
+        if resolutions:
+            Label(body, text="Resolution:", anchor="w").pack(
+                fill="x", pady=(8, 2)
+            )
+            res_combo = ttk.Combobox(
+                body,
+                textvariable=res_var,
+                values=res_labels,
+                state="readonly",
+                width=48,
+            )
+            res_combo.pack(fill="x", pady=(0, 4))
+            res_combo.bind("<<ComboboxSelected>>", _on_recipe_or_res_changed)
+
+        # Audio ladder (recipe-clamped).
+        seed_preset = default_preset or visible[0]
+        if initial_audio_encode is not None:
+            audio_initial = resolve_settings(
+                settings=initial_audio_encode,
+                allowed_formats=audio_formats_for_video_preset(seed_preset),
+            )
+        else:
+            audio_initial = default_video_audio_settings(seed_preset)
+        audio_frame = Frame(body)
+        audio_frame.pack(fill="x", pady=(6, 2))
+        Label(
+            audio_frame,
+            text="Audio encode",
+            font=("", 11, "bold"),
+            anchor="w",
+        ).pack(fill="x", pady=(0, 2))
+        Label(
+            audio_frame,
+            text=(
+                "Same presets as Config music encode, limited to formats "
+                "this recipe can mux (AVI → MP3; WMV → WMA)."
+            ),
+            justify=LEFT,
+            wraplength=440,
+            **secondary_label_kwargs(),
+        ).pack(anchor="w", pady=(0, 4))
+        audio_get, audio_reconfigure, audio_set_enabled = (
+            _pack_video_audio_encode_picker(
+                audio_frame,
+                initial=audio_initial,
+                allowed_send_formats=audio_formats_for_video_preset(
+                    seed_preset
+                ),
+            )
+        )
 
         high_fps_cb = Checkbutton(
             body,
@@ -1542,11 +1822,18 @@ def ask_video_destination(
                         notebook.tab(i, state="normal" if on else "disabled")
             except Exception:
                 pass
+            if res_combo is not None:
+                try:
+                    res_combo.configure(state="readonly" if on else DISABLED)
+                except Exception:
+                    pass
+            if audio_set_enabled is not None:
+                audio_set_enabled(on)
             _sync_high_fps_for_preset(_selected_preset() if on else None)
 
         encode_var.trace_add("write", _sync_encode_state)
         _sync_encode_state()
-        _on_tab_changed()
+        _on_recipe_or_res_changed()
     else:
         Label(
             body,
@@ -1566,6 +1853,10 @@ def ask_video_destination(
         do_encode = bool(encode_var.get()) and has_options
         preset = _selected_preset() if do_encode else None
         cap = float(preset.max_fps or 0) if preset is not None else 0.0
+        res = _selected_resolution() if do_encode else None
+        audio = None
+        if do_encode and audio_get is not None:
+            audio = audio_get()
         result[0] = SendVideoDialogResult(
             parent_id=int(parent_id),
             encode_for_device=do_encode,
@@ -1573,6 +1864,8 @@ def ask_video_destination(
             ignore_max_fps=(
                 do_encode and cap > 0 and bool(ignore_max_fps_var.get())
             ),
+            resolution_id=res.id if res is not None else None,
+            audio_encode=audio,
         )
         dlg.destroy()
 
@@ -1591,7 +1884,7 @@ def ask_video_destination(
     dlg.grab_set()
     try:
         px = parent.winfo_rootx() + max(0, (parent.winfo_width() - 480) // 2)
-        py = parent.winfo_rooty() + max(0, (parent.winfo_height() - 420) // 3)
+        py = parent.winfo_rooty() + max(0, (parent.winfo_height() - 520) // 3)
         dlg.geometry(f"+{px}+{py}")
     except Exception:
         pass
