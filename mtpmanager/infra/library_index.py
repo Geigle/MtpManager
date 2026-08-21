@@ -356,6 +356,59 @@ def _set_library_meta_roots(
     )
 
 
+def upsert_library_tracks(
+    tracks: Iterable[Track],
+    *,
+    path: Path | None = None,
+) -> int:
+    """Upsert specific tracks without rewriting the full library index.
+
+    Use this when only a few rows changed (e.g. a newly assigned video GUID).
+    Does **not** soft-untrack other rows. Calls
+    :func:`private_hooks.after_library_saved` with only these tracks so optional
+    ``.tuneout`` rewrites stay scoped to touched directories.
+
+    Tracks without a valid GUID or path are skipped. Returns the number written.
+    """
+    dest = path if path is not None else index_path()
+    items = [
+        t
+        for t in tracks
+        if t is not None
+        and isinstance(t.path, str)
+        and t.path
+        and is_track_guid(getattr(t, "guid", "") or "")
+    ]
+    if not items:
+        return 0
+
+    now = _utc_now()
+    t0 = time.perf_counter()
+    conn = _connect(dest)
+    try:
+        _init_schema(conn)
+        with conn:
+            for t in items:
+                # Path is UNIQUE: drop any other GUID row for this path first.
+                conn.execute(
+                    "DELETE FROM tracks WHERE path = ? AND guid != ?",
+                    (t.path, t.guid),
+                )
+                _upsert_tracked_track(conn, t, now=now)
+    finally:
+        conn.close()
+
+    elapsed = time.perf_counter() - t0
+    logger.info(
+        "Upserted %d library track(s) in %.2fs → %s",
+        len(items),
+        elapsed,
+        dest,
+    )
+    private_hooks.after_library_saved(items)
+    return len(items)
+
+
 def save_library_index(
     library: Library,
     *,
@@ -369,9 +422,14 @@ def save_library_index(
 
     Mutates ``library.tracks`` so callers keep the assigned GUIDs.
     Returns the database path written.
+
+    Prefer :func:`upsert_library_tracks` for small incremental GUID fixes —
+    a full save rewrites every tracked row and may rewrite every ``.tuneout``
+    sidecar via private hooks (multi-minute beach ball on large libraries).
     """
     dest = path if path is not None else index_path()
     now = _utc_now()
+    t0 = time.perf_counter()
     conn = _connect(dest)
     try:
         _init_schema(conn)
@@ -430,15 +488,26 @@ def save_library_index(
     except sqlite3.Error:
         pass
 
+    sql_elapsed = time.perf_counter() - t0
     logger.info(
-        "Saved library index: %d tracked, %d untracked under %d root(s) %s → %s",
+        "Saved library index: %d tracked, %d untracked under %d root(s) %s → %s "
+        "(sql %.1fs)",
         len(library.tracks),
         untracked,
         len(library.root_paths),
         library.root_paths,
         dest,
+        sql_elapsed,
     )
+    hook_t0 = time.perf_counter()
     private_hooks.after_library_saved(library.tracks)
+    hook_elapsed = time.perf_counter() - hook_t0
+    if hook_elapsed >= 0.5:
+        logger.info(
+            "after_library_saved hooks finished in %.1fs (%d track(s))",
+            hook_elapsed,
+            len(library.tracks),
+        )
     return dest
 
 

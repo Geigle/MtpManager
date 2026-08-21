@@ -158,6 +158,7 @@ from mtpmanager.infra.library_index import (
     remove_library_exclusions,
     save_library_index,
     untrack_library_roots,
+    upsert_library_tracks,
 )
 from mtpmanager.infra import private_hooks
 from mtpmanager.domain.playlist_shuffle import (
@@ -10439,6 +10440,32 @@ class AppController:
             )
             return set()
 
+    def _persist_new_library_guids(self, paths: list[str] | set[str]) -> None:
+        """Upsert only tracks whose GUIDs were newly assigned (no full index rewrite).
+
+        A full :func:`save_library_index` rewrites every tracked row and, via
+        private hooks, every ``.tuneout`` sidecar under the library roots —
+        multi-minute UI freezes on large libraries / network volumes. Call this
+        only for paths that received a brand-new GUID in this session.
+        """
+        want = {os.path.normpath(p) for p in paths if p}
+        if not want:
+            return
+        tracks = [
+            t
+            for t in self.library.tracks
+            if t.path and os.path.normpath(t.path) in want and is_track_guid(t.guid)
+        ]
+        if not tracks:
+            return
+        try:
+            upsert_library_tracks(tracks)
+        except Exception:
+            logger.debug(
+                "upsert_library_tracks for new GUIDs failed",
+                exc_info=True,
+            )
+
     def _on_after_send(
         self, guid: str, send_path: str, object_id: int | None
     ) -> None:
@@ -11990,6 +12017,7 @@ class AppController:
         guid_by_path: dict[str, str] = {}
         title_by_path: dict[str, str] = {}
         basename_by_path: dict[str, str] = {}
+        newly_assigned_guid_paths: list[str] = []
         for p in files:
             track = by_path.get(p)
             base = os.path.basename(p)
@@ -12012,6 +12040,7 @@ class AppController:
                         self.library.tracks[idx] = Track(
                             path=old.path, meta=old.meta, guid=g
                         )
+                    newly_assigned_guid_paths.append(p)
                 guid_by_path[p] = g
                 display = video_display_title(track)
                 title_by_path[p] = os.path.splitext(display)[0] or stem
@@ -12172,6 +12201,7 @@ class AppController:
         guid_map = dict(guid_by_path)
         title_map = dict(title_by_path)
         basename_map = dict(basename_by_path)
+        new_guid_paths = list(newly_assigned_guid_paths)
         do_encode = encode and preset is not None
         video_audio = opts.audio_encode if do_encode else None
 
@@ -12263,16 +12293,10 @@ class AppController:
         def on_success(results) -> None:
             if not isinstance(results, list):
                 results = [results]
-            # Persist any GUIDs assigned for library videos (index only; not
-            # ObjectFileName). Enables skip-if-present on later syncs.
-            if guid_map:
-                try:
-                    save_library_index(self.library)
-                except Exception:
-                    logger.debug(
-                        "save_library_index after video send failed",
-                        exc_info=True,
-                    )
+            # Persist only newly assigned GUIDs (index only; not ObjectFileName).
+            # Full save_library_index here caused multi-minute beach balls via
+            # rewriting every .tuneout under /Volumes/music and /Volumes/video.
+            self._persist_new_library_guids(new_guid_paths)
             for result in results:
                 src = os.path.normpath(result.source_path or result.path or "")
                 g = guid_map.get(src)
@@ -12421,6 +12445,7 @@ class AppController:
         guid_by_path: dict[str, str] = {}
         title_by_path: dict[str, str] = {}
         basename_by_path: dict[str, str] = {}
+        newly_assigned_guid_paths: list[str] = []
         for p in files:
             track = by_path.get(p)
             base = os.path.basename(p)
@@ -12442,6 +12467,7 @@ class AppController:
                         self.library.tracks[idx] = Track(
                             path=old.path, meta=old.meta, guid=g
                         )
+                    newly_assigned_guid_paths.append(p)
                 guid_by_path[p] = g
                 display = video_display_title(track)
                 title_by_path[p] = os.path.splitext(display)[0] or stem
@@ -12565,6 +12591,7 @@ class AppController:
         guid_map = dict(guid_by_path)
         title_map = dict(title_by_path)
         basename_map = dict(basename_by_path)
+        new_guid_paths = list(newly_assigned_guid_paths)
         do_encode = encode and preset is not None
         video_audio = opts.audio_encode if do_encode else None
         res_id = opts.resolution_id if do_encode else None
@@ -12657,13 +12684,7 @@ class AppController:
                 self._sync_library_chrome()
             except Exception:
                 pass
-            if guid_map:
-                try:
-                    save_library_index(self.library)
-                except Exception:
-                    logger.debug(
-                        "save_library_index after stage failed", exc_info=True
-                    )
+            self._persist_new_library_guids(new_guid_paths)
             if not isinstance(results, list):
                 results = [results]
             for entry in results:
@@ -12818,11 +12839,8 @@ class AppController:
         def on_success(pairs) -> None:
             if not isinstance(pairs, list):
                 pairs = [pairs]
-            guid_touched = False
             for entry, result in pairs:
                 g = (entry.guid or "").strip() or None
-                if g:
-                    guid_touched = True
                 try:
                     record_send(
                         serial,
@@ -12843,14 +12861,7 @@ class AppController:
                     result.remote_basename,
                     result.parent_id,
                 )
-            if guid_touched:
-                try:
-                    save_library_index(self.library)
-                except Exception:
-                    logger.debug(
-                        "save_library_index after staged sync failed",
-                        exc_info=True,
-                    )
+            # Staged sync never assigns new library GUIDs — skip full index save.
             try:
                 self._schedule_device_music_tree_refresh(enrich_missing_tags=False)
             except Exception:

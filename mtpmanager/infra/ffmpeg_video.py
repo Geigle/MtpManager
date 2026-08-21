@@ -13,6 +13,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -929,7 +930,21 @@ def cleanup_video_temp(path: str | None) -> None:
     if not os.path.exists(path):
         return
     try:
+        size = 0
+        try:
+            size = int(os.path.getsize(path))
+        except OSError:
+            pass
+        t0 = time.perf_counter()
         os.remove(path)
+        elapsed = time.perf_counter() - t0
+        if elapsed >= 1.0 or size >= 50 * 1024 * 1024:
+            logger.info(
+                "Deleted video temp %s (%.1f MiB) in %.1fs",
+                path,
+                size / (1024 * 1024),
+                elapsed,
+            )
     except OSError as exc:
         logger.warning("Could not delete video temp %s: %s", path, exc)
 
