@@ -25,6 +25,7 @@ from mtpmanager.infra.library_index import (
     remove_library_exclusions,
     save_library_index,
     untrack_library_roots,
+    upsert_library_tracks,
 )
 
 
@@ -510,6 +511,79 @@ class LibraryIndexTests(unittest.TestCase):
             self.assertEqual(lib.root_path, "/music")
             self.assertEqual(lib.root_paths, ["/music"])
             self.assertEqual(lib.tracks[0].meta.title, "T")
+
+
+class UpsertLibraryTracksTests(unittest.TestCase):
+    def test_upsert_updates_one_guid_without_untracking_others(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "Music"
+            root.mkdir()
+            f1 = root / "a.mp3"
+            f2 = root / "b.mp3"
+            f1.write_bytes(b"x")
+            f2.write_bytes(b"y")
+            g1 = new_track_guid()
+            g2 = new_track_guid()
+            lib = Library(
+                tracks=[
+                    _track(str(f1), title="One", guid=g1),
+                    _track(str(f2), title="Two", guid=g2),
+                ],
+                root_paths=[str(root)],
+            )
+            dest = Path(tmp) / "library_index.db"
+            save_library_index(lib, path=dest)
+
+            g1_new = new_track_guid()
+            updated = _track(str(f1), title="One-renamed", guid=g1_new)
+            n = upsert_library_tracks([updated], path=dest)
+            self.assertEqual(n, 1)
+
+            loaded = load_library_index(path=dest)
+            self.assertIsNotNone(loaded)
+            assert loaded is not None
+            by_path = {t.path: t for t in loaded.tracks}
+            self.assertEqual(by_path[str(f1)].guid, g1_new)
+            self.assertEqual(by_path[str(f1)].meta.title, "One-renamed")
+            self.assertEqual(by_path[str(f2)].guid, g2)
+            self.assertEqual(len(loaded.tracks), 2)
+
+    def test_upsert_calls_private_hook_with_only_touched_tracks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "Music"
+            root.mkdir()
+            f1 = root / "a.mp3"
+            f1.write_bytes(b"x")
+            g1 = new_track_guid()
+            dest = Path(tmp) / "library_index.db"
+            save_library_index(
+                Library(
+                    tracks=[_track(str(f1), title="One", guid=g1)],
+                    root_paths=[str(root)],
+                ),
+                path=dest,
+            )
+            seen: list[list] = []
+
+            class _Adapter:
+                def after_library_saved(self, tracks):
+                    seen.append(list(tracks))
+
+                def enrich_path_guid_map(self, tracks, path_map):
+                    return path_map
+
+            g2 = new_track_guid()
+            with mock.patch(
+                "mtpmanager.infra.private_hooks.library_guid_adapter",
+                return_value=_Adapter(),
+            ):
+                upsert_library_tracks(
+                    [_track(str(f1), title="One", guid=g2)],
+                    path=dest,
+                )
+            self.assertEqual(len(seen), 1)
+            self.assertEqual(len(seen[0]), 1)
+            self.assertEqual(seen[0][0].guid, g2)
 
 
 class LibraryIndexStreamTests(unittest.TestCase):

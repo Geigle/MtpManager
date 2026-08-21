@@ -14,6 +14,7 @@ from tkinter import (
     RIGHT,
     BooleanVar,
     Button,
+    Canvas,
     Checkbutton,
     Entry,
     Frame,
@@ -47,6 +48,17 @@ from mtpmanager.domain.audio_encode import (
 )
 from mtpmanager.domain.device_profile import DeviceVideoOptions, VideoEncodePreset
 from mtpmanager.domain.models import DeviceInfo
+from mtpmanager.domain.video_encode import (
+    DEFAULT_VIDEO_QSCALE,
+    VIDEO_QSCALE_CHOICES,
+    PodcastVideoEncodeSettings,
+    VideoResolution,
+    audio_formats_for_video_preset,
+    clamp_video_qscale,
+    default_video_audio_settings,
+    preset_supports_qscale,
+    qscale_choice_label,
+)
 from mtpmanager.infra.app_config import (
     ALL_DAY_KEYS,
     DEFAULT_PODCAST_SCHEDULE_TIME,
@@ -1300,60 +1312,627 @@ class SendVideoDialogResult:
     preset_id: str | None = None
     # When True, encode ignores preset.max_fps (e.g. try 60 fps on ZEN).
     ignore_max_fps: bool = False
+    # Orthogonal frame size (catalog id, e.g. "qvga").
+    resolution_id: str | None = None
+    # Audio ladder settings (same model as music/podcasts); recipe-clamped.
+    audio_encode: AudioEncodeSettings | None = None
+    # mpeg4 ``-qscale:v`` (lower = higher quality). None → recipe default.
+    qscale_v: int | None = None
+    # When True, spend more CPU on mpeg4 (mbd=rd, trellis, …).
+    slow_encode: bool = False
 
 
-def _fill_preset_panel(parent: Frame, preset: VideoEncodePreset) -> None:
-    """Render container / video / audio detail blocks for one preset tab."""
+def _pack_scrollable_dialog_body(
+    dlg: Toplevel,
+    *,
+    padx: int = 14,
+    pady: int = 12,
+    min_width: int = 480,
+    max_height_frac: float = 0.78,
+) -> tuple[Frame, Frame, Callable[[], None]]:
+    """Build a vertically scrollable body; return (host, body, cleanup).
+
+    Caller should ``host.pack(fill=BOTH, expand=True)`` **after** packing any
+    pinned footer (Cancel/OK) with ``side=BOTTOM``, so actions stay visible.
+    *cleanup* must run on dialog close (unbinds global mousewheel).
+    """
+    host = Frame(dlg)
+
+    scroll_canvas = Canvas(host, highlightthickness=0, borderwidth=0)
+    vscroll = Scrollbar(host, orient="vertical", command=scroll_canvas.yview)
+    scroll_canvas.configure(yscrollcommand=vscroll.set)
+    vscroll.pack(side=RIGHT, fill=Y)
+    scroll_canvas.pack(side=LEFT, fill=BOTH, expand=True)
+
+    body = Frame(scroll_canvas, padx=padx, pady=pady)
+    body_id = scroll_canvas.create_window((0, 0), window=body, anchor="nw")
+
+    def _on_body_configure(_e=None) -> None:
+        scroll_canvas.configure(scrollregion=scroll_canvas.bbox("all"))
+
+    def _on_canvas_configure(e) -> None:
+        scroll_canvas.itemconfigure(body_id, width=max(1, int(e.width)))
+
+    body.bind("<Configure>", _on_body_configure)
+    scroll_canvas.bind("<Configure>", _on_canvas_configure)
+
+    def _on_mousewheel(event) -> None:
+        delta = int(getattr(event, "delta", 0) or 0)
+        if delta:
+            scroll_canvas.yview_scroll(-1 if delta > 0 else 1, "units")
+            return
+        # X11 Button-4/5
+        num = int(getattr(event, "num", 0) or 0)
+        if num == 4:
+            scroll_canvas.yview_scroll(-1, "units")
+        elif num == 5:
+            scroll_canvas.yview_scroll(1, "units")
+
+    def _bind_wheel(_e=None) -> None:
+        scroll_canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        scroll_canvas.bind_all("<Button-4>", _on_mousewheel)
+        scroll_canvas.bind_all("<Button-5>", _on_mousewheel)
+
+    def _unbind_wheel(_e=None) -> None:
+        try:
+            scroll_canvas.unbind_all("<MouseWheel>")
+            scroll_canvas.unbind_all("<Button-4>")
+            scroll_canvas.unbind_all("<Button-5>")
+        except Exception:
+            pass
+
+    scroll_canvas.bind("<Enter>", _bind_wheel)
+    scroll_canvas.bind("<Leave>", _unbind_wheel)
+    body.bind("<Enter>", _bind_wheel)
+    body.bind("<Leave>", _unbind_wheel)
+
+    # Cap initial height to a fraction of the screen so short displays scroll.
+    try:
+        sh = int(dlg.winfo_screenheight() or 800)
+        max_h = max(360, int(sh * max_height_frac))
+        dlg.minsize(min_width, 320)
+        host._scroll_max_height = max_h  # type: ignore[attr-defined]
+        host._scroll_min_width = min_width  # type: ignore[attr-defined]
+        host._scroll_canvas = scroll_canvas  # type: ignore[attr-defined]
+    except Exception:
+        pass
+
+    return host, body, _unbind_wheel
+
+
+def _fill_preset_panel(
+    parent: Frame,
+    preset: VideoEncodePreset,
+    *,
+    resolution: VideoResolution | None = None,
+) -> None:
+    """Render a compact recipe summary for one preset tab.
+
+    Resolution and audio quality live in controls below the notebook, so this
+    panel stays short (Send Video must fit short screens via outer scroll).
+    """
     for child in parent.winfo_children():
         child.destroy()
 
-    sections = (
-        ("Container", preset.container_detail or preset.container.upper()),
-        ("Video codec", preset.video_detail or preset.video_codec),
-        ("Audio codec", preset.audio_detail or preset.probe_audio_codec),
-    )
-    for title, text in sections:
-        Label(parent, text=title, font=("", 11, "bold"), anchor="w").pack(
-            fill="x", pady=(6, 0)
+    video_text = preset.video_detail or preset.video_codec
+    if resolution is not None and "pad to selected frame" in video_text:
+        video_text = video_text.replace(
+            "pad to selected frame",
+            f"{resolution.width}×{resolution.height} pad",
         )
-        Label(
-            parent,
-            text=text,
-            justify=LEFT,
-            wraplength=420,
-            anchor="w",
-        ).pack(fill="x", padx=(8, 0))
 
-    extra: list[str] = []
+    lines: list[str] = [
+        preset.container_detail or f"Container: {preset.container.upper()}",
+        video_text,
+    ]
     if preset.max_fps and preset.max_fps > 0:
-        extra.append(
+        lines.append(
             f"Frame rate: keep source if ≤ {preset.max_fps:g} fps, else cap"
         )
     else:
-        extra.append("Frame rate: keep source")
+        lines.append("Frame rate: keep source")
     if preset.qscale_v is not None:
-        extra.append(f"Video quality: qscale {preset.qscale_v}")
+        lines.append(f"Video quality: qscale {preset.qscale_v}")
     elif preset.video_bitrate:
-        extra.append(f"Video bitrate: {preset.video_bitrate}")
-    extra.append(
-        f"Audio: {preset.audio_bitrate} · {preset.audio_sample_rate} Hz · "
-        f"{preset.audio_channels} channel(s)"
-    )
+        lines.append(f"Video bitrate: {preset.video_bitrate}")
+    if preset.slow_encode:
+        lines.append("Encode effort: slow high-quality (more CPU)")
     if preset.broken:
-        extra.append("⚠ Broken — does not play reliably on this device")
+        lines.append("⚠ Broken — does not play reliably on this device")
     elif preset.experimental:
-        extra.append("⚠ Experimental — may not play on this device")
+        lines.append("⚠ Experimental — may not play on this device")
 
-    Label(parent, text="Parameters", font=("", 11, "bold"), anchor="w").pack(
-        fill="x", pady=(10, 0)
-    )
     Label(
         parent,
-        text="\n".join(extra),
+        text="\n".join(lines),
         justify=LEFT,
         wraplength=420,
         anchor="w",
-    ).pack(fill="x", padx=(8, 0), pady=(0, 6))
+    ).pack(fill="x", padx=(4, 0), pady=(4, 6))
+
+
+def _pack_video_audio_encode_picker(
+    parent,
+    *,
+    initial: AudioEncodeSettings,
+    allowed_send_formats: frozenset[str] | None,
+    list_height: int = 4,
+) -> tuple[Callable[[], AudioEncodeSettings], Callable[[frozenset[str] | None, AudioEncodeSettings | None], None], Callable[[bool], None]]:
+    """Always-on format + quality ladder (music/podcast presets).
+
+    Returns ``(get_settings, reconfigure, set_enabled)``.
+    *reconfigure(allowed, settings=None)* refreshes the format list when the
+    recipe tab changes; optional *settings* selects a matching preset.
+    """
+    controls = Frame(parent)
+    controls.pack(fill="x", pady=(0, 4))
+
+    fmt_row = Frame(controls)
+    fmt_row.pack(fill="x", pady=(0, 4))
+    Label(fmt_row, text="Audio format:").pack(side=LEFT)
+
+    state: dict = {
+        "allowed": formats_allowed(allowed_send_formats),
+        "preset_ids": [],
+        "initial": initial,
+    }
+    fmt_keys = list(state["allowed"])
+    fmt_labels = [format_display_name(f) for f in fmt_keys]
+    label_to_key = dict(zip(fmt_labels, fmt_keys))
+    key_to_label = dict(zip(fmt_keys, fmt_labels))
+    ui_fmt = initial.normalized_format()
+    if ui_fmt not in fmt_keys:
+        ui_fmt = fmt_keys[0] if fmt_keys else "mp3"
+    fmt_var = StringVar(
+        value=key_to_label.get(ui_fmt, fmt_labels[0] if fmt_labels else "MP3")
+    )
+    fmt_combo = ttk.Combobox(
+        fmt_row,
+        textvariable=fmt_var,
+        values=fmt_labels,
+        state="readonly",
+        width=16,
+    )
+    fmt_combo.pack(side=LEFT, padx=(8, 0))
+
+    Label(controls, text="Audio quality:", anchor="w").pack(fill="x")
+    preset_frame = Frame(controls)
+    preset_frame.pack(fill="x", pady=(2, 0))
+    preset_scroll = Scrollbar(preset_frame)
+    preset_scroll.pack(side=RIGHT, fill=Y)
+    preset_list = Listbox(
+        preset_frame,
+        height=list_height,
+        exportselection=False,
+        yscrollcommand=preset_scroll.set,
+        width=52,
+    )
+    preset_list.pack(side=LEFT, fill="x", expand=True)
+    preset_scroll.config(command=preset_list.yview)
+
+    def current_fmt_key() -> str:
+        lab = str(fmt_var.get() or "")
+        keys = list(state["allowed"])
+        return label_to_key.get(lab, keys[0] if keys else "mp3")
+
+    def refill_presets(*, select_id: str | None = None) -> None:
+        preset_list.delete(0, END)
+        state["preset_ids"] = []
+        fmt = current_fmt_key()
+        ladder = presets_for_format(fmt)
+        want = select_id
+        if want and not any(p.id == want for p in ladder):
+            want = None
+        chosen_idx = 0
+        init = state["initial"]
+        for i, p in enumerate(ladder):
+            preset_list.insert(END, p.display_name)
+            state["preset_ids"].append(p.id)
+            if want and p.id == want:
+                chosen_idx = i
+            elif not want and p.id == init.preset_id:
+                chosen_idx = i
+        if state["preset_ids"]:
+            preset_list.selection_clear(0, END)
+            preset_list.selection_set(chosen_idx)
+            preset_list.see(chosen_idx)
+
+    def get_settings() -> AudioEncodeSettings:
+        sel = preset_list.curselection()
+        ids = state["preset_ids"]
+        allowed = frozenset(state["allowed"]) if state["allowed"] else None
+        if sel and ids:
+            pid = ids[int(sel[0])]
+            preset = get_preset(pid)
+            if preset is not None:
+                return resolve_settings(
+                    settings=preset.settings,
+                    allowed_formats=allowed,
+                )
+        return resolve_settings(
+            settings=state["initial"],
+            send_format=current_fmt_key(),
+            allowed_formats=allowed,
+        )
+
+    def reconfigure(
+        allowed: frozenset[str] | None,
+        settings: AudioEncodeSettings | None = None,
+    ) -> None:
+        nonlocal label_to_key, key_to_label
+        state["allowed"] = formats_allowed(allowed)
+        if settings is not None:
+            state["initial"] = resolve_settings(
+                settings=settings, allowed_formats=allowed
+            )
+        keys = list(state["allowed"])
+        labels = [format_display_name(f) for f in keys]
+        label_to_key = dict(zip(labels, keys))
+        key_to_label = dict(zip(keys, labels))
+        fmt_combo.configure(values=labels)
+        s = state["initial"]
+        fmt = s.normalized_format()
+        if fmt not in keys:
+            fmt = keys[0] if keys else "mp3"
+        fmt_var.set(key_to_label.get(fmt, labels[0] if labels else "MP3"))
+        refill_presets(select_id=s.preset_id)
+
+    def set_enabled(on: bool) -> None:
+        state_s = "readonly" if on else DISABLED
+        fmt_combo.configure(state=state_s)
+        preset_list.configure(state=NORMAL if on else DISABLED)
+
+    def on_fmt_change(_e=None) -> None:
+        refill_presets()
+
+    fmt_combo.bind("<<ComboboxSelected>>", on_fmt_change)
+    refill_presets(select_id=initial.preset_id)
+    return get_settings, reconfigure, set_enabled
+
+
+def _pack_video_quality_controls(
+    parent,
+    *,
+    initial_qscale: int | None,
+    initial_slow: bool,
+    supports_qscale: bool = True,
+) -> tuple[
+    Callable[[], tuple[int | None, bool]],
+    Callable[[bool], None],
+    Callable[[bool], None],
+]:
+    """Pack mpeg4 qscale + slow-encode controls.
+
+    Returns ``(get_quality, set_enabled, set_supports_qscale)``.
+    *get_quality* → ``(qscale_v | None, slow_encode)``.
+    """
+    frame = Frame(parent)
+    frame.pack(fill="x", pady=(6, 2))
+    Label(
+        frame,
+        text="Video quality",
+        font=("", 11, "bold"),
+        anchor="w",
+    ).pack(fill="x", pady=(0, 2))
+    Label(
+        frame,
+        text=(
+            "Lower qscale = higher quality (and larger files). "
+            "Slow encode spends more CPU — especially useful at QQVGA/QVGA."
+        ),
+        justify=LEFT,
+        wraplength=440,
+        **secondary_label_kwargs(),
+    ).pack(anchor="w", pady=(0, 4))
+
+    seed_q = clamp_video_qscale(initial_qscale) or DEFAULT_VIDEO_QSCALE
+    q_labels = [qscale_choice_label(q) for q in VIDEO_QSCALE_CHOICES]
+    q_label_to_val = dict(zip(q_labels, VIDEO_QSCALE_CHOICES))
+    q_val_to_label = dict(zip(VIDEO_QSCALE_CHOICES, q_labels))
+    if seed_q not in q_val_to_label:
+        custom = qscale_choice_label(seed_q)
+        q_labels = list(q_labels) + [custom]
+        q_label_to_val[custom] = seed_q
+        q_val_to_label[seed_q] = custom
+
+    row = Frame(frame)
+    row.pack(fill="x", pady=(0, 2))
+    Label(row, text="qscale:").pack(side=LEFT)
+    q_var = StringVar(value=q_val_to_label.get(seed_q, q_labels[0]))
+    q_combo = ttk.Combobox(
+        row,
+        textvariable=q_var,
+        values=q_labels,
+        state="readonly",
+        width=40,
+    )
+    q_combo.pack(side=LEFT, padx=(8, 0))
+
+    slow_var = BooleanVar(value=bool(initial_slow))
+    slow_cb = Checkbutton(
+        frame,
+        text="Slow high-quality encode (more CPU)",
+        variable=slow_var,
+        anchor="w",
+        justify=LEFT,
+    )
+    slow_cb.pack(fill="x", pady=(4, 0))
+
+    note = Label(
+        frame,
+        text=(
+            "qscale applies to mpeg4/XviD recipes. "
+            "Slow encode adds mbd=rd / trellis (mpeg4 only)."
+        ),
+        justify=LEFT,
+        wraplength=440,
+        **secondary_label_kwargs(),
+    )
+    note.pack(anchor="w", pady=(2, 0))
+
+    # Track whether the parent currently allows interaction.
+    enabled = {"on": True, "qscale_ok": bool(supports_qscale)}
+
+    def _refresh_states() -> None:
+        on = bool(enabled["on"])
+        q_ok = bool(enabled["qscale_ok"])
+        try:
+            q_combo.configure(
+                state=("readonly" if on and q_ok else DISABLED)
+            )
+        except Exception:
+            pass
+        try:
+            slow_cb.configure(state=("normal" if on else DISABLED))
+        except Exception:
+            pass
+        note.configure(
+            text=(
+                "qscale applies to mpeg4/XviD recipes. "
+                "Slow encode adds mbd=rd / trellis (mpeg4 only)."
+                if q_ok
+                else (
+                    "This recipe uses bitrate (not qscale). "
+                    "Slow flags apply only to mpeg4 codecs."
+                )
+            )
+        )
+
+    def get_quality() -> tuple[int | None, bool]:
+        q = q_label_to_val.get(str(q_var.get() or ""))
+        if q is None:
+            q = clamp_video_qscale(seed_q)
+        return clamp_video_qscale(q), bool(slow_var.get())
+
+    def set_enabled(on: bool) -> None:
+        enabled["on"] = bool(on)
+        _refresh_states()
+
+    def set_supports_qscale(ok: bool) -> None:
+        enabled["qscale_ok"] = bool(ok)
+        _refresh_states()
+
+    _refresh_states()
+    return get_quality, set_enabled, set_supports_qscale
+
+
+def _pack_video_encode_override_section(
+    parent,
+    *,
+    title: str,
+    blurb: str,
+    use_override: bool,
+    initial: PodcastVideoEncodeSettings | None,
+    video_options: DeviceVideoOptions | None,
+    include_broken_presets: bool = False,
+    checkbox_text: str = "Use custom video encode",
+    list_height: int = 4,
+) -> tuple[BooleanVar, Callable[[], PodcastVideoEncodeSettings | None]]:
+    """Compact recipe + resolution + quality + video-audio picker with enable checkbox.
+
+    Returns ``(override_var, get_settings)``. When override is off,
+    ``get_settings()`` returns ``None``. When *video_options* is missing,
+    the section shows a short note and get_settings always returns ``None``.
+    """
+    if (title or "").strip():
+        Label(
+            parent,
+            text=title,
+            font=("", 11, "bold"),
+            anchor="w",
+        ).pack(fill="x", pady=(0, 4))
+    if (blurb or "").strip():
+        Label(
+            parent,
+            text=blurb,
+            justify=LEFT,
+            wraplength=440,
+            **secondary_label_kwargs(),
+        ).pack(anchor="w", pady=(0, 6))
+
+    override_var = BooleanVar(value=bool(use_override))
+    Checkbutton(
+        parent,
+        text=checkbox_text,
+        variable=override_var,
+        anchor="w",
+    ).pack(fill="x", pady=(0, 4))
+
+    controls = Frame(parent)
+    controls.pack(fill="x", pady=(0, 4))
+
+    if video_options is None:
+        Label(
+            controls,
+            text="No device-specific video recipes for this player.",
+            justify=LEFT,
+            wraplength=440,
+            **secondary_label_kwargs(),
+        ).pack(anchor="w")
+
+        def _none() -> PodcastVideoEncodeSettings | None:
+            return None
+
+        override_var.trace_add("write", lambda *_a: None)
+        return override_var, _none
+
+    visible = video_options.visible_presets(
+        include_broken=bool(include_broken_presets)
+    )
+    if not visible:
+        visible = video_options.presets
+    default_preset = video_options.default_preset()
+    if default_preset not in visible and visible:
+        default_preset = visible[0]
+
+    init = initial
+    seed_preset = default_preset
+    if init is not None and init.preset_id:
+        found = video_options.preset_by_id(init.preset_id)
+        if found is not None:
+            seed_preset = found
+
+    # Recipe combobox
+    recipe_row = Frame(controls)
+    recipe_row.pack(fill="x", pady=(0, 4))
+    Label(recipe_row, text="Recipe:").pack(side=LEFT)
+    recipe_ids = [p.id for p in visible]
+    recipe_labels = [p.tab_label or p.display_name for p in visible]
+    recipe_label_to_id = dict(zip(recipe_labels, recipe_ids))
+    recipe_id_to_label = dict(zip(recipe_ids, recipe_labels))
+    seed_recipe_label = recipe_id_to_label.get(
+        seed_preset.id, recipe_labels[0] if recipe_labels else ""
+    )
+    recipe_var = StringVar(value=seed_recipe_label)
+    recipe_combo = ttk.Combobox(
+        recipe_row,
+        textvariable=recipe_var,
+        values=recipe_labels,
+        state="readonly",
+        width=36,
+    )
+    recipe_combo.pack(side=LEFT, padx=(8, 0))
+
+    # Resolution combobox
+    resolutions = video_options.visible_resolutions()
+    res_ids = [r.id for r in resolutions]
+    res_labels = [r.summary_line() for r in resolutions]
+    res_label_to_id = dict(zip(res_labels, res_ids))
+    res_id_to_label = dict(zip(res_ids, res_labels))
+    seed_res = video_options.default_resolution()
+    if init is not None and init.resolution_id:
+        picked = video_options.resolution_by_id(init.resolution_id)
+        if picked is not None:
+            seed_res = picked
+    res_var = StringVar(
+        value=(
+            res_id_to_label.get(seed_res.id, res_labels[0])
+            if seed_res is not None and res_labels
+            else ""
+        )
+    )
+    res_combo: ttk.Combobox | None = None
+    if resolutions:
+        Label(controls, text="Resolution:", anchor="w").pack(fill="x", pady=(4, 2))
+        res_combo = ttk.Combobox(
+            controls,
+            textvariable=res_var,
+            values=res_labels,
+            state="readonly",
+            width=48,
+        )
+        res_combo.pack(fill="x", pady=(0, 4))
+
+    # Video quality (qscale + slow encode)
+    seed_q = (
+        clamp_video_qscale(init.qscale_v)
+        if init is not None
+        else None
+    )
+    if seed_q is None:
+        seed_q = clamp_video_qscale(seed_preset.qscale_v) or DEFAULT_VIDEO_QSCALE
+    seed_slow = bool(init.slow_encode) if init is not None and init.slow_encode else False
+    quality_get, quality_set_enabled, quality_set_supports = (
+        _pack_video_quality_controls(
+            controls,
+            initial_qscale=seed_q,
+            initial_slow=seed_slow,
+            supports_qscale=preset_supports_qscale(seed_preset),
+        )
+    )
+
+    # Audio ladder
+    if init is not None and init.audio_encode is not None:
+        audio_initial = resolve_settings(
+            settings=init.audio_encode,
+            allowed_formats=audio_formats_for_video_preset(seed_preset),
+        )
+    else:
+        audio_initial = default_video_audio_settings(seed_preset)
+    Label(
+        controls,
+        text="Video audio",
+        font=("", 11, "bold"),
+        anchor="w",
+    ).pack(fill="x", pady=(6, 2))
+    audio_get, audio_reconfigure, audio_set_enabled = (
+        _pack_video_audio_encode_picker(
+            controls,
+            initial=audio_initial,
+            allowed_send_formats=audio_formats_for_video_preset(seed_preset),
+            list_height=list_height,
+        )
+    )
+
+    def _selected_preset() -> VideoEncodePreset:
+        rid = recipe_label_to_id.get(str(recipe_var.get() or ""))
+        if rid:
+            found = video_options.preset_by_id(rid)
+            if found is not None:
+                return found
+        return seed_preset
+
+    def _on_recipe_change(_e=None) -> None:
+        preset = _selected_preset()
+        allowed = audio_formats_for_video_preset(preset)
+        cur = audio_get()
+        if cur.normalized_format() in allowed:
+            audio_reconfigure(allowed, cur)
+        else:
+            audio_reconfigure(allowed, default_video_audio_settings(preset))
+        quality_set_supports(preset_supports_qscale(preset))
+
+    recipe_combo.bind("<<ComboboxSelected>>", _on_recipe_change)
+
+    def get_settings() -> PodcastVideoEncodeSettings | None:
+        if not bool(override_var.get()):
+            return None
+        preset = _selected_preset()
+        res_id = None
+        if resolutions:
+            res_id = res_label_to_id.get(str(res_var.get() or ""))
+            if not res_id and seed_res is not None:
+                res_id = seed_res.id
+        qscale, slow = quality_get()
+        return PodcastVideoEncodeSettings(
+            preset_id=preset.id,
+            resolution_id=res_id,
+            audio_encode=audio_get(),
+            qscale_v=qscale,
+            slow_encode=slow,
+        )
+
+    def set_controls_state() -> None:
+        on = bool(override_var.get())
+        recipe_combo.configure(state="readonly" if on else DISABLED)
+        if res_combo is not None:
+            res_combo.configure(state="readonly" if on else DISABLED)
+        quality_set_enabled(on)
+        audio_set_enabled(on)
+
+    override_var.trace_add("write", lambda *_a: set_controls_state())
+    set_controls_state()
+    return override_var, get_settings
 
 
 def ask_video_destination(
@@ -1367,6 +1946,13 @@ def ask_video_destination(
     tv_folder_id: int | None = None,
     video_folder_name: str = "Video",
     tv_folder_name: str = "TV",
+    initial_resolution_id: str | None = None,
+    initial_audio_encode: AudioEncodeSettings | None = None,
+    initial_qscale_v: int | None = None,
+    initial_slow_encode: bool = False,
+    dialog_title: str = "Send Video",
+    confirm_button: str = "Send",
+    lead_in: str = "Send to device:",
 ) -> SendVideoDialogResult | None:
     """Ask Video/TV parent and optional device encode preset. None if cancelled.
 
@@ -1376,6 +1962,11 @@ def ask_video_destination(
 
     *video_folder_id* / *tv_folder_id* come from a live folder-name resolution
     when available; defaults fall back to legacy Vision:M ids (120 / 124).
+
+    *initial_resolution_id* / *initial_audio_encode* / quality args restore last
+    Send Video choices from Config when present.
+
+    *dialog_title* / *confirm_button* customize the window for Stage vs Send.
     """
     vid = (
         int(video_folder_id)
@@ -1393,17 +1984,23 @@ def ask_video_destination(
     )
 
     dlg = Toplevel(parent)
-    dlg.title("Send Video")
+    dlg.title((dialog_title or "Send Video").strip() or "Send Video")
     dlg.transient(parent)
-    dlg.resizable(False, False)
+    dlg.resizable(True, True)
 
-    body = Frame(dlg, padx=14, pady=12)
-    body.pack(fill=BOTH, expand=True)
+    # Footer first (side=BOTTOM), then scroll host expands into remaining space.
+    # Frame constructor padx/pady must be single distances (not pack tuples).
+    btn_row = Frame(dlg, padx=14, pady=8)
+    btn_row.pack(fill="x", side="bottom", pady=(0, 4))
+
+    scroll_host, body, cleanup_scroll = _pack_scrollable_dialog_body(dlg)
+    scroll_host.pack(fill=BOTH, expand=True)
 
     label = filename.strip() or "selected file"
+    head = (lead_in or "Send to device:").strip() or "Send to device:"
     Label(
         body,
-        text=f"Send to device:\n\n{label}",
+        text=f"{head}\n\n{label}",
         justify=LEFT,
         wraplength=440,
     ).pack(anchor="w", pady=(0, 10))
@@ -1437,10 +2034,12 @@ def ask_video_destination(
     notebook: ttk.Notebook | None = None
     preset_by_tab: dict[int, VideoEncodePreset] = {}
     default_preset: VideoEncodePreset | None = None
+    resolutions: tuple[VideoResolution, ...] = ()
     if has_options and video_options is not None:
         default_preset = video_options.default_preset()
         if default_preset not in visible:
             default_preset = visible[0]
+        resolutions = video_options.visible_resolutions()
 
     def _selected_preset() -> VideoEncodePreset | None:
         if notebook is None or not has_options:
@@ -1450,6 +2049,45 @@ def ask_video_destination(
         except Exception:
             return default_preset
         return preset_by_tab.get(idx, default_preset)
+
+    # Resolution combobox state
+    res_ids: list[str] = [r.id for r in resolutions]
+    res_labels = [r.summary_line() for r in resolutions]
+    res_label_to_id = dict(zip(res_labels, res_ids))
+    res_id_to_label = dict(zip(res_ids, res_labels))
+    initial_res: VideoResolution | None = None
+    if video_options is not None and resolutions:
+        initial_res = video_options.resolution_by_id(initial_resolution_id)
+        if initial_res is None:
+            initial_res = video_options.default_resolution()
+    res_var = StringVar(
+        value=(
+            res_id_to_label.get(initial_res.id, res_labels[0])
+            if initial_res is not None and res_labels
+            else ""
+        )
+    )
+    res_combo: ttk.Combobox | None = None
+
+    def _selected_resolution() -> VideoResolution | None:
+        if not resolutions:
+            return None
+        rid = res_label_to_id.get(str(res_var.get() or ""))
+        if video_options is not None and rid:
+            found = video_options.resolution_by_id(rid)
+            if found is not None:
+                return found
+        return initial_res or (resolutions[0] if resolutions else None)
+
+    audio_get: Callable[[], AudioEncodeSettings] | None = None
+    audio_reconfigure: Callable[
+        [frozenset[str] | None, AudioEncodeSettings | None], None
+    ] | None = None
+    audio_set_enabled: Callable[[bool], None] | None = None
+    audio_frame: Frame | None = None
+    quality_get: Callable[[], tuple[int | None, bool]] | None = None
+    quality_set_enabled: Callable[[bool], None] | None = None
+    quality_set_supports: Callable[[bool], None] | None = None
 
     def _sync_high_fps_for_preset(preset: VideoEncodePreset | None) -> None:
         if high_fps_cb is None:
@@ -1473,8 +2111,31 @@ def ask_video_destination(
             except Exception:
                 pass
 
-    def _on_tab_changed(_event=None) -> None:
-        _sync_high_fps_for_preset(_selected_preset())
+    def _refresh_preset_panels() -> None:
+        res = _selected_resolution()
+        if notebook is None:
+            return
+        for i, preset in preset_by_tab.items():
+            try:
+                tab = notebook.nametowidget(notebook.tabs()[i])
+            except Exception:
+                continue
+            _fill_preset_panel(tab, preset, resolution=res)
+
+    def _on_recipe_or_res_changed(_event=None) -> None:
+        preset = _selected_preset()
+        _sync_high_fps_for_preset(preset)
+        _refresh_preset_panels()
+        if quality_set_supports is not None and preset is not None:
+            quality_set_supports(preset_supports_qscale(preset))
+        if audio_reconfigure is not None and preset is not None:
+            allowed = audio_formats_for_video_preset(preset)
+            # Keep current picker choice when still valid; else recipe default.
+            cur = audio_get() if audio_get is not None else None
+            if cur is not None and cur.normalized_format() in allowed:
+                audio_reconfigure(allowed, cur)
+            else:
+                audio_reconfigure(allowed, default_video_audio_settings(preset))
 
     if has_options and video_options is not None:
         Label(
@@ -1495,26 +2156,94 @@ def ask_video_destination(
         Label(
             body,
             text=(
-                "Each tab is a mutually exclusive format recipe "
-                "(container + video + audio). Default is "
-                "AVI · XviD / MPEG-4 SP · MP3."
+                "Each tab is a container + video codec recipe. "
+                "Resolution, video quality (qscale / slow encode), and "
+                "audio are chosen below (audio ladder matches music/podcasts)."
             ),
             justify=LEFT,
             wraplength=440,
         ).pack(anchor="w", pady=(0, 6))
 
         notebook = ttk.Notebook(body)
-        notebook.pack(fill=BOTH, expand=True, pady=(0, 4))
+        # Fixed height so the dialog scrolls as a whole instead of the
+        # recipe notebook claiming unbounded vertical space.
+        notebook.pack(fill="x", expand=False, pady=(0, 4))
 
         for i, preset in enumerate(visible):
             tab = Frame(notebook, padx=10, pady=6)
             notebook.add(tab, text=preset.tab_label)
-            _fill_preset_panel(tab, preset)
+            _fill_preset_panel(tab, preset, resolution=initial_res)
             preset_by_tab[i] = preset
             if default_preset is not None and preset.id == default_preset.id:
                 notebook.select(i)
 
-        notebook.bind("<<NotebookTabChanged>>", _on_tab_changed)
+        notebook.bind("<<NotebookTabChanged>>", _on_recipe_or_res_changed)
+
+        if resolutions:
+            Label(body, text="Resolution:", anchor="w").pack(
+                fill="x", pady=(8, 2)
+            )
+            res_combo = ttk.Combobox(
+                body,
+                textvariable=res_var,
+                values=res_labels,
+                state="readonly",
+                width=48,
+            )
+            res_combo.pack(fill="x", pady=(0, 4))
+            res_combo.bind("<<ComboboxSelected>>", _on_recipe_or_res_changed)
+
+        # Video quality (qscale + slow encode) — especially useful at low res.
+        seed_preset = default_preset or visible[0]
+        seed_q = clamp_video_qscale(initial_qscale_v)
+        if seed_q is None:
+            seed_q = (
+                clamp_video_qscale(seed_preset.qscale_v) or DEFAULT_VIDEO_QSCALE
+            )
+        quality_get, quality_set_enabled, quality_set_supports = (
+            _pack_video_quality_controls(
+                body,
+                initial_qscale=seed_q,
+                initial_slow=bool(initial_slow_encode),
+                supports_qscale=preset_supports_qscale(seed_preset),
+            )
+        )
+
+        # Audio ladder (recipe-clamped).
+        if initial_audio_encode is not None:
+            audio_initial = resolve_settings(
+                settings=initial_audio_encode,
+                allowed_formats=audio_formats_for_video_preset(seed_preset),
+            )
+        else:
+            audio_initial = default_video_audio_settings(seed_preset)
+        audio_frame = Frame(body)
+        audio_frame.pack(fill="x", pady=(6, 2))
+        Label(
+            audio_frame,
+            text="Audio encode",
+            font=("", 11, "bold"),
+            anchor="w",
+        ).pack(fill="x", pady=(0, 2))
+        Label(
+            audio_frame,
+            text=(
+                "Same presets as Config music encode, limited to formats "
+                "this recipe can mux (AVI → MP3; WMV → WMA)."
+            ),
+            justify=LEFT,
+            wraplength=440,
+            **secondary_label_kwargs(),
+        ).pack(anchor="w", pady=(0, 4))
+        audio_get, audio_reconfigure, audio_set_enabled = (
+            _pack_video_audio_encode_picker(
+                audio_frame,
+                initial=audio_initial,
+                allowed_send_formats=audio_formats_for_video_preset(
+                    seed_preset
+                ),
+            )
+        )
 
         high_fps_cb = Checkbutton(
             body,
@@ -1542,11 +2271,20 @@ def ask_video_destination(
                         notebook.tab(i, state="normal" if on else "disabled")
             except Exception:
                 pass
+            if res_combo is not None:
+                try:
+                    res_combo.configure(state="readonly" if on else DISABLED)
+                except Exception:
+                    pass
+            if quality_set_enabled is not None:
+                quality_set_enabled(on)
+            if audio_set_enabled is not None:
+                audio_set_enabled(on)
             _sync_high_fps_for_preset(_selected_preset() if on else None)
 
         encode_var.trace_add("write", _sync_encode_state)
         _sync_encode_state()
-        _on_tab_changed()
+        _on_recipe_or_res_changed()
     else:
         Label(
             body,
@@ -1566,6 +2304,14 @@ def ask_video_destination(
         do_encode = bool(encode_var.get()) and has_options
         preset = _selected_preset() if do_encode else None
         cap = float(preset.max_fps or 0) if preset is not None else 0.0
+        res = _selected_resolution() if do_encode else None
+        audio = None
+        if do_encode and audio_get is not None:
+            audio = audio_get()
+        qscale: int | None = None
+        slow = False
+        if do_encode and quality_get is not None:
+            qscale, slow = quality_get()
         result[0] = SendVideoDialogResult(
             parent_id=int(parent_id),
             encode_for_device=do_encode,
@@ -1573,29 +2319,52 @@ def ask_video_destination(
             ignore_max_fps=(
                 do_encode and cap > 0 and bool(ignore_max_fps_var.get())
             ),
+            resolution_id=res.id if res is not None else None,
+            audio_encode=audio,
+            qscale_v=qscale,
+            slow_encode=bool(slow),
         )
+        cleanup_scroll()
         dlg.destroy()
 
     def on_cancel() -> None:
         result[0] = None
+        cleanup_scroll()
         dlg.destroy()
 
-    btn_row = Frame(body)
-    btn_row.pack(fill="x", pady=(10, 0))
     Button(btn_row, text="Cancel", width=10, command=on_cancel).pack(
         side=RIGHT, padx=(6, 0)
     )
-    Button(btn_row, text="Send", width=10, command=on_send).pack(side=RIGHT)
+    ok_label = (confirm_button or "Send").strip() or "Send"
+    Button(btn_row, text=ok_label, width=max(10, len(ok_label) + 1), command=on_send).pack(
+        side=RIGHT
+    )
 
     dlg.protocol("WM_DELETE_WINDOW", on_cancel)
     dlg.grab_set()
     try:
-        px = parent.winfo_rootx() + max(0, (parent.winfo_width() - 480) // 2)
-        py = parent.winfo_rooty() + max(0, (parent.winfo_height() - 420) // 3)
-        dlg.geometry(f"+{px}+{py}")
+        dlg.update_idletasks()
+        min_w = int(getattr(scroll_host, "_scroll_min_width", 480) or 480)
+        max_h = int(getattr(scroll_host, "_scroll_max_height", 640) or 640)
+        # Preferred size: content width, viewport height capped for short screens.
+        req_w = max(min_w, int(body.winfo_reqwidth()) + 36)
+        req_h = (
+            int(body.winfo_reqheight())
+            + int(btn_row.winfo_reqheight())
+            + 24
+        )
+        view_h = min(req_h, max_h)
+        px = parent.winfo_rootx() + max(0, (parent.winfo_width() - req_w) // 2)
+        py = parent.winfo_rooty() + max(0, (parent.winfo_height() - view_h) // 3)
+        dlg.geometry(f"{req_w}x{view_h}+{px}+{py}")
+        # Ensure scrollregion is current after geometry settle.
+        scroll_canvas = getattr(scroll_host, "_scroll_canvas", None)
+        if scroll_canvas is not None:
+            scroll_canvas.configure(scrollregion=scroll_canvas.bbox("all"))
     except Exception:
         pass
     parent.wait_window(dlg)
+    cleanup_scroll()
     return result[0]
 
 
@@ -2338,6 +3107,9 @@ class PodcastSettingsResult:
     # When True, *podcast_audio_encode* overrides Config for podcast episodes.
     use_podcast_encode_override: bool = False
     podcast_audio_encode: AudioEncodeSettings | None = None
+    # When True, *podcast_video_encode* overrides device defaults for video eps.
+    use_podcast_video_encode_override: bool = False
+    podcast_video_encode: PodcastVideoEncodeSettings | None = None
     # Experimental: MTP track # from pub date (newest-first invert packing).
     podcast_tracknumber_as_date: bool = False
     # Experimental: prefix episode Title with YYYYMMDD.
@@ -2353,6 +3125,9 @@ class PodcastShowEncodeResult:
     audio_encode: AudioEncodeSettings | None = None
     # Encode-time tempo (1.0 = normal). Applied even when use_override is False.
     playback_speed: float = 1.0
+    # Per-show video encode override (independent of audio override).
+    use_video_override: bool = False
+    video_encode: PodcastVideoEncodeSettings | None = None
 
 
 @dataclass(frozen=True)
@@ -2544,13 +3319,17 @@ def show_podcast_settings_dialog(
     status_line: str = "",
     use_podcast_encode_override: bool = False,
     podcast_audio_encode: AudioEncodeSettings | None = None,
+    use_podcast_video_encode_override: bool = False,
+    podcast_video_encode: PodcastVideoEncodeSettings | None = None,
     podcast_tracknumber_as_date: bool = False,
     podcast_title_date_prefix: bool = False,
     global_audio_encode: AudioEncodeSettings | None = None,
     allowed_send_formats: frozenset[str] | None = None,
     profile_display_name: str | None = None,
+    video_options: DeviceVideoOptions | None = None,
+    include_broken_video_presets: bool = False,
 ) -> PodcastSettingsResult | None:
-    """Podcast schedule + default podcast encode. Save → result.
+    """Podcast schedule + default podcast audio/video encode. Save → result.
 
     Per-show encode is edited via the Podcasts tab show context menu.
     Audiobook encode is Config → Audiobook Encode…
@@ -2777,6 +3556,29 @@ def show_podcast_settings_dialog(
             wraplength=440, **secondary_label_kwargs(),
         ).pack(anchor="w", pady=(2, 0))
 
+    # ---- Podcast video encode (default for video episodes) ----
+    ttk.Separator(body, orient="horizontal").pack(fill="x", pady=(10, 10))
+    who = profile_display_name or "this device"
+    pod_video_override_var, pod_video_get_settings = (
+        _pack_video_encode_override_section(
+            body,
+            title="Podcast video encode",
+            blurb=(
+                f"Optional default for video podcast episodes on {who}. "
+                "Recipe, resolution, video quality (qscale / slow), and muxed "
+                "audio (same ladder as Send Video). When off, uses the device "
+                "profile defaults (e.g. AVI·XviD · QVGA). Per-show overrides: "
+                "show context → Encode Settings…"
+            ),
+            use_override=bool(use_podcast_video_encode_override),
+            initial=podcast_video_encode,
+            video_options=video_options,
+            include_broken_presets=bool(include_broken_video_presets),
+            checkbox_text="Use custom video encode for podcasts",
+            list_height=3,
+        )
+    )
+
     result: list[PodcastSettingsResult | None] = [None]
 
     def build_result(*, run_now: bool) -> PodcastSettingsResult | None:
@@ -2799,6 +3601,8 @@ def show_podcast_settings_dialog(
             return None
         use_pod = bool(pod_override_var.get())
         pod_settings = pod_get_settings() if use_pod else None
+        use_pod_video = bool(pod_video_override_var.get())
+        pod_video = pod_video_get_settings() if use_pod_video else None
         return PodcastSettingsResult(
             auto_enabled=bool(enabled_var.get()),
             schedule_days=tuple(normalize_schedule_days(chosen_days)),
@@ -2808,6 +3612,8 @@ def show_podcast_settings_dialog(
             run_full_sync_now=run_now,
             use_podcast_encode_override=use_pod,
             podcast_audio_encode=pod_settings,
+            use_podcast_video_encode_override=use_pod_video,
+            podcast_video_encode=pod_video,
             podcast_tracknumber_as_date=bool(track_date_var.get()),
             podcast_title_date_prefix=bool(title_date_var.get()),
         )
@@ -2963,12 +3769,20 @@ def show_podcast_show_encode_dialog(
     inherit_summary: str = "",
     allowed_send_formats: frozenset[str] | None = None,
     profile_display_name: str | None = None,
+    use_video_override: bool = False,
+    video_encode: PodcastVideoEncodeSettings | None = None,
+    video_inherit_summary: str = "",
+    video_options: DeviceVideoOptions | None = None,
+    include_broken_video_presets: bool = False,
 ) -> PodcastShowEncodeResult | None:
-    """Per-show encode override (Podcasts tab context menu). Save → result."""
+    """Per-show audio/video encode override (Podcasts tab context menu)."""
     from tkinter import DoubleVar
 
     title = (show_title or "Podcast").strip() or "Podcast"
     inherit = (inherit_summary or "").strip() or "podcast default / Config"
+    video_inherit = (
+        (video_inherit_summary or "").strip() or "podcast video default / device"
+    )
     speed0 = normalize_playback_speed(playback_speed)
     if use_override and audio_encode is not None:
         initial = resolve_settings(
@@ -2984,10 +3798,13 @@ def show_podcast_show_encode_dialog(
     dlg = Toplevel(parent)
     dlg.title(f"Encode — {title}")
     dlg.transient(parent)
-    dlg.resizable(False, False)
+    dlg.resizable(True, True)
 
-    body = Frame(dlg, padx=14, pady=12)
-    body.pack(fill=BOTH, expand=True)
+    btn_row = Frame(dlg, padx=14, pady=8)
+    btn_row.pack(fill="x", side="bottom")
+
+    scroll_host, body, cleanup_scroll = _pack_scrollable_dialog_body(dlg)
+    scroll_host.pack(fill=BOTH, expand=True)
 
     Label(
         body,
@@ -2998,23 +3815,23 @@ def show_podcast_show_encode_dialog(
     Label(
         body,
         text=(
-            "Optional encode recipe for this show only (e.g. talk shows "
-            "heavily compressed; music/RPG shows higher quality). When off, "
-            f"episodes use: {inherit}."
+            "Optional encode recipes for this show only. When audio override "
+            f"is off, episodes use: {inherit}."
         ),
         justify=LEFT,
-        wraplength=420, **secondary_label_kwargs(),
+        wraplength=420,
+        **secondary_label_kwargs(),
     ).pack(anchor="w", pady=(0, 8))
 
     override_var, get_settings = _pack_encode_override_section(
         body,
-        title="",
+        title="Audio encode",
         blurb="",
         use_override=bool(use_override),
         initial=initial,
         allowed_send_formats=allowed_send_formats,
-        checkbox_text="Use custom encode for this show",
-        list_height=5,
+        checkbox_text="Use custom audio encode for this show",
+        list_height=4,
     )
 
     # Playback speed (always available; applied at ffmpeg convert for this show).
@@ -3032,7 +3849,8 @@ def show_podcast_show_encode_dialog(
             f"({PLAYBACK_SPEED_MIN:g}×–{PLAYBACK_SPEED_MAX:g}×). 1.0× is normal."
         ),
         justify=LEFT,
-        wraplength=420, **secondary_label_kwargs(),
+        wraplength=420,
+        **secondary_label_kwargs(),
     ).pack(anchor="w", pady=(0, 4))
     speed_row = Frame(body)
     speed_row.pack(fill="x", pady=(0, 4))
@@ -3066,28 +3884,49 @@ def show_podcast_show_encode_dialog(
         who = profile_display_name or "this device"
         Label(
             body,
-            text=f"Formats limited by {who}: {names}.",
+            text=f"Audio formats limited by {who}: {names}.",
             justify=LEFT,
-            wraplength=420, **secondary_label_kwargs(),
+            wraplength=420,
+            **secondary_label_kwargs(),
         ).pack(anchor="w", pady=(4, 0))
+
+    ttk.Separator(body, orient="horizontal").pack(fill="x", pady=(12, 10))
+    video_override_var, video_get_settings = _pack_video_encode_override_section(
+        body,
+        title="Video encode",
+        blurb=(
+            "Optional recipe / resolution / quality (qscale / slow) / muxed "
+            f"audio for video episodes from this show. When off, uses: "
+            f"{video_inherit}."
+        ),
+        use_override=bool(use_video_override),
+        initial=video_encode,
+        video_options=video_options,
+        include_broken_presets=bool(include_broken_video_presets),
+        checkbox_text="Use custom video encode for this show",
+        list_height=3,
+    )
 
     result: list[PodcastShowEncodeResult | None] = [None]
 
     def on_save() -> None:
         use = bool(override_var.get())
+        use_video = bool(video_override_var.get())
         result[0] = PodcastShowEncodeResult(
             use_override=use,
             audio_encode=get_settings() if use else None,
             playback_speed=normalize_playback_speed(speed_var.get()),
+            use_video_override=use_video,
+            video_encode=video_get_settings() if use_video else None,
         )
+        cleanup_scroll()
         dlg.destroy()
 
     def on_cancel() -> None:
         result[0] = None
+        cleanup_scroll()
         dlg.destroy()
 
-    btn_row = Frame(body)
-    btn_row.pack(fill="x", pady=(12, 0))
     Button(btn_row, text="Cancel", width=10, command=on_cancel).pack(
         side=RIGHT, padx=(6, 0)
     )
@@ -3096,12 +3935,23 @@ def show_podcast_show_encode_dialog(
     dlg.protocol("WM_DELETE_WINDOW", on_cancel)
     dlg.grab_set()
     try:
-        px = parent.winfo_rootx() + max(0, (parent.winfo_width() - 460) // 2)
-        py = parent.winfo_rooty() + max(0, (parent.winfo_height() - 420) // 3)
-        dlg.geometry(f"+{px}+{py}")
+        dlg.update_idletasks()
+        min_w = int(getattr(scroll_host, "_scroll_min_width", 480) or 480)
+        max_h = int(getattr(scroll_host, "_scroll_max_height", 640) or 640)
+        req_w = max(min_w, int(body.winfo_reqwidth()) + 36)
+        req_h = (
+            int(body.winfo_reqheight())
+            + int(btn_row.winfo_reqheight())
+            + 24
+        )
+        view_h = min(req_h, max_h)
+        px = parent.winfo_rootx() + max(0, (parent.winfo_width() - req_w) // 2)
+        py = parent.winfo_rooty() + max(0, (parent.winfo_height() - view_h) // 3)
+        dlg.geometry(f"{req_w}x{view_h}+{px}+{py}")
     except Exception:
         pass
     parent.wait_window(dlg)
+    cleanup_scroll()
     return result[0]
 
 

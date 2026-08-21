@@ -132,6 +132,7 @@ MENU_SYNC_ENTIRE = "Sync Entire Library"
 MENU_SYNC_FOLDER = "Sync Folder…"
 MENU_SYNC_SELECTED = "Sync Selected Tracks"
 MENU_RESUME_SYNC = "Resume Sync"
+MENU_SYNC_STAGED_VIDEOS = "Sync Staged Videos…"
 MENU_CANCEL_JOB = "Cancel Current Job"
 MENU_PACKAGE_RETAIL = "Package Retail Demos… (experimental)"
 MENU_RESTORE_RETAIL = "Restore Retail Package… (experimental)"
@@ -195,6 +196,9 @@ CTX_SYNC_TRACK = "Sync this track"
 CTX_SYNC_ALBUM = "Sync Album"
 CTX_SYNC_ARTIST = "Sync all from Artist"
 CTX_SPECIAL_SYNC = "Special Sync…"
+# Video rows: label swaps to CTX_SYNC_STAGED when the selection is already staged.
+CTX_STAGE_VIDEO = "Stage for Sync…"
+CTX_SYNC_STAGED = "Sync Staged"
 CTX_PLAY_TRACK = "Play This Track"
 CTX_PLAY_TRACKS = "Play These Tracks"
 CTX_ADD_TO_PLAYLIST = "Add This Track to Playlist…"
@@ -1947,6 +1951,7 @@ class MainWindow:
         on_sync_folder,
         on_sync_selected=None,
         on_resume_sync=None,
+        on_sync_staged_videos=None,
         on_cancel_job=None,
         on_package_retail=None,
         on_restore_retail=None,
@@ -1956,6 +1961,7 @@ class MainWindow:
             "on_sync_folder": on_sync_folder,
             "on_sync_selected": on_sync_selected,
             "on_resume_sync": on_resume_sync,
+            "on_sync_staged_videos": on_sync_staged_videos,
             "on_cancel_job": on_cancel_job,
             "on_package_retail": on_package_retail,
             "on_restore_retail": on_restore_retail,
@@ -1972,6 +1978,7 @@ class MainWindow:
         on_sync_folder = cmds.get("on_sync_folder")
         on_sync_selected = cmds.get("on_sync_selected")
         on_resume_sync = cmds.get("on_resume_sync")
+        on_sync_staged = cmds.get("on_sync_staged_videos")
         on_cancel_job = cmds.get("on_cancel_job")
         on_package_retail = cmds.get("on_package_retail")
         on_restore_retail = cmds.get("on_restore_retail")
@@ -1990,6 +1997,12 @@ class MainWindow:
         if on_resume_sync is not None:
             self._menu_entryconfig(
                 self.menu_transfer, MENU_RESUME_SYNC, command=on_resume_sync
+            )
+        if on_sync_staged is not None:
+            self._menu_entryconfig(
+                self.menu_transfer,
+                MENU_SYNC_STAGED_VIDEOS,
+                command=on_sync_staged,
             )
         if on_package_retail is not None:
             self._menu_entryconfig(
@@ -2403,6 +2416,7 @@ class MainWindow:
         self.menu_track_ctx.add_command(label=CTX_SYNC_ARTIST)
         if exp:
             self.menu_track_ctx.add_command(label=CTX_SPECIAL_SYNC)
+        self.menu_track_ctx.add_command(label=CTX_STAGE_VIDEO, state=DISABLED)
         self.menu_track_ctx.add_separator()
         self.menu_track_ctx.add_command(label=CTX_PLAY_TRACK)
         self.menu_track_ctx.add_command(label=CTX_ADD_TO_PLAYLIST)
@@ -2489,6 +2503,8 @@ class MainWindow:
             (CTX_SYNC_TRACK, cmds.get("on_sync_track")),
             (CTX_SYNC_ALBUM, cmds.get("on_sync_album")),
             (CTX_SYNC_ARTIST, cmds.get("on_sync_artist")),
+            (CTX_STAGE_VIDEO, cmds.get("on_stage_video")),
+            (CTX_SYNC_STAGED, cmds.get("on_stage_video")),
             (CTX_PLAY_TRACK, cmds.get("on_play_track")),
             (CTX_ADD_TO_PLAYLIST, cmds.get("on_add_to_playlist")),
             (CTX_EXCLUDE_FILE, cmds.get("on_exclude_file")),
@@ -2647,6 +2663,7 @@ class MainWindow:
         self.menu_transfer.add_command(label=MENU_SYNC_FOLDER)
         self.menu_transfer.add_command(label=MENU_SYNC_SELECTED, state=DISABLED)
         self.menu_transfer.add_command(label=MENU_RESUME_SYNC, state=DISABLED)
+        self.menu_transfer.add_command(label=MENU_SYNC_STAGED_VIDEOS)
         if self._enable_experimental_tools:
             self.menu_transfer.add_separator()
             self.menu_transfer.add_command(label=MENU_PACKAGE_RETAIL)
@@ -2742,6 +2759,7 @@ class MainWindow:
         on_sync_selected=None,
         on_special_sync=None,
         on_special_sync_group=None,
+        on_stage_video=None,
         on_play_track=None,
         on_play_artist_group=None,
         on_play_album_group=None,
@@ -2761,6 +2779,7 @@ class MainWindow:
             "on_sync_selected": on_sync_selected,
             "on_special_sync": on_special_sync,
             "on_special_sync_group": on_special_sync_group,
+            "on_stage_video": on_stage_video,
             "on_play_track": on_play_track,
             "on_play_artist_group": on_play_artist_group,
             "on_play_album_group": on_play_album_group,

@@ -13,12 +13,16 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 from collections.abc import Callable
+from dataclasses import dataclass
 
 from ffmpeg import FFmpeg
 
+from mtpmanager.domain.audio_encode import AudioEncodeSettings
 from mtpmanager.domain.device_profile import VideoEncodePreset, VideoEncodeProfile
 from mtpmanager.infra.ffmpeg_exec import run_ffmpeg_builder
+from mtpmanager.infra.ffmpeg_transcode import build_ffmpeg_audio_options
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +120,112 @@ def _parse_rate(value: object) -> float:
         return float(text)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _parse_ratio_pair(value: object) -> tuple[int, int] | None:
+    """Parse ffprobe ratio strings like ``853:720`` or ``16/9`` → (num, den)."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or text.upper() in ("N/A", "NAN", "0:1", "0/1", "0:0", "0/0"):
+        return None
+    sep = ":" if ":" in text else ("/" if "/" in text else "")
+    if not sep:
+        try:
+            f = float(text)
+        except (TypeError, ValueError):
+            return None
+        if f <= 0:
+            return None
+        # Approximate as integer pair with den=1000 when given a bare float.
+        return max(1, int(round(f * 1000))), 1000
+    num_s, den_s = text.split(sep, 1)
+    try:
+        num, den = int(round(float(num_s))), int(round(float(den_s)))
+    except (TypeError, ValueError):
+        return None
+    if num <= 0 or den <= 0:
+        return None
+    return num, den
+
+
+@dataclass(frozen=True)
+class VideoAspectInfo:
+    """Storage size + sample/display aspect from ffprobe (pre-encode)."""
+
+    width: int
+    height: int
+    # Sample aspect ratio as reduced-ish integers (1:1 when unknown/square).
+    sar_num: int = 1
+    sar_den: int = 1
+    # Display aspect when ffprobe provides it; else derived from storage×SAR.
+    dar_num: int | None = None
+    dar_den: int | None = None
+
+    @property
+    def sar(self) -> float:
+        if self.sar_den <= 0:
+            return 1.0
+        return float(self.sar_num) / float(self.sar_den)
+
+    @property
+    def dar(self) -> float:
+        if self.dar_num and self.dar_den and self.dar_den > 0:
+            return float(self.dar_num) / float(self.dar_den)
+        if self.width <= 0 or self.height <= 0:
+            return 0.0
+        return (float(self.width) * self.sar) / float(self.height)
+
+    @property
+    def is_anamorphic(self) -> bool:
+        """True when sample aspect is meaningfully non-square."""
+        return abs(self.sar - 1.0) > 0.01
+
+    def summary(self) -> str:
+        sar_s = f"{self.sar_num}:{self.sar_den}"
+        if self.dar_num and self.dar_den:
+            dar_s = f"{self.dar_num}:{self.dar_den}"
+        else:
+            dar_s = f"{self.dar:.4g}"
+        kind = "anamorphic" if self.is_anamorphic else "square-pixel"
+        return (
+            f"{self.width}x{self.height} SAR={sar_s} DAR={dar_s} ({kind})"
+        )
+
+
+def probe_video_aspect(path: str) -> VideoAspectInfo | None:
+    """Return storage size + SAR/DAR for the first video stream, or None."""
+    data = probe_media(path)
+    vs, _ = _stream_types(data)
+    if not vs:
+        return None
+    v = vs[0]
+    try:
+        width = int(v.get("width") or 0)
+        height = int(v.get("height") or 0)
+    except (TypeError, ValueError):
+        return None
+    if width <= 0 or height <= 0:
+        return None
+
+    sar_pair = _parse_ratio_pair(v.get("sample_aspect_ratio"))
+    if sar_pair is None:
+        sar_num, sar_den = 1, 1
+    else:
+        sar_num, sar_den = sar_pair
+
+    dar_pair = _parse_ratio_pair(v.get("display_aspect_ratio"))
+    dar_num = dar_pair[0] if dar_pair else None
+    dar_den = dar_pair[1] if dar_pair else None
+
+    return VideoAspectInfo(
+        width=width,
+        height=height,
+        sar_num=sar_num,
+        sar_den=sar_den,
+        dar_num=dar_num,
+        dar_den=dar_den,
+    )
 
 
 def probe_video_fps(path: str) -> float:
@@ -224,35 +334,135 @@ def _vf_filter(
     profile: VideoEncodePreset | VideoEncodeProfile,
     *,
     force_fps: float | None = None,
+    aspect: VideoAspectInfo | None = None,
 ) -> str:
     """Build the video filter chain for device frame geometry.
 
-    Full picture (no crop), storage pixels:
+    Full picture (no crop), square-pixel wire file:
 
-    1. ``setsar=1`` — scale uses width×height only.
-    2. ``scale=W:H:force_original_aspect_ratio=decrease`` — shrink so the
-       whole frame fits inside the device box (both axes together).
-    3. ``pad=W:H`` — letter/pillar-box to the device resolution.
-    4. ``setsar=1`` — square-pixel wire file.
+    1. When *aspect* is anamorphic (SAR ≠ 1), expand storage pixels by the
+       probed SAR first (``iw*sar_num/sar_den``) so widescreen DVD/TV rips
+       keep correct DAR. Square-pixel sources skip this step.
+    2. ``setsar=1`` — subsequent fit uses storage width×height only.
+    3. ``scale=W:H:force_original_aspect_ratio=decrease`` — fit inside the
+       device box (both axes together).
+    4. ``pad=W:H`` — letter/pillar-box to the device resolution.
+    5. ``setsar=1`` — square-pixel wire file for picky DAPs.
 
-    Example: 720×480 → ~640×426, pad to 640×480.
+    Example (square): 720×480 → ~640×426, pad to 640×480.
+    Example (anamorphic 720×472 SAR 853:720): expand ≈853×472, then fit/pad.
 
     *force_fps*: when set (source above profile.max_fps), insert ``fps=…``.
     """
     w, h = int(profile.width), int(profile.height)
-    parts = [
-        "setsar=1",
-        (
-            f"scale={w}:{h}:force_original_aspect_ratio=decrease:"
-            f"force_divisible_by=2"
-        ),
-        f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=black",
-        "setsar=1",
-    ]
+    parts: list[str] = []
+
+    # Discover-and-choose: only expand when probe says non-square SAR.
+    if aspect is not None and aspect.is_anamorphic:
+        sn, sd = int(aspect.sar_num), int(aspect.sar_den)
+        # Bake probed ratio (not filtergraph `sar`) so metadata quirks cannot
+        # silently fall back to 1:1 mid-graph.
+        parts.append(
+            f"scale=trunc(iw*{sn}/{sd}/2)*2:trunc(ih/2)*2"
+        )
+
+    parts.extend(
+        [
+            "setsar=1",
+            (
+                f"scale={w}:{h}:force_original_aspect_ratio=decrease:"
+                f"force_divisible_by=2"
+            ),
+            f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=black",
+            "setsar=1",
+        ]
+    )
     if force_fps is not None and force_fps > 0:
         parts.append(f"fps={force_fps:g}")
     parts.append("format=yuv420p")
     return ",".join(parts)
+
+
+# Keys from build_ffmpeg_audio_options that must not enter a video mux
+# (they drop or remux only audio / strip video).
+_AUDIO_ONLY_OPT_KEYS = frozenset(
+    {
+        "vn",
+        "sn",
+        "dn",
+        "map",
+        "map_metadata",
+        "map_chapters",
+    }
+)
+
+
+def _audio_opts_for_video_mux(
+    settings: AudioEncodeSettings | None,
+    profile: VideoEncodePreset | VideoEncodeProfile,
+) -> dict:
+    """Audio encoder options for a video container (never -vn / audio-only map).
+
+    Device video expects explicit sample rate / channel count (match-skip and
+    ZEN playback). When the music ladder leaves those as “keep source”, fall
+    back to the effective preset’s audio_* fields.
+    """
+    if settings is not None:
+        raw = build_ffmpeg_audio_options(settings)
+        out: dict = {}
+        for key, val in raw.items():
+            if key in _AUDIO_ONLY_OPT_KEYS:
+                continue
+            # Normalize codec key used by python-ffmpeg builders.
+            if key in ("codec:a", "c:a"):
+                out["c:a"] = val
+                continue
+            out[key] = val
+        if "ar" not in out:
+            out["ar"] = str(int(profile.audio_sample_rate))
+        if "ac" not in out:
+            out["ac"] = str(int(profile.audio_channels))
+        return out
+    return {
+        "c:a": profile.audio_codec,
+        "b:a": profile.audio_bitrate,
+        "ac": str(int(profile.audio_channels)),
+        "ar": str(int(profile.audio_sample_rate)),
+    }
+
+
+def _mpeg4_slow_encode_opts() -> dict[str, str]:
+    """Extra ffmpeg flags for slower, higher-quality mpeg4 encodes.
+
+    Classic high-quality mpeg4 recipe: rate-distortion macroblock decisions,
+    quarter-pel + AIC, trellis quantization, and better comparison functions.
+    Meaningful at low resolutions where spending CPU improves clarity.
+    """
+    return {
+        "mbd": "rd",
+        "flags": "+mv4+aic",
+        "trellis": "2",
+        "cmp": "2",
+        "subcmp": "2",
+    }
+
+
+def _codec_supports_mpeg4_slow(profile: VideoEncodePreset | VideoEncodeProfile) -> bool:
+    codec = (profile.video_codec or "").strip().casefold()
+    return codec in ("mpeg4", "libxvid")
+
+
+def _append_video_rate_opts(
+    cmd: list[str], profile: VideoEncodePreset | VideoEncodeProfile
+) -> None:
+    """Append ``-qscale:v`` / ``-b:v`` and optional slow-encode flags to *cmd*."""
+    if profile.qscale_v is not None:
+        cmd += ["-qscale:v", str(int(profile.qscale_v))]
+    elif profile.video_bitrate:
+        cmd += ["-b:v", profile.video_bitrate]
+    if profile.slow_encode and _codec_supports_mpeg4_slow(profile):
+        for key, value in _mpeg4_slow_encode_opts().items():
+            cmd += [f"-{key}", value]
 
 
 def _build_output_options(
@@ -260,24 +470,25 @@ def _build_output_options(
     *,
     force_fps: float | None,
     container_ext: str,
+    audio_settings: AudioEncodeSettings | None = None,
+    aspect: VideoAspectInfo | None = None,
 ) -> dict:
     """ffmpeg output options for AVI/mpeg4 or WMV/WMA-style presets."""
     out: dict = {
         "map": ["0:v:0", "0:a:0?"],
         "c:v": profile.video_codec,
-        "vf": _vf_filter(profile, force_fps=force_fps),
-        "c:a": profile.audio_codec,
-        "b:a": profile.audio_bitrate,
-        "ac": str(int(profile.audio_channels)),
-        "ar": str(int(profile.audio_sample_rate)),
+        "vf": _vf_filter(profile, force_fps=force_fps, aspect=aspect),
         "f": container_ext if container_ext != "wmv" else "asf",
     }
+    out.update(_audio_opts_for_video_mux(audio_settings, profile))
     if profile.video_tag:
         out["vtag"] = profile.video_tag
     if profile.qscale_v is not None:
         out["qscale:v"] = str(int(profile.qscale_v))
     elif profile.video_bitrate:
         out["b:v"] = profile.video_bitrate
+    if profile.slow_encode and _codec_supports_mpeg4_slow(profile):
+        out.update(_mpeg4_slow_encode_opts())
     return out
 
 
@@ -289,11 +500,17 @@ def convert_video_for_profile(
     temp_dir: str | None = None,
     on_progress: ProgressCallback | None = None,
     ignore_max_fps: bool = False,
+    audio_settings: AudioEncodeSettings | None = None,
 ) -> str:
     """Re-encode *src_path* to the selected device video preset; return path.
 
     *ignore_max_fps*: when True, do not apply *profile.max_fps* (keep source
     rate even if above the device cap — experimental; may break playback).
+
+    *audio_settings*: when set, drives the audio encoder via the shared
+    ``AudioEncodeSettings`` ladder (same as music/podcasts). Video map is
+    preserved; audio-only flags from the audio builder are stripped.
+    When unset, uses *profile.audio_** fields (back-compat).
 
     *on_progress(done_sec, total_sec, message)* is optional (worker thread).
     Raises ``RuntimeError`` / ``OSError`` / ffmpeg errors on failure.
@@ -323,11 +540,13 @@ def convert_video_for_profile(
 
     duration = probe_duration_seconds(src_path)
     source_fps = probe_video_fps(src_path)
+    aspect = probe_video_aspect(src_path)
     max_fps = 0.0 if ignore_max_fps else float(profile.max_fps or 0)
     force_fps = output_fps_for_source(source_fps, max_fps)
     logger.info(
         "Video convert start src=%s dest=%s preset=%s duration=%.1fs "
-        "source_fps=%.3f max_fps=%s force_fps=%s ignore_max_fps=%s",
+        "source_fps=%.3f max_fps=%s force_fps=%s ignore_max_fps=%s "
+        "frame=%sx%s qscale=%s slow=%s aspect=%s audio=%s",
         src_path,
         dest_path,
         profile.id,
@@ -336,6 +555,16 @@ def convert_video_for_profile(
         f"{max_fps:g}" if max_fps > 0 else "none",
         f"{force_fps:g}" if force_fps is not None else "keep",
         ignore_max_fps,
+        profile.width,
+        profile.height,
+        profile.qscale_v if profile.qscale_v is not None else profile.video_bitrate,
+        bool(profile.slow_encode),
+        aspect.summary() if aspect is not None else "unknown",
+        (
+            audio_settings.summary_line()
+            if audio_settings is not None
+            else f"{profile.audio_codec}/{profile.audio_bitrate}"
+        ),
     )
     if on_progress is not None:
         try:
@@ -344,7 +573,11 @@ def convert_video_for_profile(
             logger.debug("video on_progress failed", exc_info=True)
 
     out_opts = _build_output_options(
-        profile, force_fps=force_fps, container_ext=ext
+        profile,
+        force_fps=force_fps,
+        container_ext=ext,
+        audio_settings=audio_settings,
+        aspect=aspect,
     )
 
     ff = FFmpeg().option("y").input(src_path).output(dest_path, out_opts)
@@ -491,10 +724,7 @@ def _build_audio_still_cmd(
     ]
     if profile.video_tag:
         cmd += ["-vtag", profile.video_tag]
-    if profile.qscale_v is not None:
-        cmd += ["-qscale:v", str(int(profile.qscale_v))]
-    elif profile.video_bitrate:
-        cmd += ["-b:v", profile.video_bitrate]
+    _append_video_rate_opts(cmd, profile)
 
     if copy_audio:
         cmd += ["-c:a", "copy"]
@@ -700,7 +930,21 @@ def cleanup_video_temp(path: str | None) -> None:
     if not os.path.exists(path):
         return
     try:
+        size = 0
+        try:
+            size = int(os.path.getsize(path))
+        except OSError:
+            pass
+        t0 = time.perf_counter()
         os.remove(path)
+        elapsed = time.perf_counter() - t0
+        if elapsed >= 1.0 or size >= 50 * 1024 * 1024:
+            logger.info(
+                "Deleted video temp %s (%.1f MiB) in %.1fs",
+                path,
+                size / (1024 * 1024),
+                elapsed,
+            )
     except OSError as exc:
         logger.warning("Could not delete video temp %s: %s", path, exc)
 

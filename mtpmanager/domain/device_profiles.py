@@ -7,11 +7,14 @@ from mtpmanager.domain.device_profile import (
     DeviceVideoOptions,
     VideoEncodePreset,
 )
+from mtpmanager.domain.video_encode import RES_QQVGA, RES_QVGA, RES_VGA
 
 # ---------------------------------------------------------------------------
 # Creative ZEN Vision:M — theoretical / marketed video recipes
 # (AVI·XviD/DivX·MP3, WMV·WMA; retail demos used AVI+XVID+MP3).
 # max_fps=30 is ZEN-specific; generic has no video_options.
+# Frame size is chosen orthogonally (default QVGA 320×240); recipe literals
+# keep 640×480 as the historical retail geometry until apply_resolution runs.
 # ---------------------------------------------------------------------------
 
 ZEN_AVI_XVID_MP3 = VideoEncodePreset(
@@ -37,7 +40,7 @@ ZEN_AVI_XVID_MP3 = VideoEncodePreset(
     container_detail="Container: AVI (RIFF)",
     video_detail=(
         "Video: MPEG-4 Part 2 Simple Profile · FourCC XVID · "
-        "640×480 pad · qscale 5 · yuv420p"
+        "pad to selected frame · qscale 5 · yuv420p"
     ),
     audio_detail="Audio: MP3 (CBR) · 128 kbps · 44.1 kHz · stereo",
     summary="Default retail-like path: AVI + XviD + MP3",
@@ -67,7 +70,7 @@ ZEN_AVI_DIVX_MP3 = VideoEncodePreset(
     container_detail="Container: AVI (RIFF)",
     video_detail=(
         "Video: MPEG-4 Part 2 (DivX-style) · FourCC DX50 · "
-        "640×480 pad · qscale 5 · yuv420p"
+        "pad to selected frame · qscale 5 · yuv420p"
     ),
     audio_detail="Audio: MP3 (CBR) · 128 kbps · 44.1 kHz · stereo",
     summary="AVI + DivX FourCC + MP3 (also seen on stock promos)",
@@ -97,7 +100,7 @@ ZEN_WMV_WMA = VideoEncodePreset(
     container_detail="Container: WMV / ASF",
     video_detail=(
         "Video: WMV2 (Windows Media Video) · 480 kbps · "
-        "640×480 pad · yuv420p"
+        "pad to selected frame · yuv420p"
     ),
     audio_detail="Audio: WMA v2 · 128 kbps · 44.1 kHz · stereo",
     summary="Broken — does not play reliably; enable in Config to show",
@@ -108,6 +111,7 @@ ZEN_WMV_WMA = VideoEncodePreset(
 # Default preset alias (tests / simple imports).
 ZEN_VISION_M_VIDEO = ZEN_AVI_XVID_MP3
 
+# ZEN panel is 320×240; 640×480 matches retail/A/V Out; 160×120 for small files.
 ZEN_VISION_M_VIDEO_OPTIONS = DeviceVideoOptions(
     device_display_name="Creative ZEN Vision:M",
     presets=(
@@ -116,6 +120,8 @@ ZEN_VISION_M_VIDEO_OPTIONS = DeviceVideoOptions(
         ZEN_WMV_WMA,
     ),
     default_preset_id=ZEN_AVI_XVID_MP3.id,
+    allowed_resolutions=(RES_QQVGA, RES_QVGA, RES_VGA),
+    default_resolution_id=RES_QVGA.id,
 )
 
 # First match wins (excluding generic, which is always fallback).

@@ -1208,14 +1208,17 @@ def send_podcast_video_to_zencast(
 ) -> PodcastVideoSendResult:
     """Encode and send podcast video via the same path as library Send Video.
 
-    Uses :func:`~mtpmanager.app.device_ops.prepare_and_send_video` so the
-    XviD filter chain, skip-if-compatible, and ``send_video`` wire path match
-    library Video tab sync. Only differences:
+    Uses :func:`~mtpmanager.app.device_ops.prepare_and_send_video` and/or
+    :func:`~mtpmanager.infra.ffmpeg_video.convert_video_for_profile` so the
+    XviD filter chain (including SAR/DAR discovery via
+    ``probe_video_aspect``), skip-if-compatible, and ``send_video`` wire path
+    match library Video tab sync. Only differences:
 
     - *parent_id* is ZENcast / show folder (``allowed_parents=None``).
     - ObjectFileName is the episode title (+ container).
     - Optional durable ``{guid}_device.avi`` when *keep_download* is on.
-    - *from_audio_still* jobs: still image (artwork or black) + audio → XviD.
+    - *from_audio_still* jobs: still image (artwork or black) + audio → XviD
+      (no SAR probe; source is audio, not anamorphic video).
 
     Host GUID is returned for device-index skip-if-present only (never wire).
     """

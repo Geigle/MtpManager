@@ -637,6 +637,7 @@ class Phase2Mixin:
         parent_id: int = 120,
         encode: bool = True,
         preset_id: str | None = None,
+        resolution_id: str | None = None,
         dry_run: bool = False,
         confirm: bool = False,
         title: str | None = None,
@@ -663,12 +664,15 @@ class Phase2Mixin:
             "parent_label": "Video" if parent == 120 else "TV",
             "encode": bool(encode),
             "preset_id": preset_id or "zen_avi_xvid_mp3",
+            "resolution_id": resolution_id or "qvga",
             "filesize": size,
             "title": (title or Path(src).stem),
             "risks": ["R1", "R3", "R4"],
             "note": (
                 "Encode may take a long time. ObjectFileName is title-style "
-                "(not library GUID). Experimental tools not required for AVI·XviD."
+                "(not library GUID). Experimental tools not required for AVI·XviD. "
+                "Default frame size is QVGA (320×240); pass resolution_id "
+                "qqvga|qvga|vga."
             ),
         }
         if dry_run or not confirm:
@@ -690,14 +694,27 @@ class Phase2Mixin:
                 return conn
 
         from mtpmanager.domain.device_profiles import ZEN_AVI_XVID_MP3, ZEN_VISION_M
+        from mtpmanager.domain.video_encode import (
+            default_video_audio_settings,
+            effective_video_preset,
+        )
 
-        profile = ZEN_AVI_XVID_MP3
-        if preset_id:
-            opts = getattr(ZEN_VISION_M, "video_options", None)
-            if opts is not None:
-                found = opts.preset_by_id(preset_id)
-                if found is not None:
-                    profile = found
+        opts = getattr(ZEN_VISION_M, "video_options", None)
+        base = ZEN_AVI_XVID_MP3
+        if preset_id and opts is not None:
+            found = opts.preset_by_id(preset_id)
+            if found is not None:
+                base = found
+        resolution = None
+        if opts is not None:
+            resolution = opts.resolution_by_id(resolution_id)
+            if resolution is None:
+                resolution = opts.default_resolution()
+        profile = effective_video_preset(
+            base,
+            resolution=resolution,
+            audio_settings=default_video_audio_settings(base),
+        )
         try:
             # PymtpDevice implements Transport.send_track (GUI parity).
             send_result = prepare_and_send_video(

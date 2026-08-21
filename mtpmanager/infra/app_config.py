@@ -16,6 +16,7 @@ from mtpmanager.domain.audio_encode import (
     get_preset,
     settings_from_legacy_format,
 )
+from mtpmanager.domain.video_encode import PodcastVideoEncodeSettings
 from mtpmanager.infra.app_paths import default_data_dir
 
 logger = logging.getLogger(__name__)
@@ -149,6 +150,17 @@ class AppConfig:
     store_tracks_in_album_folder: bool = False
     # When True, Send Video shows broken device presets (e.g. ZEN WMV·WMA).
     show_broken_video_presets: bool = False
+    # Last Send Video resolution catalog id (e.g. "qvga"); None → device default.
+    video_encode_resolution_id: str | None = None
+    # Last Send Video audio ladder settings (recipe-clamped at use time).
+    video_audio_encode: AudioEncodeSettings | None = None
+    # Last Send Video mpeg4 qscale (2–15); None → recipe default.
+    video_encode_qscale_v: int | None = None
+    # Last Send Video slow high-quality mpeg4 encode flag.
+    video_encode_slow: bool = False
+    # Optional podcast video encode default (recipe / resolution / audio / quality).
+    # None → device DeviceVideoOptions defaults. Distinct from Send Video prefs.
+    podcast_video_encode: PodcastVideoEncodeSettings | None = None
     # When True, the bottom playback bar stays visible even when idle.
     always_show_playback_controls: bool = False
     # When True, create ZENcast/<show>/ folders for podcast sends (PyMTP; experimental).
@@ -292,6 +304,43 @@ class AppConfig:
             return
         self.podcast_audio_encode = clamp_settings_for_format(settings)
 
+    def apply_video_encode_prefs(
+        self,
+        *,
+        resolution_id: str | None = None,
+        audio_encode: AudioEncodeSettings | None = None,
+        qscale_v: int | None = None,
+        slow_encode: bool | None = None,
+    ) -> None:
+        """Remember last Send Video resolution / audio / quality choices."""
+        from mtpmanager.domain.video_encode import clamp_video_qscale
+
+        rid = (resolution_id or "").strip().casefold() or None
+        self.video_encode_resolution_id = rid
+        if audio_encode is None:
+            self.video_audio_encode = None
+        else:
+            self.video_audio_encode = clamp_settings_for_format(audio_encode)
+        self.video_encode_qscale_v = clamp_video_qscale(qscale_v)
+        if slow_encode is not None:
+            self.video_encode_slow = bool(slow_encode)
+
+    def uses_podcast_video_encode_override(self) -> bool:
+        """True when a dedicated podcast video encode recipe is stored."""
+        return self.podcast_video_encode is not None
+
+    def apply_podcast_video_encode(
+        self, settings: PodcastVideoEncodeSettings | None
+    ) -> None:
+        """Set or clear the podcast video encode override (None = device default)."""
+        if settings is None:
+            self.podcast_video_encode = None
+            return
+        # Re-parse via dict so empty shells collapse to None.
+        self.podcast_video_encode = PodcastVideoEncodeSettings.from_dict(
+            settings.to_dict()
+        )
+
     def active_mode(self) -> str:
         """Return ``\"stable\"`` or ``\"experimental\"``."""
         return "stable" if self.stable_mode else "experimental"
@@ -392,6 +441,14 @@ def load_app_config(*, path: Path | None = None) -> AppConfig:
         show_broken_video_presets=_as_bool(
             raw.get("show_broken_video_presets"), False
         ),
+        video_encode_resolution_id=(
+            str(raw.get("video_encode_resolution_id") or "").strip().casefold()
+            or None
+        ),
+        video_audio_encode=None,
+        video_encode_qscale_v=None,
+        video_encode_slow=_as_bool(raw.get("video_encode_slow"), False),
+        podcast_video_encode=None,
         always_show_playback_controls=_as_bool(
             raw.get("always_show_playback_controls"), False
         ),
@@ -464,6 +521,17 @@ def load_app_config(*, path: Path | None = None) -> AppConfig:
         cfg.podcast_audio_encode = clamp_settings_for_format(
             cfg.podcast_audio_encode
         )
+    raw_video_audio = raw.get("video_audio_encode")
+    if isinstance(raw_video_audio, dict):
+        cfg.video_audio_encode = clamp_settings_for_format(
+            AudioEncodeSettings.from_dict(raw_video_audio)
+        )
+    from mtpmanager.domain.video_encode import clamp_video_qscale
+
+    cfg.video_encode_qscale_v = clamp_video_qscale(raw.get("video_encode_qscale_v"))
+    cfg.podcast_video_encode = PodcastVideoEncodeSettings.from_dict(
+        raw.get("podcast_video_encode")
+    )
     return cfg
 
 
@@ -484,6 +552,12 @@ def save_app_config(config: AppConfig, *, path: Path | None = None) -> Path:
         "store_tracks_in_artist_folder": artist,
         "store_tracks_in_album_folder": album,
         "show_broken_video_presets": bool(config.show_broken_video_presets),
+        "video_encode_resolution_id": (
+            str(config.video_encode_resolution_id or "").strip().casefold()
+            or None
+        ),
+        "video_encode_qscale_v": config.video_encode_qscale_v,
+        "video_encode_slow": bool(config.video_encode_slow),
         "always_show_playback_controls": bool(
             config.always_show_playback_controls
         ),
@@ -530,10 +604,16 @@ def save_app_config(config: AppConfig, *, path: Path | None = None) -> Path:
         payload["audiobook_audio_encode"] = clamp_settings_for_format(
             config.audiobook_audio_encode
         ).to_dict()
+    if config.video_audio_encode is not None:
+        payload["video_audio_encode"] = clamp_settings_for_format(
+            config.video_audio_encode
+        ).to_dict()
     if config.podcast_audio_encode is not None:
         payload["podcast_audio_encode"] = clamp_settings_for_format(
             config.podcast_audio_encode
         ).to_dict()
+    if config.podcast_video_encode is not None:
+        payload["podcast_video_encode"] = config.podcast_video_encode.to_dict()
     text = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
     tmp = dest.with_suffix(dest.suffix + ".tmp")
     tmp.write_text(text, encoding="utf-8")

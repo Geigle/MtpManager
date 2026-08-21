@@ -1142,6 +1142,20 @@ class SendVideoResult:
     encode_skipped_compatible: bool = False
 
 
+@dataclass(frozen=True)
+class PreparedVideoFile:
+    """Host path ready to send (source or durable/temp encode)."""
+
+    path: str
+    source_path: str
+    preferred_basename: str
+    title: str
+    encoded: bool = False
+    encode_skipped_compatible: bool = False
+    # When set, caller owns cleanup (system VIDEO_TRANSCODE_* temps only).
+    cleanup_path: str | None = None
+
+
 def send_video(
     transport: Transport,
     path: str,
@@ -1229,6 +1243,220 @@ def send_video(
     )
 
 
+def _video_object_basename(
+    *,
+    source_path: str,
+    preferred_basename: str | None,
+    encoded: bool,
+    encode_profile=None,
+) -> str:
+    """Build ObjectFileName-style basename (title stem + container when encoded)."""
+    source_stem = os.path.splitext(os.path.basename(source_path))[0] or "video"
+    if preferred_basename and preferred_basename.strip():
+        pref_stem, pref_ext = os.path.splitext(preferred_basename.strip())
+        stem = pref_stem or source_stem
+        if encoded and encode_profile is not None:
+            return f"{stem}.{encode_profile.container.lstrip('.')}"
+        if pref_ext:
+            return f"{stem}{pref_ext}"
+        return preferred_basename.strip()
+    if encoded and encode_profile is not None:
+        return f"{source_stem}.{encode_profile.container.lstrip('.')}"
+    return os.path.basename(source_path)
+
+
+def prepare_video_file(
+    source_path: str,
+    *,
+    encode_profile=None,
+    encode_for_device: bool = False,
+    ignore_max_fps: bool = False,
+    on_progress: SendVideoProgress | None = None,
+    title: str | None = None,
+    preferred_basename: str | None = None,
+    audio_settings=None,
+    dest_path: str | None = None,
+    progress_encode_end: int = 85,
+) -> PreparedVideoFile:
+    """Optional device-profile encode (or copy) without sending.
+
+    When *encode_for_device* and *encode_profile* are set:
+    - If the source already matches, copy (or reuse) into *dest_path* when
+      provided; otherwise return the source path as-is.
+    - Else re-encode into *dest_path*, or a system ``VIDEO_TRANSCODE_*`` temp
+      when *dest_path* is omitted (caller must ``cleanup_video_temp`` via
+      ``PreparedVideoFile.cleanup_path``).
+
+    When encode is off and *dest_path* is set, copies the source into place.
+    """
+    from mtpmanager.domain.device_profile import VideoEncodePreset
+    from mtpmanager.infra.ffmpeg_video import (
+        convert_video_for_profile,
+        default_temp_video_path,
+        video_matches_encode_profile,
+    )
+    from mtpmanager.infra.staged_videos import copy_or_link_to_staged
+
+    def _emit(kind: str, *args) -> None:
+        if on_progress is None:
+            return
+        try:
+            on_progress(kind, *args)
+        except Exception:
+            logger.debug("prepare_video on_progress failed", exc_info=True)
+
+    src = source_path
+    if not src or not os.path.isfile(src):
+        raise FileNotFoundError(f"Video file not found: {src!r}")
+
+    profile: VideoEncodePreset | None = encode_profile
+    source_stem = os.path.splitext(os.path.basename(src))[0] or "video"
+    display_title = (title or source_stem).strip() or source_stem
+    skip_cap = bool(ignore_max_fps) and encode_for_device
+    end_pct = max(1, min(99, int(progress_encode_end)))
+
+    send_path = src
+    cleanup_path: str | None = None
+    encoded = False
+    skipped_ok = False
+
+    if encode_for_device and profile is not None:
+        if video_matches_encode_profile(src, profile):
+            skipped_ok = True
+            logger.info(
+                "Video prepare: source already matches profile %s — skip encode",
+                profile.id,
+            )
+            _emit("status", "already device-compatible — skipping encode")
+            if dest_path:
+                send_path = copy_or_link_to_staged(src, dest_path)
+        else:
+            _emit("phase", "transcode")
+            _emit("progress", 0, 100, "encoding for device…")
+            out = dest_path or default_temp_video_path(profile)
+            if dest_path is None:
+                cleanup_path = out
+
+            def _enc_progress(done: float, total: float, msg: str) -> None:
+                if total and total > 0:
+                    pct = int(min(end_pct, max(0, (done / total) * end_pct)))
+                    _emit("progress", pct, 100, msg)
+                else:
+                    _emit("status", msg)
+
+            if skip_cap:
+                logger.info(
+                    "Video prepare: ignore_max_fps — not applying profile "
+                    "max_fps=%s (experimental)",
+                    profile.max_fps,
+                )
+            send_path = convert_video_for_profile(
+                src,
+                profile,
+                dest_path=out,
+                on_progress=_enc_progress,
+                ignore_max_fps=skip_cap,
+                audio_settings=audio_settings,
+            )
+            encoded = True
+            _emit("progress", end_pct, 100, "encode complete")
+    elif dest_path:
+        # Stage as-is (no encode).
+        _emit("status", "copying video for staging…")
+        send_path = copy_or_link_to_staged(src, dest_path)
+
+    # Use profile container in the ObjectFileName when we encoded *or* staged a
+    # copy that already matched the recipe (same wire extension as a fresh encode).
+    use_profile_ext = bool(
+        encode_for_device and profile is not None and (encoded or skipped_ok)
+    )
+    pref = _video_object_basename(
+        source_path=src,
+        preferred_basename=preferred_basename,
+        encoded=use_profile_ext,
+        encode_profile=profile if use_profile_ext else None,
+    )
+
+    return PreparedVideoFile(
+        path=send_path,
+        source_path=src,
+        preferred_basename=pref,
+        title=display_title,
+        encoded=encoded,
+        encode_skipped_compatible=skipped_ok,
+        cleanup_path=cleanup_path,
+    )
+
+
+def stage_video_for_sync(
+    source_path: str,
+    *,
+    parent_id: int,
+    encode_profile=None,
+    encode_for_device: bool = False,
+    ignore_max_fps: bool = False,
+    on_progress: SendVideoProgress | None = None,
+    title: str | None = None,
+    preferred_basename: str | None = None,
+    guid: str | None = None,
+    audio_settings=None,
+    preset_id: str | None = None,
+    resolution_id: str | None = None,
+    data_dir=None,
+):
+    """Compress (optional) into the staged_videos folder and record the manifest.
+
+    Returns the new :class:`~mtpmanager.infra.staged_videos.StagedVideoEntry`.
+    Does not touch the device.
+    """
+    from mtpmanager.infra.staged_videos import (
+        StagedVideoEntry,
+        new_staged_path,
+        upsert_staged_entry,
+        utc_now_iso,
+    )
+
+    profile = encode_profile
+    container = "avi"
+    if encode_for_device and profile is not None:
+        container = (profile.container or "avi").lstrip(".") or "avi"
+    else:
+        ext = os.path.splitext(source_path)[1].lstrip(".") or "avi"
+        container = ext
+
+    entry_id, dest = new_staged_path(
+        container=container, data_dir=data_dir
+    )
+    prepared = prepare_video_file(
+        source_path,
+        encode_profile=profile,
+        encode_for_device=encode_for_device,
+        ignore_max_fps=ignore_max_fps,
+        on_progress=on_progress,
+        title=title,
+        preferred_basename=preferred_basename,
+        audio_settings=audio_settings,
+        dest_path=dest,
+        progress_encode_end=100,
+    )
+    entry = StagedVideoEntry(
+        id=entry_id,
+        source_path=os.path.normpath(source_path),
+        staged_path=prepared.path,
+        parent_id=int(parent_id),
+        created_at=utc_now_iso(),
+        title=prepared.title,
+        preferred_basename=prepared.preferred_basename,
+        guid=(guid or "").strip(),
+        encoded=prepared.encoded,
+        encode_skipped_compatible=prepared.encode_skipped_compatible,
+        preset_id=preset_id or (profile.id if profile is not None else None),
+        resolution_id=resolution_id,
+        ignore_max_fps=bool(ignore_max_fps),
+    )
+    return upsert_staged_entry(entry, data_dir=data_dir)
+
+
 def prepare_and_send_video(
     transport: Transport,
     source_path: str,
@@ -1242,6 +1470,7 @@ def prepare_and_send_video(
     preferred_basename: str | None = None,
     guid: str | None = None,
     allowed_parents: frozenset[int] | None = None,
+    audio_settings=None,
 ) -> SendVideoResult:
     """Optional device-profile encode, then :func:`send_video`.
 
@@ -1252,6 +1481,9 @@ def prepare_and_send_video(
     *ignore_max_fps*: when encoding, skip the profile's max_fps cap (keep
     source rate above the device limit — experimental).
 
+    *audio_settings*: optional ``AudioEncodeSettings`` for the shared music
+    ladder (VBR/CBR/channels/…). When unset, uses *encode_profile.audio_**.
+
     ObjectFileName is title/basename style. *guid* is not used for the wire
     name (see :func:`send_video`); callers record it in the host device index.
     *preferred_basename* overrides the host filename when set (extension may
@@ -1261,13 +1493,7 @@ def prepare_and_send_video(
     library Send Video). When ``None``, any positive parent is accepted
     (e.g. ZENcast for podcast video).
     """
-    from mtpmanager.domain.device_profile import VideoEncodePreset
-    from mtpmanager.infra.ffmpeg_video import (
-        cleanup_video_temp,
-        convert_video_for_profile,
-        default_temp_video_path,
-        video_matches_encode_profile,
-    )
+    from mtpmanager.infra.ffmpeg_video import cleanup_video_temp
 
     def _emit(kind: str, *args) -> None:
         if on_progress is None:
@@ -1277,84 +1503,34 @@ def prepare_and_send_video(
         except Exception:
             logger.debug("send_video on_progress failed", exc_info=True)
 
-    src = source_path
-    if not src or not os.path.isfile(src):
-        raise FileNotFoundError(f"Video file not found: {src!r}")
-
-    profile: VideoEncodePreset | None = encode_profile
-    send_path = src
-    temp_path: str | None = None
-    encoded = False
-    skipped_ok = False
-    source_stem = os.path.splitext(os.path.basename(src))[0] or "video"
-    skip_cap = bool(ignore_max_fps) and encode_for_device
-
+    prepared: PreparedVideoFile | None = None
     try:
-        if encode_for_device and profile is not None:
-            if video_matches_encode_profile(src, profile):
-                skipped_ok = True
-                logger.info(
-                    "Send Video: source already matches profile %s — skip encode",
-                    profile.id,
-                )
-                _emit("status", "already device-compatible — skipping encode")
-            else:
-                _emit("phase", "transcode")
-                _emit("progress", 0, 100, "encoding for device…")
-                temp_path = default_temp_video_path(profile)
-
-                def _enc_progress(done: float, total: float, msg: str) -> None:
-                    if total and total > 0:
-                        # Reserve 0–85% of the bar for encode.
-                        pct = int(min(85, max(0, (done / total) * 85)))
-                        _emit("progress", pct, 100, msg)
-                    else:
-                        _emit("status", msg)
-
-                if skip_cap:
-                    logger.info(
-                        "Send Video: ignore_max_fps — not applying profile "
-                        "max_fps=%s (experimental)",
-                        profile.max_fps,
-                    )
-                send_path = convert_video_for_profile(
-                    src,
-                    profile,
-                    dest_path=temp_path,
-                    on_progress=_enc_progress,
-                    ignore_max_fps=skip_cap,
-                )
-                encoded = True
-                _emit("progress", 85, 100, "encode complete — sending…")
-
-        # ObjectFileName: title/host basename (never library GUID).
-        # Encoded sends keep the chosen stem but use the profile container.
-        if preferred_basename and preferred_basename.strip():
-            pref_stem, pref_ext = os.path.splitext(preferred_basename.strip())
-            stem = pref_stem or source_stem
-            if encoded and profile is not None:
-                pref = f"{stem}.{profile.container.lstrip('.')}"
-            elif pref_ext:
-                pref = f"{stem}{pref_ext}"
-            else:
-                pref = preferred_basename.strip()
-        elif encoded and profile is not None:
-            pref = f"{source_stem}.{profile.container.lstrip('.')}"
-        else:
-            pref = os.path.basename(src)
-
-        display_title = (title or source_stem).strip() or source_stem
-
+        prepared = prepare_video_file(
+            source_path,
+            encode_profile=encode_profile,
+            encode_for_device=encode_for_device,
+            ignore_max_fps=ignore_max_fps,
+            on_progress=on_progress,
+            title=title,
+            preferred_basename=preferred_basename,
+            audio_settings=audio_settings,
+            dest_path=None,
+            progress_encode_end=85,
+        )
         _emit("phase", "send")
         _emit("status", "sending to device…")
-        _emit("progress", 90 if encoded or skipped_ok else 0, 100, "sending…")
-
+        _emit(
+            "progress",
+            90 if prepared.encoded or prepared.encode_skipped_compatible else 0,
+            100,
+            "sending…",
+        )
         result = send_video(
             transport,
-            send_path,
+            prepared.path,
             parent_id=parent_id,
-            title=display_title,
-            preferred_basename=pref,
+            title=prepared.title,
+            preferred_basename=prepared.preferred_basename,
             guid=guid,
             allowed_parents=allowed_parents,
         )
@@ -1364,10 +1540,10 @@ def prepare_and_send_video(
             parent_id=result.parent_id,
             remote_basename=result.remote_basename,
             path=result.path,
-            source_path=src,
-            encoded=encoded,
-            encode_skipped_compatible=skipped_ok,
+            source_path=prepared.source_path,
+            encoded=prepared.encoded,
+            encode_skipped_compatible=prepared.encode_skipped_compatible,
         )
     finally:
-        if temp_path:
-            cleanup_video_temp(temp_path)
+        if prepared is not None and prepared.cleanup_path:
+            cleanup_video_temp(prepared.cleanup_path)
