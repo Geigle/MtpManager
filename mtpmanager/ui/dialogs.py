@@ -1950,6 +1950,9 @@ def ask_video_destination(
     initial_audio_encode: AudioEncodeSettings | None = None,
     initial_qscale_v: int | None = None,
     initial_slow_encode: bool = False,
+    dialog_title: str = "Send Video",
+    confirm_button: str = "Send",
+    lead_in: str = "Send to device:",
 ) -> SendVideoDialogResult | None:
     """Ask Video/TV parent and optional device encode preset. None if cancelled.
 
@@ -1962,6 +1965,8 @@ def ask_video_destination(
 
     *initial_resolution_id* / *initial_audio_encode* / quality args restore last
     Send Video choices from Config when present.
+
+    *dialog_title* / *confirm_button* customize the window for Stage vs Send.
     """
     vid = (
         int(video_folder_id)
@@ -1979,7 +1984,7 @@ def ask_video_destination(
     )
 
     dlg = Toplevel(parent)
-    dlg.title("Send Video")
+    dlg.title((dialog_title or "Send Video").strip() or "Send Video")
     dlg.transient(parent)
     dlg.resizable(True, True)
 
@@ -1992,9 +1997,10 @@ def ask_video_destination(
     scroll_host.pack(fill=BOTH, expand=True)
 
     label = filename.strip() or "selected file"
+    head = (lead_in or "Send to device:").strip() or "Send to device:"
     Label(
         body,
-        text=f"Send to device:\n\n{label}",
+        text=f"{head}\n\n{label}",
         justify=LEFT,
         wraplength=440,
     ).pack(anchor="w", pady=(0, 10))
@@ -2329,7 +2335,10 @@ def ask_video_destination(
     Button(btn_row, text="Cancel", width=10, command=on_cancel).pack(
         side=RIGHT, padx=(6, 0)
     )
-    Button(btn_row, text="Send", width=10, command=on_send).pack(side=RIGHT)
+    ok_label = (confirm_button or "Send").strip() or "Send"
+    Button(btn_row, text=ok_label, width=max(10, len(ok_label) + 1), command=on_send).pack(
+        side=RIGHT
+    )
 
     dlg.protocol("WM_DELETE_WINDOW", on_cancel)
     dlg.grab_set()

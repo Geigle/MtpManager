@@ -438,6 +438,7 @@ class AppController:
             on_sync_folder=self.action_sync_folder,
             on_sync_selected=self.action_sync_selected,
             on_resume_sync=self.action_resume_sync,
+            on_sync_staged_videos=self.action_sync_staged_videos,
             on_cancel_job=self.on_cancel_job,
             on_package_retail=self.action_package_retail_demos,
             on_restore_retail=self.action_restore_retail_package,
@@ -561,6 +562,7 @@ class AppController:
             on_sync_selected=self.action_sync_selected,
             on_special_sync=self.action_special_sync_selection,
             on_special_sync_group=self.action_special_sync_group,
+            on_stage_video=self.action_stage_or_sync_video,
             on_play_track=self.action_play_selected_tracks,
             on_play_artist_group=self.action_play_artist_group,
             on_play_album_group=self.action_play_album_group,
@@ -571,6 +573,12 @@ class AppController:
             on_exclude_folder=self.action_exclude_folder,
             on_exclude_group_folder=self.action_exclude_group_folder,
         )
+        try:
+            from mtpmanager.infra.staged_videos import purge_expired_staged_videos
+
+            purge_expired_staged_videos()
+        except Exception:
+            logger.debug("staged video purge on startup failed", exc_info=True)
         w.set_playlist_tab_commands(
             on_list_selected=self.on_playlist_list_selected,
             on_new=self.on_playlist_new,
@@ -3719,18 +3727,22 @@ class AppController:
             pass
 
         # Play This Track / Play These Tracks (audio only).
-        # Indices shift when experimental Special Sync is present.
+        # Indices shift when experimental Special Sync / Stage item are present.
         try:
             from mtpmanager.ui.window import (
                 CTX_ADD_TO_PLAYLIST,
                 CTX_ADD_TRACKS_TO_PLAYLIST,
                 CTX_PLAY_TRACK,
                 CTX_PLAY_TRACKS,
+                CTX_STAGE_VIDEO,
+                CTX_SYNC_STAGED,
             )
 
             exp = bool(self.win.experimental_tools_enabled())
-            play_idx = 7 if exp else 6
-            add_idx = 8 if exp else 7
+            # 0 Sync selected, 1 sep, 2–4 sync*, [5 Special], Stage, sep, Play, Add…
+            play_idx = 8 if exp else 7
+            add_idx = 9 if exp else 8
+            stage_idx = 6 if exp else 5
             play_label = CTX_PLAY_TRACKS if n_audio > 1 else CTX_PLAY_TRACK
             self.win.menu_track_ctx.entryconfig(
                 play_idx,
@@ -3747,6 +3759,30 @@ class AppController:
                 label=add_label,
                 state=NORMAL if n_audio >= 1 else DISABLED,
             )
+
+            videos = [t for t in selected_tracks if is_video_track(t)]
+            if videos:
+                from mtpmanager.infra.staged_videos import find_staged_by_source
+
+                all_staged = all(
+                    find_staged_by_source(t.path) is not None for t in videos
+                )
+                stage_label = CTX_SYNC_STAGED if all_staged else CTX_STAGE_VIDEO
+                if len(videos) > 1 and not all_staged:
+                    stage_label = f"Stage {len(videos)} Videos for Sync…"
+                elif len(videos) > 1 and all_staged:
+                    stage_label = f"Sync {len(videos)} Staged"
+                self.win.menu_track_ctx.entryconfig(
+                    stage_idx,
+                    label=stage_label,
+                    state=NORMAL,
+                )
+            else:
+                self.win.menu_track_ctx.entryconfig(
+                    stage_idx,
+                    label=CTX_STAGE_VIDEO,
+                    state=DISABLED,
+                )
         except Exception:
             pass
 
@@ -12303,6 +12339,534 @@ class AppController:
                 if do_encode
                 else f"sending video to {folder_label}…"
             ),
+            on_progress=on_ui_event,
+            progress_mode="determinate",
+        )
+
+    def _video_options_for_stage(self):
+        """Device video recipes for staging (active profile or ZEN default)."""
+        if self._active_profile is not None and self._active_profile.video_options:
+            return self._active_profile.video_options
+        from mtpmanager.domain.device_profiles import ZEN_VISION_M
+
+        return ZEN_VISION_M.video_options
+
+    def action_stage_or_sync_video(self) -> None:
+        """Library context: Stage for Sync…, or Sync Staged when already staged."""
+        tracks = self._tracks_from_selected_iids(quiet=True)
+        videos = [t for t in tracks if is_video_track(t) and t.path]
+        if not videos:
+            messagebox.showinfo(
+                "Stage Video",
+                "Select one or more video files in the library.",
+            )
+            return
+        from mtpmanager.infra.staged_videos import find_staged_by_source
+
+        staged_entries = []
+        unstaged_paths: list[str] = []
+        for t in videos:
+            entry = find_staged_by_source(t.path)
+            if entry is not None:
+                staged_entries.append(entry)
+            else:
+                unstaged_paths.append(t.path)
+        if unstaged_paths:
+            self._start_stage_video(unstaged_paths)
+            return
+        self._sync_staged_entries(staged_entries)
+
+    def action_sync_staged_videos(self) -> None:
+        """Transfer → Sync Staged Videos… — send all staged encodes."""
+        from mtpmanager.infra.staged_videos import list_syncable_staged
+
+        entries = list_syncable_staged()
+        if not entries:
+            messagebox.showinfo(
+                "Sync Staged Videos",
+                "No staged videos are waiting to sync.\n\n"
+                "Right-click a library video and choose Stage for Sync…",
+            )
+            return
+        self._sync_staged_entries(entries)
+
+    def _start_stage_video(self, paths: list[str]) -> None:
+        """Encode/copy videos into the staged_videos folder (no device I/O)."""
+        if self._transfer_busy:
+            messagebox.showinfo(
+                "Stage Video",
+                "A transfer or device job is already in progress.",
+            )
+            return
+        files = [
+            os.path.normpath(p)
+            for p in paths
+            if p and os.path.isfile(p)
+        ]
+        seen: set[str] = set()
+        unique: list[str] = []
+        for p in files:
+            if p in seen:
+                continue
+            seen.add(p)
+            unique.append(p)
+        files = unique
+        if not files:
+            messagebox.showerror("Stage Video", "No video files found to stage.")
+            return
+
+        by_path = {
+            os.path.normpath(t.path): t for t in self.library.tracks if t.path
+        }
+        guid_by_path: dict[str, str] = {}
+        title_by_path: dict[str, str] = {}
+        basename_by_path: dict[str, str] = {}
+        for p in files:
+            track = by_path.get(p)
+            base = os.path.basename(p)
+            stem = os.path.splitext(base)[0] or "video"
+            if track is not None:
+                g = track.guid if is_track_guid(track.guid) else ""
+                if not g:
+                    g = new_track_guid()
+                    idx = next(
+                        (
+                            i
+                            for i, t in enumerate(self.library.tracks)
+                            if t.path == track.path
+                        ),
+                        None,
+                    )
+                    if idx is not None:
+                        old = self.library.tracks[idx]
+                        self.library.tracks[idx] = Track(
+                            path=old.path, meta=old.meta, guid=g
+                        )
+                guid_by_path[p] = g
+                display = video_display_title(track)
+                title_by_path[p] = os.path.splitext(display)[0] or stem
+                basename_by_path[p] = base
+            else:
+                title_by_path[p] = stem
+                basename_by_path[p] = base
+
+        video_options = self._video_options_for_stage()
+        layout = self._folder_layout_or_legacy()
+        if len(files) == 1:
+            dlg_name = os.path.basename(files[0])
+        else:
+            dlg_name = f"{len(files)} video files"
+
+        opts = ask_video_destination(
+            self.win.root,
+            filename=dlg_name,
+            video_options=video_options,
+            encode_default=True,
+            include_broken_presets=bool(
+                self._config.show_broken_video_presets
+            ),
+            video_folder_id=layout.video_id,
+            tv_folder_id=layout.tv_id,
+            video_folder_name=layout.name_for(layout.video_id) or "Video",
+            tv_folder_name=layout.name_for(layout.tv_id) or "TV",
+            initial_resolution_id=self._config.video_encode_resolution_id,
+            initial_audio_encode=self._config.video_audio_encode,
+            initial_qscale_v=self._config.video_encode_qscale_v,
+            initial_slow_encode=bool(self._config.video_encode_slow),
+            dialog_title="Stage Video",
+            confirm_button="Stage",
+            lead_in="Compress and stage for later sync:",
+        )
+        if opts is None:
+            return
+
+        parent = int(opts.parent_id)
+        encode = bool(opts.encode_for_device) and video_options is not None
+        preset = None
+        if encode and video_options is not None:
+            from mtpmanager.domain.video_encode import (
+                default_video_audio_settings,
+                effective_video_preset,
+            )
+
+            base = video_options.preset_by_id(opts.preset_id)
+            if base is None:
+                base = video_options.default_preset()
+            resolution = video_options.resolution_by_id(opts.resolution_id)
+            if resolution is None:
+                resolution = video_options.default_resolution()
+            audio = opts.audio_encode
+            if audio is None:
+                audio = default_video_audio_settings(base)
+            preset = effective_video_preset(
+                base,
+                resolution=resolution,
+                audio_settings=audio,
+                qscale_v=opts.qscale_v,
+                slow_encode=bool(opts.slow_encode),
+            )
+            try:
+                self._config.apply_video_encode_prefs(
+                    resolution_id=opts.resolution_id,
+                    audio_encode=audio,
+                    qscale_v=opts.qscale_v,
+                    slow_encode=bool(opts.slow_encode),
+                )
+                save_app_config(self._config)
+            except Exception:
+                logger.debug(
+                    "persist video encode prefs failed", exc_info=True
+                )
+        ignore_max_fps = (
+            bool(opts.ignore_max_fps) and encode and preset is not None
+        )
+        folder_label = (
+            layout.video_folder_label(parent)
+            if parent
+            else layout.name_for(parent) or str(parent)
+        )
+        if encode and preset is not None:
+            encode_note = (
+                f"Encode: {preset.display_name}\n"
+                f"Resolution: {preset.width}×{preset.height}\n"
+                f"Audio: {preset.audio_detail or preset.probe_audio_codec}\n"
+            )
+            if preset.qscale_v is not None:
+                encode_note += f"Video quality: qscale {preset.qscale_v}\n"
+            if preset.slow_encode:
+                encode_note += "Encode effort: slow high-quality\n"
+        else:
+            encode_note = "Encode: off (copy as-is)\n"
+
+        if len(files) == 1:
+            confirm = (
+                f"Stage this file for later sync to {folder_label}?\n\n"
+                f"{files[0]}\n\n"
+                f"{encode_note}"
+                "Staged files are kept for one week, or until synced."
+            )
+        else:
+            listing = "\n".join(os.path.basename(p) for p in files[:12])
+            if len(files) > 12:
+                listing += f"\n… and {len(files) - 12} more"
+            confirm = (
+                f"Stage {len(files)} files for later sync to {folder_label}?\n\n"
+                f"{listing}\n\n"
+                f"{encode_note}"
+                "Staged files are kept for one week, or until synced."
+            )
+        if not messagebox.askyesno("Stage Video", confirm):
+            return
+
+        if not self._begin_transfer_job():
+            return
+
+        batch = list(files)
+        guid_map = dict(guid_by_path)
+        title_map = dict(title_by_path)
+        basename_map = dict(basename_by_path)
+        do_encode = encode and preset is not None
+        video_audio = opts.audio_encode if do_encode else None
+        res_id = opts.resolution_id if do_encode else None
+        preset_id = preset.id if preset is not None else None
+
+        try:
+            self.win.progress.configure(mode="determinate")
+            self.win.progress["value"] = 0
+        except Exception:
+            pass
+        self.win.set_progress_status("Staging video…")
+
+        def work():
+            from mtpmanager.infra.staged_videos import purge_expired_staged_videos
+
+            purge_expired_staged_videos()
+            gen = self._bg.generation
+            report = self._bg.progress_callback(gen)
+            results = []
+            total = len(batch)
+            for i, path in enumerate(batch):
+                if self._should_cancel_job():
+                    raise JobCancelled("Stage Video cancelled")
+
+                def on_progress(kind: str, *args, _i=i, _t=total) -> None:
+                    if kind == "status" and args and _t > 1:
+                        report("status", f"({_i + 1}/{_t}) {args[0]}")
+                        return
+                    if kind == "phase" and _t > 1:
+                        report(kind, *args)
+                        report(
+                            "status",
+                            f"Staging {_i + 1}/{_t}: "
+                            f"{os.path.basename(batch[_i])}",
+                        )
+                        return
+                    report(kind, *args)
+
+                if total > 1:
+                    report(
+                        "status",
+                        f"Staging {i + 1}/{total}: {os.path.basename(path)}",
+                    )
+                results.append(
+                    device_ops.stage_video_for_sync(
+                        path,
+                        parent_id=parent,
+                        encode_profile=preset,
+                        encode_for_device=do_encode,
+                        ignore_max_fps=ignore_max_fps,
+                        on_progress=on_progress,
+                        title=title_map.get(path),
+                        preferred_basename=basename_map.get(path),
+                        guid=guid_map.get(path),
+                        audio_settings=video_audio,
+                        preset_id=preset_id,
+                        resolution_id=res_id,
+                    )
+                )
+            return results
+
+        def on_ui_event(kind: str, *rest) -> None:
+            if kind == "phase":
+                phase = str(rest[0]) if rest else ""
+                if phase == "transcode":
+                    self.win.set_progress_status("Encoding for stage…")
+                return
+            if kind == "progress":
+                if len(rest) >= 3:
+                    done, total, label = int(rest[0]), int(rest[1]), str(rest[2])
+                    try:
+                        self.win.progress.configure(mode="determinate")
+                        if total > 0:
+                            self.win.progress["value"] = max(
+                                0, min(100, int(round(100 * done / total)))
+                            )
+                    except Exception:
+                        pass
+                    if label:
+                        self.win.set_progress_status(label)
+                return
+            if kind == "status":
+                if rest:
+                    self.win.set_progress_status(str(rest[0]))
+                return
+
+        def on_done(results) -> None:
+            self._end_transfer_job()
+            try:
+                self._sync_library_chrome()
+            except Exception:
+                pass
+            if guid_map:
+                try:
+                    save_library_index(self.library)
+                except Exception:
+                    logger.debug(
+                        "save_library_index after stage failed", exc_info=True
+                    )
+            if not isinstance(results, list):
+                results = [results]
+            for entry in results:
+                logger.info(
+                    "Stage Video ok source=%s staged=%s parent=%s encoded=%s",
+                    entry.source_path,
+                    entry.staged_path,
+                    entry.parent_id,
+                    entry.encoded,
+                )
+            n = len(results)
+            messagebox.showinfo(
+                "Stage Video",
+                f"Staged {n} video{'s' if n != 1 else ''} for {folder_label}.\n\n"
+                "Use Transfer → Sync Staged Videos… (or right-click → Sync Staged) "
+                "when the device is connected.",
+            )
+
+        def on_error(exc: BaseException) -> None:
+            self._end_transfer_job()
+            try:
+                self._sync_library_chrome()
+            except Exception:
+                pass
+            if isinstance(exc, JobCancelled):
+                messagebox.showinfo("Stage Video", "Staging cancelled.")
+                return
+            logger.exception("Stage Video failed")
+            messagebox.showerror("Stage Video", str(exc))
+
+        self._bg.submit(
+            work,
+            on_done=on_done,
+            on_error=on_error,
+            on_progress=on_ui_event,
+            name="stage-video",
+        )
+
+    def _sync_staged_entries(self, entries) -> None:
+        """Send staged encodes to the device; delete each after success."""
+        from mtpmanager.infra.staged_videos import (
+            list_syncable_staged,
+            remove_staged_entry,
+        )
+
+        if not entries:
+            entries = list_syncable_staged()
+        # Re-check files exist.
+        batch = [e for e in entries if e.staged_exists()]
+        if not batch:
+            messagebox.showinfo(
+                "Sync Staged Videos",
+                "No staged video files are available to sync.",
+            )
+            return
+        if not self._require_device_ready():
+            return
+        if self._transfer_busy:
+            messagebox.showinfo(
+                "Sync Staged Videos",
+                "A transfer or device job is already in progress.",
+            )
+            return
+
+        layout = self._folder_layout_or_legacy()
+        listing = "\n".join(
+            os.path.basename(e.preferred_basename or e.staged_path)
+            for e in batch[:12]
+        )
+        if len(batch) > 12:
+            listing += f"\n… and {len(batch) - 12} more"
+        if not messagebox.askyesno(
+            "Sync Staged Videos",
+            f"Send {len(batch)} staged video(s) to the device?\n\n"
+            f"{listing}\n\n"
+            "Each file is removed from the stage folder after a successful send.",
+        ):
+            return
+
+        transport = self._transport()
+        serial = self._device_serial or device_serial_key()
+        allowed = layout.video_parent_ids()
+
+        def work(device):
+            _ = device
+            gen = self._bg.generation
+            report = self._bg.progress_callback(gen)
+            results = []
+            total = len(batch)
+            for i, entry in enumerate(batch):
+                if self._should_cancel_job():
+                    raise JobCancelled("Sync Staged Videos cancelled")
+                if total > 1:
+                    report(
+                        "status",
+                        f"Staged {i + 1}/{total}: "
+                        f"{os.path.basename(entry.staged_path)}",
+                    )
+
+                def on_progress(kind: str, *args, _i=i, _t=total) -> None:
+                    if kind == "status" and args and _t > 1:
+                        report("status", f"({_i + 1}/{_t}) {args[0]}")
+                        return
+                    report(kind, *args)
+
+                parent = int(entry.parent_id)
+                if allowed and parent not in allowed:
+                    # Fall back to Video folder if layout changed.
+                    parent = int(layout.video_id or entry.parent_id)
+                result = device_ops.prepare_and_send_video(
+                    transport,
+                    entry.staged_path,
+                    parent_id=parent,
+                    encode_profile=None,
+                    encode_for_device=False,
+                    on_progress=on_progress,
+                    title=entry.title or None,
+                    preferred_basename=entry.preferred_basename or None,
+                    guid=entry.guid or None,
+                    allowed_parents=allowed,
+                )
+                remove_staged_entry(entry.id)
+                results.append((entry, result))
+            return results
+
+        def on_ui_event(kind: str, *rest) -> None:
+            if kind == "phase":
+                phase = str(rest[0]) if rest else ""
+                if phase == "send":
+                    self.win.set_progress_status("Sending staged video…")
+                return
+            if kind == "progress":
+                if len(rest) >= 3:
+                    done, total, label = int(rest[0]), int(rest[1]), str(rest[2])
+                    try:
+                        self.win.progress.configure(mode="determinate")
+                        if total > 0:
+                            self.win.progress["value"] = max(
+                                0, min(100, int(round(100 * done / total)))
+                            )
+                    except Exception:
+                        pass
+                    if label:
+                        self.win.set_progress_status(label)
+                return
+            if kind == "status":
+                if rest:
+                    self.win.set_progress_status(str(rest[0]))
+                return
+            self._on_transfer_ui_event(kind, *rest)
+
+        def on_success(pairs) -> None:
+            if not isinstance(pairs, list):
+                pairs = [pairs]
+            guid_touched = False
+            for entry, result in pairs:
+                g = (entry.guid or "").strip() or None
+                if g:
+                    guid_touched = True
+                try:
+                    record_send(
+                        serial,
+                        remote_name=result.remote_basename,
+                        guid=g,
+                        item_id=result.object_id,
+                        parent_id=result.parent_id,
+                        storage_id=DEFAULT_STORAGE_ID,
+                    )
+                except Exception:
+                    logger.debug(
+                        "device_index record_send after staged sync failed",
+                        exc_info=True,
+                    )
+                logger.info(
+                    "Sync Staged ok source=%s remote=%s parent=%s",
+                    entry.source_path,
+                    result.remote_basename,
+                    result.parent_id,
+                )
+            if guid_touched:
+                try:
+                    save_library_index(self.library)
+                except Exception:
+                    logger.debug(
+                        "save_library_index after staged sync failed",
+                        exc_info=True,
+                    )
+            try:
+                self._schedule_device_music_tree_refresh(enrich_missing_tags=False)
+            except Exception:
+                pass
+            messagebox.showinfo(
+                "Sync Staged Videos",
+                f"Sent {len(pairs)} staged video(s) and removed them from the "
+                "stage folder.",
+            )
+
+        self._run_device_bg(
+            title="Sync Staged Videos",
+            name="sync-staged-videos",
+            work=work,
+            on_success=on_success,
+            busy_message="sending staged videos…",
             on_progress=on_ui_event,
             progress_mode="determinate",
         )
