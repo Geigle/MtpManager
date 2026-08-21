@@ -24,6 +24,7 @@ from mtpmanager.domain.audio_encode import (
     clamp_settings_for_format,
     normalize_playback_speed,
 )
+from mtpmanager.domain.video_encode import PodcastVideoEncodeSettings
 from mtpmanager.domain.models import Track, TrackMetadata
 from mtpmanager.domain.track_id import is_track_guid, new_track_guid
 from mtpmanager.infra.library_index import _connect, _init_schema, index_path
@@ -53,6 +54,8 @@ class Podcast:
     audio_encode: AudioEncodeSettings | None = None
     # Encode-time playback speed (1.0 = normal; applied via ffmpeg atempo).
     playback_speed: float = 1.0
+    # Per-show video encode override (None → podcast video default / device).
+    video_encode: PodcastVideoEncodeSettings | None = None
 
 
 @dataclass(frozen=True)
@@ -224,6 +227,11 @@ def _migrate_podcast_auto_columns(conn: sqlite3.Connection) -> None:
             "ALTER TABLE podcasts ADD COLUMN "
             "playback_speed REAL NOT NULL DEFAULT 1.0"
         )
+    if "video_encode_json" not in cols:
+        alters.append(
+            "ALTER TABLE podcasts ADD COLUMN "
+            "video_encode_json TEXT NOT NULL DEFAULT ''"
+        )
     for sql in alters:
         try:
             conn.execute(sql)
@@ -255,6 +263,28 @@ def _audio_encode_to_json(settings: AudioEncodeSettings | None) -> str:
     return json.dumps(
         clamp_settings_for_format(settings).to_dict(), ensure_ascii=False
     )
+
+
+def _parse_video_encode_json(raw: object) -> PodcastVideoEncodeSettings | None:
+    """Parse stored podcast video encode JSON; empty/invalid → None."""
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        data = json.loads(text)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    try:
+        return PodcastVideoEncodeSettings.from_dict(data)
+    except Exception:
+        logger.debug("invalid podcast video_encode_json", exc_info=True)
+        return None
+
+
+def _video_encode_to_json(settings: PodcastVideoEncodeSettings | None) -> str:
+    if settings is None:
+        return ""
+    return json.dumps(settings.to_dict(), ensure_ascii=False)
 
 
 def _migrate_episode_retrieval_columns(conn: sqlite3.Connection) -> None:
@@ -316,6 +346,9 @@ def _podcast_from_row(row: sqlite3.Row, *, episode_count: int = 0) -> Podcast:
     speed = 1.0
     if "playback_speed" in keys:
         speed = normalize_playback_speed(row["playback_speed"])
+    video_enc = None
+    if "video_encode_json" in keys:
+        video_enc = _parse_video_encode_json(row["video_encode_json"])
     return Podcast(
         id=int(row["id"]),
         feed_url=str(row["feed_url"] or ""),
@@ -334,6 +367,7 @@ def _podcast_from_row(row: sqlite3.Row, *, episode_count: int = 0) -> Podcast:
         auto_last_run_local_date=auto_last,
         audio_encode=audio_enc,
         playback_speed=speed,
+        video_encode=video_enc,
     )
 
 
@@ -1117,6 +1151,35 @@ def set_podcast_playback_speed(
         return get_podcast(podcast_id, path=path)
     except sqlite3.Error as e:
         logger.warning("set_podcast_playback_speed failed: %s", e)
+        return None
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def set_podcast_video_encode(
+    podcast_id: int,
+    settings: PodcastVideoEncodeSettings | None,
+    *,
+    path: Path | None = None,
+) -> Podcast | None:
+    """Set or clear per-show video encode override (None clears → inherit)."""
+    now = _utc_now()
+    payload = _video_encode_to_json(settings)
+    conn: sqlite3.Connection | None = None
+    try:
+        conn, _ = _open(path)
+        with conn:
+            cur = conn.execute(
+                "UPDATE podcasts SET video_encode_json = ?, updated_at = ? "
+                "WHERE id = ?",
+                (payload, now, int(podcast_id)),
+            )
+            if int(cur.rowcount or 0) <= 0:
+                return None
+        return get_podcast(podcast_id, path=path)
+    except sqlite3.Error as e:
+        logger.warning("set_podcast_video_encode failed: %s", e)
         return None
     finally:
         if conn is not None:

@@ -228,6 +228,37 @@ class PodcastIndexTests(unittest.TestCase):
             assert reloaded is not None
             self.assertEqual(reloaded.playback_speed, 1.5)
 
+    def test_per_show_video_encode(self) -> None:
+        from mtpmanager.domain.video_encode import PodcastVideoEncodeSettings
+        from mtpmanager.infra.podcast_index import set_podcast_video_encode
+
+        audio = get_preset("mp3_cbr_64")
+        assert audio is not None
+        settings = PodcastVideoEncodeSettings(
+            preset_id="zen_avi_xvid_mp3",
+            resolution_id="qvga",
+            audio_encode=audio.settings,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "library_index.db"
+            p = create_or_update_podcast(
+                feed_url="https://example.com/video-pod",
+                title="Video Show",
+                path=db,
+            )
+            self.assertIsNone(p.video_encode)
+            updated = set_podcast_video_encode(p.id, settings, path=db)
+            assert updated is not None
+            self.assertIsNotNone(updated.video_encode)
+            assert updated.video_encode is not None
+            self.assertEqual(updated.video_encode.resolution_id, "qvga")
+            again = get_podcast(p.id, path=db)
+            assert again is not None and again.video_encode is not None
+            self.assertEqual(again.video_encode.preset_id, "zen_avi_xvid_mp3")
+            cleared = set_podcast_video_encode(p.id, None, path=db)
+            assert cleared is not None
+            self.assertIsNone(cleared.video_encode)
+
     def test_auto_settings_and_retrieved_at(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             db = Path(tmp) / "library_index.db"

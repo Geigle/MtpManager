@@ -316,6 +316,6 @@ Effective encode = recipe ⊕ selected resolution ⊕ `AudioEncodeSettings`. Las
 
 **Rationale:** Matches how still-video already overrides geometry separately; reuses proven audio UI; avoids tab combinatorial explosion.
 
-**Consequences:** Callers must `apply_resolution` / `apply_audio_settings` (or `effective_video_preset`) before match-skip / encode. Podcast full-motion video picks up the device default resolution (QVGA) unless overridden. Still-from-audio ladder (`audio_podcast_still_*`) stays independent.
+**Consequences:** Callers must `apply_resolution` / `apply_audio_settings` (or `effective_video_preset`) before match-skip / encode. Podcast full-motion video uses `PodcastVideoEncodeSettings` (Config → Podcast Settings + per-show Encode Settings), with precedence per-show → podcast default → device defaults — separate from library Send Video last-used keys. Still-from-audio ladder (`audio_podcast_still_*`) stays independent.
 
-**Source:** `domain/video_encode.py`, `device_profiles.py`, `dialogs.ask_video_destination`, `infra/ffmpeg_video.py`.
+**Source:** `domain/video_encode.py`, `device_profiles.py`, `dialogs.ask_video_destination`, `infra/ffmpeg_video.py`, `infra/podcast_index.py`.

@@ -6,7 +6,8 @@ Geometry and audio quality are orthogonal axes applied at encode time.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
+from typing import TYPE_CHECKING, Any
 
 from mtpmanager.domain.audio_encode import (
     AudioEncodeSettings,
@@ -15,6 +16,9 @@ from mtpmanager.domain.audio_encode import (
     resolve_settings,
 )
 from mtpmanager.domain.device_profile import VideoEncodePreset
+
+if TYPE_CHECKING:
+    from mtpmanager.domain.device_profile import DeviceVideoOptions
 
 
 @dataclass(frozen=True)
@@ -287,6 +291,92 @@ def effective_video_preset(
     if audio_settings is not None:
         out = apply_audio_settings(out, audio_settings)
     return out
+
+
+@dataclass(frozen=True)
+class PodcastVideoEncodeSettings:
+    """Podcast video encode recipe axes (global or per-show override).
+
+    ``None`` fields mean “use device ``DeviceVideoOptions`` defaults” for that
+    axis when resolving. Distinct from library Send Video last-used prefs.
+    """
+
+    preset_id: str | None = None
+    resolution_id: str | None = None
+    audio_encode: AudioEncodeSettings | None = None
+
+    def summary_line(self) -> str:
+        parts: list[str] = []
+        if self.preset_id:
+            parts.append(self.preset_id)
+        if self.resolution_id:
+            parts.append(self.resolution_id)
+        if self.audio_encode is not None:
+            parts.append(self.audio_encode.summary_line())
+        return " · ".join(parts) if parts else "device defaults"
+
+    def to_dict(self) -> dict[str, Any]:
+        d: dict[str, Any] = {
+            "preset_id": (self.preset_id or "").strip() or None,
+            "resolution_id": (self.resolution_id or "").strip().casefold() or None,
+        }
+        if self.audio_encode is not None:
+            d["audio_encode"] = clamp_settings_for_format(self.audio_encode).to_dict()
+        else:
+            d["audio_encode"] = None
+        return d
+
+    @classmethod
+    def from_dict(cls, raw: object | None) -> PodcastVideoEncodeSettings | None:
+        if not isinstance(raw, dict) or not raw:
+            return None
+        known = {f.name for f in fields(cls)}
+        # Allow partial dicts.
+        preset_id = raw.get("preset_id") if "preset_id" in raw else None
+        resolution_id = raw.get("resolution_id") if "resolution_id" in raw else None
+        audio_raw = raw.get("audio_encode") if "audio_encode" in raw else None
+        pid = str(preset_id or "").strip() or None
+        rid = str(resolution_id or "").strip().casefold() or None
+        audio = None
+        if isinstance(audio_raw, dict) and audio_raw:
+            audio = clamp_settings_for_format(AudioEncodeSettings.from_dict(audio_raw))
+        if pid is None and rid is None and audio is None:
+            # Empty override object → treat as unset.
+            if not any(k in known for k in raw):
+                return None
+            # Explicit empty axes still counts as an override shell only if
+            # caller stored something meaningful; bare {} → None above.
+            return None
+        return cls(preset_id=pid, resolution_id=rid, audio_encode=audio)
+
+
+def resolve_podcast_video_preset(
+    video_options: DeviceVideoOptions,
+    settings: PodcastVideoEncodeSettings | None,
+) -> VideoEncodePreset:
+    """Build an effective encode preset from device options ⊕ podcast settings.
+
+    Missing axes fall back to the device default recipe / resolution / audio.
+    """
+    base = video_options.default_preset()
+    if settings is not None and settings.preset_id:
+        found = video_options.preset_by_id(settings.preset_id)
+        if found is not None:
+            base = found
+
+    resolution = video_options.default_resolution()
+    if settings is not None and settings.resolution_id:
+        picked = video_options.resolution_by_id(settings.resolution_id)
+        if picked is not None:
+            resolution = picked
+
+    audio = default_video_audio_settings(base)
+    if settings is not None and settings.audio_encode is not None:
+        audio = settings.audio_encode
+
+    return effective_video_preset(
+        base, resolution=resolution, audio_settings=audio
+    )
 
 
 def _parse_bitrate_kbps(value: str | None) -> int | None:

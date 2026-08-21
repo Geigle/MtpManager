@@ -1234,8 +1234,8 @@ class AppController:
                     has_video = False
                 if has_video:
                     label = f"▶ {label}"
-                # ★ = custom encode for this show (context menu).
-                if p.audio_encode is not None:
+                # ★ = custom audio and/or video encode for this show.
+                if p.audio_encode is not None or p.video_encode is not None:
                     label = f"{label} ★"
                 # Speed marker when encode-time tempo is not 1×.
                 try:
@@ -1716,6 +1716,9 @@ class AppController:
         profile_name = None
         if self._active_profile is not None:
             profile_name = self._active_profile.display_name
+        video_options = None
+        if self._active_profile is not None:
+            video_options = self._active_profile.video_options
         result = show_podcast_settings_dialog(
             self.win.root,
             auto_enabled=bool(cfg.podcast_auto_enabled),
@@ -1726,11 +1729,15 @@ class AppController:
             status_line=status,
             use_podcast_encode_override=cfg.uses_podcast_encode_override(),
             podcast_audio_encode=cfg.podcast_audio_encode,
+            use_podcast_video_encode_override=cfg.uses_podcast_video_encode_override(),
+            podcast_video_encode=cfg.podcast_video_encode,
             podcast_tracknumber_as_date=bool(cfg.podcast_tracknumber_as_date),
             podcast_title_date_prefix=bool(cfg.podcast_title_date_prefix),
             global_audio_encode=cfg.resolved_audio_encode(),
             allowed_send_formats=self._allowed_send_formats(),
             profile_display_name=profile_name,
+            video_options=video_options,
+            include_broken_video_presets=bool(cfg.show_broken_video_presets),
         )
         if result is None:
             return
@@ -1749,6 +1756,13 @@ class AppController:
             self._config.apply_podcast_audio_encode(result.podcast_audio_encode)
         else:
             self._config.apply_podcast_audio_encode(None)
+        if (
+            result.use_podcast_video_encode_override
+            and result.podcast_video_encode is not None
+        ):
+            self._config.apply_podcast_video_encode(result.podcast_video_encode)
+        else:
+            self._config.apply_podcast_video_encode(None)
         try:
             save_app_config(self._config)
         except Exception as e:
@@ -1758,7 +1772,8 @@ class AppController:
             return
         logger.info(
             "Podcast settings saved enabled=%s days=%s time=%s max=%s "
-            "podcast_encode=%s tracknumber_as_date=%s title_date_prefix=%s",
+            "podcast_encode=%s podcast_video=%s tracknumber_as_date=%s "
+            "title_date_prefix=%s",
             self._config.podcast_auto_enabled,
             self._config.podcast_schedule_days,
             self._config.podcast_schedule_time,
@@ -1767,6 +1782,11 @@ class AppController:
                 self._config.podcast_audio_encode.summary_line()
                 if self._config.podcast_audio_encode is not None
                 else "global"
+            ),
+            (
+                self._config.podcast_video_encode.summary_line()
+                if self._config.podcast_video_encode is not None
+                else "device"
             ),
             self._config.podcast_tracknumber_as_date,
             self._config.podcast_title_date_prefix,
@@ -1819,6 +1839,7 @@ class AppController:
         from mtpmanager.infra.podcast_index import (
             set_podcast_audio_encode,
             set_podcast_playback_speed,
+            set_podcast_video_encode,
         )
 
         ids = self._selected_podcast_ids()
@@ -1843,9 +1864,18 @@ class AppController:
             inherit = (
                 f"Config ({cfg.resolved_audio_encode().summary_line()})"
             )
+        if cfg.uses_podcast_video_encode_override() and cfg.podcast_video_encode:
+            video_inherit = (
+                f"podcast video default "
+                f"({cfg.podcast_video_encode.summary_line()})"
+            )
+        else:
+            video_inherit = "device video defaults"
         profile_name = None
+        video_options = None
         if self._active_profile is not None:
             profile_name = self._active_profile.display_name
+            video_options = self._active_profile.video_options
         result = show_podcast_show_encode_dialog(
             self.win.root,
             show_title=title,
@@ -1855,6 +1885,11 @@ class AppController:
             inherit_summary=inherit,
             allowed_send_formats=self._allowed_send_formats(),
             profile_display_name=profile_name,
+            use_video_override=show.video_encode is not None,
+            video_encode=show.video_encode,
+            video_inherit_summary=video_inherit,
+            video_options=video_options,
+            include_broken_video_presets=bool(cfg.show_broken_video_presets),
         )
         if result is None:
             return
@@ -1871,11 +1906,26 @@ class AppController:
                 "Podcast", "Could not save playback speed for this show."
             )
             return
+        video_enc = (
+            result.video_encode if result.use_video_override else None
+        )
+        video_updated = set_podcast_video_encode(pid, video_enc)
+        if video_updated is None:
+            messagebox.showerror(
+                "Podcast", "Could not save video encode settings for this show."
+            )
+            return
         logger.info(
-            "Podcast show encode saved id=%s title=%r encode=%s speed=%g",
+            "Podcast show encode saved id=%s title=%r encode=%s video=%s "
+            "speed=%g",
             pid,
             title,
             enc.summary_line() if enc is not None else "inherit",
+            (
+                video_enc.summary_line()
+                if video_enc is not None
+                else "inherit"
+            ),
             float(result.playback_speed),
         )
         # Refresh list labels (★ marker for per-show override).
@@ -3016,17 +3066,13 @@ class AppController:
             work, on_done=on_done, on_error=on_error, name="podcast-prepare"
         )
 
-    def _podcast_video_encode_profile(self):
-        """Default XviD preset for ZEN Vision:M when sending video podcasts.
+    def _resolve_podcast_video_preset(self, podcast_id: int | None = None):
+        """Effective video encode preset for podcasts (per-show → podcast → device).
 
-        Applies the device default resolution (QVGA on ZEN) and last/default
-        video audio settings so full-motion podcast video matches Send Video.
-        Still-from-audio jobs still override frame size via the still ladder.
+        Still-from-audio jobs still override frame size via the still ladder;
+        recipe / muxed audio come from this resolved preset.
         """
-        from mtpmanager.domain.video_encode import (
-            default_video_audio_settings,
-            effective_video_preset,
-        )
+        from mtpmanager.domain.video_encode import resolve_podcast_video_preset
 
         profile = self._active_profile
         if profile is None:
@@ -3034,21 +3080,21 @@ class AppController:
         opts = getattr(profile, "video_options", None)
         if opts is None:
             return None
-        base = opts.default_preset()
-        resolution = opts.default_resolution()
-        if self._config.video_encode_resolution_id:
-            picked = opts.resolution_by_id(self._config.video_encode_resolution_id)
-            if picked is not None:
-                resolution = picked
-        audio = self._config.video_audio_encode
-        if audio is None:
-            audio = default_video_audio_settings(base)
-        return effective_video_preset(
-            base, resolution=resolution, audio_settings=audio
-        )
+
+        settings = None
+        if podcast_id is not None:
+            try:
+                show = get_podcast(int(podcast_id))
+            except Exception:
+                show = None
+            if show is not None and show.video_encode is not None:
+                settings = show.video_encode
+        if settings is None and self._config.podcast_video_encode is not None:
+            settings = self._config.podcast_video_encode
+        return resolve_podcast_video_preset(opts, settings)
 
     def _start_podcast_video_sync(self, video_jobs: list, *, label: str) -> None:
-        """Encode (XviD default on ZEN) and send video podcasts under ZENcast."""
+        """Encode (device recipe) and send video podcasts under ZENcast."""
         if not video_jobs:
             return
         if not self._require_sync_ready():
@@ -3066,11 +3112,12 @@ class AppController:
         parent = self._podcast_folder_id()
         podcast_folders = bool(self._config.store_podcasts_in_show_folders)
         experimental = self.win.active_mode() == "experimental"
-        encode_profile = self._podcast_video_encode_profile()
-        encode_for_device = encode_profile is not None
+        # Probe that the device has video recipes (needed for still-as-video).
+        sample_profile = self._resolve_podcast_video_preset(None)
+        encode_for_device_default = sample_profile is not None
         # Still-from-audio jobs require a device video profile (XviD on ZEN).
         if any(getattr(j, "from_audio_still", False) for j in video_jobs):
-            if encode_profile is None:
+            if sample_profile is None:
                 messagebox.showerror(
                     "Podcast",
                     "Sync Audio Podcasts as Video needs a device video "
@@ -3078,7 +3125,7 @@ class AppController:
                     "Connect the device or pick the ZEN profile, then try again.",
                 )
                 return
-            encode_for_device = True
+            encode_for_device_default = True
         jobs = list(video_jobs)
         serial = self._device_serial or device_serial_key()
         from mtpmanager.infra.remote_naming import DEFAULT_STORAGE_ID
@@ -3124,19 +3171,37 @@ class AppController:
                         f"Podcast video {i + 1}/{total}: "
                         f"{job.episode.title or os.path.basename(job.local_path)}",
                     )
+                show_id = None
+                try:
+                    show_id = int(getattr(job.podcast, "id", 0) or 0) or None
+                except (TypeError, ValueError):
+                    show_id = None
+                if show_id is None:
+                    try:
+                        show_id = int(getattr(job.episode, "podcast_id", 0) or 0) or None
+                    except (TypeError, ValueError):
+                        show_id = None
+                encode_profile = self._resolve_podcast_video_preset(show_id)
+                do_encode = bool(encode_for_device_default and encode_profile is not None)
+                if getattr(job, "from_audio_still", False):
+                    do_encode = True
                 logger.info(
                     "Podcast video sync → parent_id=%s (ZENcast/show) "
-                    "title=%r guid_index=%s",
+                    "title=%r guid_index=%s encode=%s preset=%s frame=%sx%s",
                     dest_parent,
                     job.episode.title,
                     job.episode.guid,
+                    do_encode,
+                    getattr(encode_profile, "id", None),
+                    getattr(encode_profile, "width", None),
+                    getattr(encode_profile, "height", None),
                 )
                 send_result = send_podcast_video_to_zencast(
                     transport,
                     job,
                     parent_id=int(dest_parent),
                     encode_profile=encode_profile,
-                    encode_for_device=encode_for_device,
+                    encode_for_device=do_encode,
                     on_progress=on_progress,
                     keep_download=bool(self._config.keep_downloaded_podcasts),
                     still_fps=float(self._config.audio_podcast_still_fps),
@@ -3227,8 +3292,11 @@ class AppController:
                 self._load_podcast_episodes(self._selected_podcast_id)
             n = len(results or [])
             encode_note = ""
-            if encode_for_device and encode_profile is not None:
-                encode_note = f"\nEncode: {encode_profile.display_name}"
+            if encode_for_device_default and sample_profile is not None:
+                encode_note = (
+                    f"\nEncode: {sample_profile.display_name} · "
+                    f"{sample_profile.width}×{sample_profile.height}"
+                )
             pending_audio = self._pending_podcast_audio_after_video
             pending_label = self._pending_podcast_audio_label or "Podcast audio"
             self._pending_podcast_audio_after_video = None

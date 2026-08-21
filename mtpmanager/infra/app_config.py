@@ -16,6 +16,7 @@ from mtpmanager.domain.audio_encode import (
     get_preset,
     settings_from_legacy_format,
 )
+from mtpmanager.domain.video_encode import PodcastVideoEncodeSettings
 from mtpmanager.infra.app_paths import default_data_dir
 
 logger = logging.getLogger(__name__)
@@ -153,6 +154,9 @@ class AppConfig:
     video_encode_resolution_id: str | None = None
     # Last Send Video audio ladder settings (recipe-clamped at use time).
     video_audio_encode: AudioEncodeSettings | None = None
+    # Optional podcast video encode default (recipe / resolution / audio).
+    # None → device DeviceVideoOptions defaults. Distinct from Send Video prefs.
+    podcast_video_encode: PodcastVideoEncodeSettings | None = None
     # When True, the bottom playback bar stays visible even when idle.
     always_show_playback_controls: bool = False
     # When True, create ZENcast/<show>/ folders for podcast sends (PyMTP; experimental).
@@ -310,6 +314,22 @@ class AppConfig:
         else:
             self.video_audio_encode = clamp_settings_for_format(audio_encode)
 
+    def uses_podcast_video_encode_override(self) -> bool:
+        """True when a dedicated podcast video encode recipe is stored."""
+        return self.podcast_video_encode is not None
+
+    def apply_podcast_video_encode(
+        self, settings: PodcastVideoEncodeSettings | None
+    ) -> None:
+        """Set or clear the podcast video encode override (None = device default)."""
+        if settings is None:
+            self.podcast_video_encode = None
+            return
+        # Re-parse via dict so empty shells collapse to None.
+        self.podcast_video_encode = PodcastVideoEncodeSettings.from_dict(
+            settings.to_dict()
+        )
+
     def active_mode(self) -> str:
         """Return ``\"stable\"`` or ``\"experimental\"``."""
         return "stable" if self.stable_mode else "experimental"
@@ -415,6 +435,7 @@ def load_app_config(*, path: Path | None = None) -> AppConfig:
             or None
         ),
         video_audio_encode=None,
+        podcast_video_encode=None,
         always_show_playback_controls=_as_bool(
             raw.get("always_show_playback_controls"), False
         ),
@@ -492,6 +513,9 @@ def load_app_config(*, path: Path | None = None) -> AppConfig:
         cfg.video_audio_encode = clamp_settings_for_format(
             AudioEncodeSettings.from_dict(raw_video_audio)
         )
+    cfg.podcast_video_encode = PodcastVideoEncodeSettings.from_dict(
+        raw.get("podcast_video_encode")
+    )
     return cfg
 
 
@@ -570,6 +594,8 @@ def save_app_config(config: AppConfig, *, path: Path | None = None) -> Path:
         payload["podcast_audio_encode"] = clamp_settings_for_format(
             config.podcast_audio_encode
         ).to_dict()
+    if config.podcast_video_encode is not None:
+        payload["podcast_video_encode"] = config.podcast_video_encode.to_dict()
     text = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
     tmp = dest.with_suffix(dest.suffix + ".tmp")
     tmp.write_text(text, encoding="utf-8")

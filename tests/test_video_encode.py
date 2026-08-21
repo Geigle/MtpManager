@@ -16,12 +16,14 @@ from mtpmanager.domain.video_encode import (
     RES_QQVGA,
     RES_QVGA,
     RES_VGA,
+    PodcastVideoEncodeSettings,
     apply_audio_settings,
     apply_resolution,
     audio_formats_for_video_preset,
     default_video_audio_settings,
     effective_video_preset,
     resolution_by_id,
+    resolve_podcast_video_preset,
     resolve_resolution,
 )
 
@@ -131,6 +133,49 @@ class ApplyAxesTests(unittest.TestCase):
         self.assertEqual(p.audio_bitrate, "64k")
         self.assertEqual(p.audio_sample_rate, 22050)
         self.assertEqual(p.audio_channels, 1)
+
+
+class PodcastVideoEncodeSettingsTests(unittest.TestCase):
+    def test_round_trip_dict(self) -> None:
+        preset = get_preset("mp3_cbr_128")
+        assert preset is not None
+        s = PodcastVideoEncodeSettings(
+            preset_id="zen_avi_xvid_mp3",
+            resolution_id="qvga",
+            audio_encode=preset.settings,
+        )
+        again = PodcastVideoEncodeSettings.from_dict(s.to_dict())
+        self.assertIsNotNone(again)
+        assert again is not None
+        self.assertEqual(again.preset_id, "zen_avi_xvid_mp3")
+        self.assertEqual(again.resolution_id, "qvga")
+        self.assertIsNotNone(again.audio_encode)
+        assert again.audio_encode is not None
+        self.assertEqual(again.audio_encode.bitrate_kbps, 128)
+
+    def test_resolve_podcast_video_preset_axes(self) -> None:
+        opts = ZEN_VISION_M.video_options
+        assert opts is not None
+        preset = get_preset("mp3_cbr_64")
+        assert preset is not None
+        s = PodcastVideoEncodeSettings(
+            preset_id="zen_avi_divx_mp3",
+            resolution_id="qqvga",
+            audio_encode=preset.settings,
+        )
+        p = resolve_podcast_video_preset(opts, s)
+        self.assertEqual(p.id, "zen_avi_divx_mp3")
+        self.assertEqual((p.width, p.height), (160, 120))
+        self.assertEqual(p.audio_bitrate, "64k")
+
+    def test_resolve_none_uses_device_defaults(self) -> None:
+        opts = ZEN_VISION_M.video_options
+        assert opts is not None
+        p = resolve_podcast_video_preset(opts, None)
+        self.assertEqual(p.id, opts.default_preset_id)
+        dres = opts.default_resolution()
+        assert dres is not None
+        self.assertEqual((p.width, p.height), (dres.width, dres.height))
 
 
 if __name__ == "__main__":

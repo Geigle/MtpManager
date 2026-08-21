@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import tempfile
 from collections.abc import Callable
+from dataclasses import dataclass
 
 from ffmpeg import FFmpeg
 
@@ -118,6 +119,112 @@ def _parse_rate(value: object) -> float:
         return float(text)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _parse_ratio_pair(value: object) -> tuple[int, int] | None:
+    """Parse ffprobe ratio strings like ``853:720`` or ``16/9`` → (num, den)."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or text.upper() in ("N/A", "NAN", "0:1", "0/1", "0:0", "0/0"):
+        return None
+    sep = ":" if ":" in text else ("/" if "/" in text else "")
+    if not sep:
+        try:
+            f = float(text)
+        except (TypeError, ValueError):
+            return None
+        if f <= 0:
+            return None
+        # Approximate as integer pair with den=1000 when given a bare float.
+        return max(1, int(round(f * 1000))), 1000
+    num_s, den_s = text.split(sep, 1)
+    try:
+        num, den = int(round(float(num_s))), int(round(float(den_s)))
+    except (TypeError, ValueError):
+        return None
+    if num <= 0 or den <= 0:
+        return None
+    return num, den
+
+
+@dataclass(frozen=True)
+class VideoAspectInfo:
+    """Storage size + sample/display aspect from ffprobe (pre-encode)."""
+
+    width: int
+    height: int
+    # Sample aspect ratio as reduced-ish integers (1:1 when unknown/square).
+    sar_num: int = 1
+    sar_den: int = 1
+    # Display aspect when ffprobe provides it; else derived from storage×SAR.
+    dar_num: int | None = None
+    dar_den: int | None = None
+
+    @property
+    def sar(self) -> float:
+        if self.sar_den <= 0:
+            return 1.0
+        return float(self.sar_num) / float(self.sar_den)
+
+    @property
+    def dar(self) -> float:
+        if self.dar_num and self.dar_den and self.dar_den > 0:
+            return float(self.dar_num) / float(self.dar_den)
+        if self.width <= 0 or self.height <= 0:
+            return 0.0
+        return (float(self.width) * self.sar) / float(self.height)
+
+    @property
+    def is_anamorphic(self) -> bool:
+        """True when sample aspect is meaningfully non-square."""
+        return abs(self.sar - 1.0) > 0.01
+
+    def summary(self) -> str:
+        sar_s = f"{self.sar_num}:{self.sar_den}"
+        if self.dar_num and self.dar_den:
+            dar_s = f"{self.dar_num}:{self.dar_den}"
+        else:
+            dar_s = f"{self.dar:.4g}"
+        kind = "anamorphic" if self.is_anamorphic else "square-pixel"
+        return (
+            f"{self.width}x{self.height} SAR={sar_s} DAR={dar_s} ({kind})"
+        )
+
+
+def probe_video_aspect(path: str) -> VideoAspectInfo | None:
+    """Return storage size + SAR/DAR for the first video stream, or None."""
+    data = probe_media(path)
+    vs, _ = _stream_types(data)
+    if not vs:
+        return None
+    v = vs[0]
+    try:
+        width = int(v.get("width") or 0)
+        height = int(v.get("height") or 0)
+    except (TypeError, ValueError):
+        return None
+    if width <= 0 or height <= 0:
+        return None
+
+    sar_pair = _parse_ratio_pair(v.get("sample_aspect_ratio"))
+    if sar_pair is None:
+        sar_num, sar_den = 1, 1
+    else:
+        sar_num, sar_den = sar_pair
+
+    dar_pair = _parse_ratio_pair(v.get("display_aspect_ratio"))
+    dar_num = dar_pair[0] if dar_pair else None
+    dar_den = dar_pair[1] if dar_pair else None
+
+    return VideoAspectInfo(
+        width=width,
+        height=height,
+        sar_num=sar_num,
+        sar_den=sar_den,
+        dar_num=dar_num,
+        dar_den=dar_den,
+    )
 
 
 def probe_video_fps(path: str) -> float:
@@ -226,31 +333,49 @@ def _vf_filter(
     profile: VideoEncodePreset | VideoEncodeProfile,
     *,
     force_fps: float | None = None,
+    aspect: VideoAspectInfo | None = None,
 ) -> str:
     """Build the video filter chain for device frame geometry.
 
-    Full picture (no crop), storage pixels:
+    Full picture (no crop), square-pixel wire file:
 
-    1. ``setsar=1`` — scale uses width×height only.
-    2. ``scale=W:H:force_original_aspect_ratio=decrease`` — shrink so the
-       whole frame fits inside the device box (both axes together).
-    3. ``pad=W:H`` — letter/pillar-box to the device resolution.
-    4. ``setsar=1`` — square-pixel wire file.
+    1. When *aspect* is anamorphic (SAR ≠ 1), expand storage pixels by the
+       probed SAR first (``iw*sar_num/sar_den``) so widescreen DVD/TV rips
+       keep correct DAR. Square-pixel sources skip this step.
+    2. ``setsar=1`` — subsequent fit uses storage width×height only.
+    3. ``scale=W:H:force_original_aspect_ratio=decrease`` — fit inside the
+       device box (both axes together).
+    4. ``pad=W:H`` — letter/pillar-box to the device resolution.
+    5. ``setsar=1`` — square-pixel wire file for picky DAPs.
 
-    Example: 720×480 → ~640×426, pad to 640×480.
+    Example (square): 720×480 → ~640×426, pad to 640×480.
+    Example (anamorphic 720×472 SAR 853:720): expand ≈853×472, then fit/pad.
 
     *force_fps*: when set (source above profile.max_fps), insert ``fps=…``.
     """
     w, h = int(profile.width), int(profile.height)
-    parts = [
-        "setsar=1",
-        (
-            f"scale={w}:{h}:force_original_aspect_ratio=decrease:"
-            f"force_divisible_by=2"
-        ),
-        f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=black",
-        "setsar=1",
-    ]
+    parts: list[str] = []
+
+    # Discover-and-choose: only expand when probe says non-square SAR.
+    if aspect is not None and aspect.is_anamorphic:
+        sn, sd = int(aspect.sar_num), int(aspect.sar_den)
+        # Bake probed ratio (not filtergraph `sar`) so metadata quirks cannot
+        # silently fall back to 1:1 mid-graph.
+        parts.append(
+            f"scale=trunc(iw*{sn}/{sd}/2)*2:trunc(ih/2)*2"
+        )
+
+    parts.extend(
+        [
+            "setsar=1",
+            (
+                f"scale={w}:{h}:force_original_aspect_ratio=decrease:"
+                f"force_divisible_by=2"
+            ),
+            f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=black",
+            "setsar=1",
+        ]
+    )
     if force_fps is not None and force_fps > 0:
         parts.append(f"fps={force_fps:g}")
     parts.append("format=yuv420p")
@@ -311,12 +436,13 @@ def _build_output_options(
     force_fps: float | None,
     container_ext: str,
     audio_settings: AudioEncodeSettings | None = None,
+    aspect: VideoAspectInfo | None = None,
 ) -> dict:
     """ffmpeg output options for AVI/mpeg4 or WMV/WMA-style presets."""
     out: dict = {
         "map": ["0:v:0", "0:a:0?"],
         "c:v": profile.video_codec,
-        "vf": _vf_filter(profile, force_fps=force_fps),
+        "vf": _vf_filter(profile, force_fps=force_fps, aspect=aspect),
         "f": container_ext if container_ext != "wmv" else "asf",
     }
     out.update(_audio_opts_for_video_mux(audio_settings, profile))
@@ -377,12 +503,13 @@ def convert_video_for_profile(
 
     duration = probe_duration_seconds(src_path)
     source_fps = probe_video_fps(src_path)
+    aspect = probe_video_aspect(src_path)
     max_fps = 0.0 if ignore_max_fps else float(profile.max_fps or 0)
     force_fps = output_fps_for_source(source_fps, max_fps)
     logger.info(
         "Video convert start src=%s dest=%s preset=%s duration=%.1fs "
         "source_fps=%.3f max_fps=%s force_fps=%s ignore_max_fps=%s "
-        "frame=%sx%s audio=%s",
+        "frame=%sx%s aspect=%s audio=%s",
         src_path,
         dest_path,
         profile.id,
@@ -393,6 +520,7 @@ def convert_video_for_profile(
         ignore_max_fps,
         profile.width,
         profile.height,
+        aspect.summary() if aspect is not None else "unknown",
         (
             audio_settings.summary_line()
             if audio_settings is not None
@@ -410,6 +538,7 @@ def convert_video_for_profile(
         force_fps=force_fps,
         container_ext=ext,
         audio_settings=audio_settings,
+        aspect=aspect,
     )
 
     ff = FFmpeg().option("y").input(src_path).output(dest_path, out_opts)

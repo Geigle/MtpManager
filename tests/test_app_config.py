@@ -61,6 +61,32 @@ class AppConfigTests(unittest.TestCase):
             self.assertEqual(loaded.video_audio_encode.preset_id, "mp3_cbr_128")
             self.assertEqual(loaded.video_audio_encode.bitrate_kbps, 128)
 
+    def test_podcast_video_encode_round_trip(self) -> None:
+        from mtpmanager.domain.audio_encode import get_preset
+        from mtpmanager.domain.video_encode import PodcastVideoEncodeSettings
+
+        preset = get_preset("mp3_cbr_64")
+        assert preset is not None
+        settings = PodcastVideoEncodeSettings(
+            preset_id="zen_avi_divx_mp3",
+            resolution_id="qqvga",
+            audio_encode=preset.settings,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "config.json"
+            cfg = AppConfig(podcast_video_encode=settings)
+            save_app_config(cfg, path=dest)
+            loaded = load_app_config(path=dest)
+            self.assertTrue(loaded.uses_podcast_video_encode_override())
+            self.assertIsNotNone(loaded.podcast_video_encode)
+            assert loaded.podcast_video_encode is not None
+            self.assertEqual(loaded.podcast_video_encode.preset_id, "zen_avi_divx_mp3")
+            self.assertEqual(loaded.podcast_video_encode.resolution_id, "qqvga")
+            assert loaded.podcast_video_encode.audio_encode is not None
+            self.assertEqual(
+                loaded.podcast_video_encode.audio_encode.bitrate_kbps, 64
+            )
+
     def test_title_date_prefix_inherits_legacy_track_flag(self) -> None:
         """Pre-split configs only stored tracknumber_as_date (meant both)."""
         with tempfile.TemporaryDirectory() as tmp:

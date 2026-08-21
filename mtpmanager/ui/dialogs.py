@@ -14,6 +14,7 @@ from tkinter import (
     RIGHT,
     BooleanVar,
     Button,
+    Canvas,
     Checkbutton,
     Entry,
     Frame,
@@ -48,6 +49,7 @@ from mtpmanager.domain.audio_encode import (
 from mtpmanager.domain.device_profile import DeviceVideoOptions, VideoEncodePreset
 from mtpmanager.domain.models import DeviceInfo
 from mtpmanager.domain.video_encode import (
+    PodcastVideoEncodeSettings,
     VideoResolution,
     audio_formats_for_video_preset,
     default_video_audio_settings,
@@ -1311,21 +1313,98 @@ class SendVideoDialogResult:
     audio_encode: AudioEncodeSettings | None = None
 
 
+def _pack_scrollable_dialog_body(
+    dlg: Toplevel,
+    *,
+    padx: int = 14,
+    pady: int = 12,
+    min_width: int = 480,
+    max_height_frac: float = 0.78,
+) -> tuple[Frame, Frame, Callable[[], None]]:
+    """Build a vertically scrollable body; return (host, body, cleanup).
+
+    Caller should ``host.pack(fill=BOTH, expand=True)`` **after** packing any
+    pinned footer (Cancel/OK) with ``side=BOTTOM``, so actions stay visible.
+    *cleanup* must run on dialog close (unbinds global mousewheel).
+    """
+    host = Frame(dlg)
+
+    scroll_canvas = Canvas(host, highlightthickness=0, borderwidth=0)
+    vscroll = Scrollbar(host, orient="vertical", command=scroll_canvas.yview)
+    scroll_canvas.configure(yscrollcommand=vscroll.set)
+    vscroll.pack(side=RIGHT, fill=Y)
+    scroll_canvas.pack(side=LEFT, fill=BOTH, expand=True)
+
+    body = Frame(scroll_canvas, padx=padx, pady=pady)
+    body_id = scroll_canvas.create_window((0, 0), window=body, anchor="nw")
+
+    def _on_body_configure(_e=None) -> None:
+        scroll_canvas.configure(scrollregion=scroll_canvas.bbox("all"))
+
+    def _on_canvas_configure(e) -> None:
+        scroll_canvas.itemconfigure(body_id, width=max(1, int(e.width)))
+
+    body.bind("<Configure>", _on_body_configure)
+    scroll_canvas.bind("<Configure>", _on_canvas_configure)
+
+    def _on_mousewheel(event) -> None:
+        delta = int(getattr(event, "delta", 0) or 0)
+        if delta:
+            scroll_canvas.yview_scroll(-1 if delta > 0 else 1, "units")
+            return
+        # X11 Button-4/5
+        num = int(getattr(event, "num", 0) or 0)
+        if num == 4:
+            scroll_canvas.yview_scroll(-1, "units")
+        elif num == 5:
+            scroll_canvas.yview_scroll(1, "units")
+
+    def _bind_wheel(_e=None) -> None:
+        scroll_canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        scroll_canvas.bind_all("<Button-4>", _on_mousewheel)
+        scroll_canvas.bind_all("<Button-5>", _on_mousewheel)
+
+    def _unbind_wheel(_e=None) -> None:
+        try:
+            scroll_canvas.unbind_all("<MouseWheel>")
+            scroll_canvas.unbind_all("<Button-4>")
+            scroll_canvas.unbind_all("<Button-5>")
+        except Exception:
+            pass
+
+    scroll_canvas.bind("<Enter>", _bind_wheel)
+    scroll_canvas.bind("<Leave>", _unbind_wheel)
+    body.bind("<Enter>", _bind_wheel)
+    body.bind("<Leave>", _unbind_wheel)
+
+    # Cap initial height to a fraction of the screen so short displays scroll.
+    try:
+        sh = int(dlg.winfo_screenheight() or 800)
+        max_h = max(360, int(sh * max_height_frac))
+        dlg.minsize(min_width, 320)
+        host._scroll_max_height = max_h  # type: ignore[attr-defined]
+        host._scroll_min_width = min_width  # type: ignore[attr-defined]
+        host._scroll_canvas = scroll_canvas  # type: ignore[attr-defined]
+    except Exception:
+        pass
+
+    return host, body, _unbind_wheel
+
+
 def _fill_preset_panel(
     parent: Frame,
     preset: VideoEncodePreset,
     *,
     resolution: VideoResolution | None = None,
 ) -> None:
-    """Render container / video / audio detail blocks for one preset tab."""
+    """Render a compact recipe summary for one preset tab.
+
+    Resolution and audio quality live in controls below the notebook, so this
+    panel stays short (Send Video must fit short screens via outer scroll).
+    """
     for child in parent.winfo_children():
         child.destroy()
 
-    frame_note = (
-        resolution.summary_line()
-        if resolution is not None
-        else "pad to selected frame (see Resolution below)"
-    )
     video_text = preset.video_detail or preset.video_codec
     if resolution is not None and "pad to selected frame" in video_text:
         video_text = video_text.replace(
@@ -1333,53 +1412,32 @@ def _fill_preset_panel(
             f"{resolution.width}×{resolution.height} pad",
         )
 
-    sections = (
-        ("Container", preset.container_detail or preset.container.upper()),
-        ("Video codec", video_text),
-        ("Frame size", frame_note),
-        (
-            "Audio (default for recipe)",
-            preset.audio_detail or preset.probe_audio_codec,
-        ),
-    )
-    for title, text in sections:
-        Label(parent, text=title, font=("", 11, "bold"), anchor="w").pack(
-            fill="x", pady=(6, 0)
-        )
-        Label(
-            parent,
-            text=text,
-            justify=LEFT,
-            wraplength=420,
-            anchor="w",
-        ).pack(fill="x", padx=(8, 0))
-
-    extra: list[str] = []
+    lines: list[str] = [
+        preset.container_detail or f"Container: {preset.container.upper()}",
+        video_text,
+    ]
     if preset.max_fps and preset.max_fps > 0:
-        extra.append(
+        lines.append(
             f"Frame rate: keep source if ≤ {preset.max_fps:g} fps, else cap"
         )
     else:
-        extra.append("Frame rate: keep source")
+        lines.append("Frame rate: keep source")
     if preset.qscale_v is not None:
-        extra.append(f"Video quality: qscale {preset.qscale_v}")
+        lines.append(f"Video quality: qscale {preset.qscale_v}")
     elif preset.video_bitrate:
-        extra.append(f"Video bitrate: {preset.video_bitrate}")
+        lines.append(f"Video bitrate: {preset.video_bitrate}")
     if preset.broken:
-        extra.append("⚠ Broken — does not play reliably on this device")
+        lines.append("⚠ Broken — does not play reliably on this device")
     elif preset.experimental:
-        extra.append("⚠ Experimental — may not play on this device")
+        lines.append("⚠ Experimental — may not play on this device")
 
-    Label(parent, text="Parameters", font=("", 11, "bold"), anchor="w").pack(
-        fill="x", pady=(10, 0)
-    )
     Label(
         parent,
-        text="\n".join(extra),
+        text="\n".join(lines),
         justify=LEFT,
         wraplength=420,
         anchor="w",
-    ).pack(fill="x", padx=(8, 0), pady=(0, 6))
+    ).pack(fill="x", padx=(4, 0), pady=(4, 6))
 
 
 def _pack_video_audio_encode_picker(
@@ -1521,6 +1579,202 @@ def _pack_video_audio_encode_picker(
     return get_settings, reconfigure, set_enabled
 
 
+def _pack_video_encode_override_section(
+    parent,
+    *,
+    title: str,
+    blurb: str,
+    use_override: bool,
+    initial: PodcastVideoEncodeSettings | None,
+    video_options: DeviceVideoOptions | None,
+    include_broken_presets: bool = False,
+    checkbox_text: str = "Use custom video encode",
+    list_height: int = 4,
+) -> tuple[BooleanVar, Callable[[], PodcastVideoEncodeSettings | None]]:
+    """Compact recipe + resolution + video-audio picker with enable checkbox.
+
+    Returns ``(override_var, get_settings)``. When override is off,
+    ``get_settings()`` returns ``None``. When *video_options* is missing,
+    the section shows a short note and get_settings always returns ``None``.
+    """
+    if (title or "").strip():
+        Label(
+            parent,
+            text=title,
+            font=("", 11, "bold"),
+            anchor="w",
+        ).pack(fill="x", pady=(0, 4))
+    if (blurb or "").strip():
+        Label(
+            parent,
+            text=blurb,
+            justify=LEFT,
+            wraplength=440,
+            **secondary_label_kwargs(),
+        ).pack(anchor="w", pady=(0, 6))
+
+    override_var = BooleanVar(value=bool(use_override))
+    Checkbutton(
+        parent,
+        text=checkbox_text,
+        variable=override_var,
+        anchor="w",
+    ).pack(fill="x", pady=(0, 4))
+
+    controls = Frame(parent)
+    controls.pack(fill="x", pady=(0, 4))
+
+    if video_options is None:
+        Label(
+            controls,
+            text="No device-specific video recipes for this player.",
+            justify=LEFT,
+            wraplength=440,
+            **secondary_label_kwargs(),
+        ).pack(anchor="w")
+
+        def _none() -> PodcastVideoEncodeSettings | None:
+            return None
+
+        override_var.trace_add("write", lambda *_a: None)
+        return override_var, _none
+
+    visible = video_options.visible_presets(
+        include_broken=bool(include_broken_presets)
+    )
+    if not visible:
+        visible = video_options.presets
+    default_preset = video_options.default_preset()
+    if default_preset not in visible and visible:
+        default_preset = visible[0]
+
+    init = initial
+    seed_preset = default_preset
+    if init is not None and init.preset_id:
+        found = video_options.preset_by_id(init.preset_id)
+        if found is not None:
+            seed_preset = found
+
+    # Recipe combobox
+    recipe_row = Frame(controls)
+    recipe_row.pack(fill="x", pady=(0, 4))
+    Label(recipe_row, text="Recipe:").pack(side=LEFT)
+    recipe_ids = [p.id for p in visible]
+    recipe_labels = [p.tab_label or p.display_name for p in visible]
+    recipe_label_to_id = dict(zip(recipe_labels, recipe_ids))
+    recipe_id_to_label = dict(zip(recipe_ids, recipe_labels))
+    seed_recipe_label = recipe_id_to_label.get(
+        seed_preset.id, recipe_labels[0] if recipe_labels else ""
+    )
+    recipe_var = StringVar(value=seed_recipe_label)
+    recipe_combo = ttk.Combobox(
+        recipe_row,
+        textvariable=recipe_var,
+        values=recipe_labels,
+        state="readonly",
+        width=36,
+    )
+    recipe_combo.pack(side=LEFT, padx=(8, 0))
+
+    # Resolution combobox
+    resolutions = video_options.visible_resolutions()
+    res_ids = [r.id for r in resolutions]
+    res_labels = [r.summary_line() for r in resolutions]
+    res_label_to_id = dict(zip(res_labels, res_ids))
+    res_id_to_label = dict(zip(res_ids, res_labels))
+    seed_res = video_options.default_resolution()
+    if init is not None and init.resolution_id:
+        picked = video_options.resolution_by_id(init.resolution_id)
+        if picked is not None:
+            seed_res = picked
+    res_var = StringVar(
+        value=(
+            res_id_to_label.get(seed_res.id, res_labels[0])
+            if seed_res is not None and res_labels
+            else ""
+        )
+    )
+    res_combo: ttk.Combobox | None = None
+    if resolutions:
+        Label(controls, text="Resolution:", anchor="w").pack(fill="x", pady=(4, 2))
+        res_combo = ttk.Combobox(
+            controls,
+            textvariable=res_var,
+            values=res_labels,
+            state="readonly",
+            width=48,
+        )
+        res_combo.pack(fill="x", pady=(0, 4))
+
+    # Audio ladder
+    if init is not None and init.audio_encode is not None:
+        audio_initial = resolve_settings(
+            settings=init.audio_encode,
+            allowed_formats=audio_formats_for_video_preset(seed_preset),
+        )
+    else:
+        audio_initial = default_video_audio_settings(seed_preset)
+    Label(
+        controls,
+        text="Video audio",
+        font=("", 11, "bold"),
+        anchor="w",
+    ).pack(fill="x", pady=(6, 2))
+    audio_get, audio_reconfigure, audio_set_enabled = (
+        _pack_video_audio_encode_picker(
+            controls,
+            initial=audio_initial,
+            allowed_send_formats=audio_formats_for_video_preset(seed_preset),
+            list_height=list_height,
+        )
+    )
+
+    def _selected_preset() -> VideoEncodePreset:
+        rid = recipe_label_to_id.get(str(recipe_var.get() or ""))
+        if rid:
+            found = video_options.preset_by_id(rid)
+            if found is not None:
+                return found
+        return seed_preset
+
+    def _on_recipe_change(_e=None) -> None:
+        preset = _selected_preset()
+        allowed = audio_formats_for_video_preset(preset)
+        cur = audio_get()
+        if cur.normalized_format() in allowed:
+            audio_reconfigure(allowed, cur)
+        else:
+            audio_reconfigure(allowed, default_video_audio_settings(preset))
+
+    recipe_combo.bind("<<ComboboxSelected>>", _on_recipe_change)
+
+    def get_settings() -> PodcastVideoEncodeSettings | None:
+        if not bool(override_var.get()):
+            return None
+        preset = _selected_preset()
+        res_id = None
+        if resolutions:
+            res_id = res_label_to_id.get(str(res_var.get() or ""))
+            if not res_id and seed_res is not None:
+                res_id = seed_res.id
+        return PodcastVideoEncodeSettings(
+            preset_id=preset.id,
+            resolution_id=res_id,
+            audio_encode=audio_get(),
+        )
+
+    def set_controls_state() -> None:
+        on = bool(override_var.get())
+        recipe_combo.configure(state="readonly" if on else DISABLED)
+        if res_combo is not None:
+            res_combo.configure(state="readonly" if on else DISABLED)
+        audio_set_enabled(on)
+
+    override_var.trace_add("write", lambda *_a: set_controls_state())
+    set_controls_state()
+    return override_var, get_settings
+
+
 def ask_video_destination(
     parent,
     *,
@@ -1565,10 +1819,15 @@ def ask_video_destination(
     dlg = Toplevel(parent)
     dlg.title("Send Video")
     dlg.transient(parent)
-    dlg.resizable(False, False)
+    dlg.resizable(True, True)
 
-    body = Frame(dlg, padx=14, pady=12)
-    body.pack(fill=BOTH, expand=True)
+    # Footer first (side=BOTTOM), then scroll host expands into remaining space.
+    # Frame constructor padx/pady must be single distances (not pack tuples).
+    btn_row = Frame(dlg, padx=14, pady=8)
+    btn_row.pack(fill="x", side="bottom", pady=(0, 4))
+
+    scroll_host, body, cleanup_scroll = _pack_scrollable_dialog_body(dlg)
+    scroll_host.pack(fill=BOTH, expand=True)
 
     label = filename.strip() or "selected file"
     Label(
@@ -1733,7 +1992,9 @@ def ask_video_destination(
         ).pack(anchor="w", pady=(0, 6))
 
         notebook = ttk.Notebook(body)
-        notebook.pack(fill=BOTH, expand=True, pady=(0, 4))
+        # Fixed height so the dialog scrolls as a whole instead of the
+        # recipe notebook claiming unbounded vertical space.
+        notebook.pack(fill="x", expand=False, pady=(0, 4))
 
         for i, preset in enumerate(visible):
             tab = Frame(notebook, padx=10, pady=6)
@@ -1867,14 +2128,14 @@ def ask_video_destination(
             resolution_id=res.id if res is not None else None,
             audio_encode=audio,
         )
+        cleanup_scroll()
         dlg.destroy()
 
     def on_cancel() -> None:
         result[0] = None
+        cleanup_scroll()
         dlg.destroy()
 
-    btn_row = Frame(body)
-    btn_row.pack(fill="x", pady=(10, 0))
     Button(btn_row, text="Cancel", width=10, command=on_cancel).pack(
         side=RIGHT, padx=(6, 0)
     )
@@ -1883,12 +2144,28 @@ def ask_video_destination(
     dlg.protocol("WM_DELETE_WINDOW", on_cancel)
     dlg.grab_set()
     try:
-        px = parent.winfo_rootx() + max(0, (parent.winfo_width() - 480) // 2)
-        py = parent.winfo_rooty() + max(0, (parent.winfo_height() - 520) // 3)
-        dlg.geometry(f"+{px}+{py}")
+        dlg.update_idletasks()
+        min_w = int(getattr(scroll_host, "_scroll_min_width", 480) or 480)
+        max_h = int(getattr(scroll_host, "_scroll_max_height", 640) or 640)
+        # Preferred size: content width, viewport height capped for short screens.
+        req_w = max(min_w, int(body.winfo_reqwidth()) + 36)
+        req_h = (
+            int(body.winfo_reqheight())
+            + int(btn_row.winfo_reqheight())
+            + 24
+        )
+        view_h = min(req_h, max_h)
+        px = parent.winfo_rootx() + max(0, (parent.winfo_width() - req_w) // 2)
+        py = parent.winfo_rooty() + max(0, (parent.winfo_height() - view_h) // 3)
+        dlg.geometry(f"{req_w}x{view_h}+{px}+{py}")
+        # Ensure scrollregion is current after geometry settle.
+        scroll_canvas = getattr(scroll_host, "_scroll_canvas", None)
+        if scroll_canvas is not None:
+            scroll_canvas.configure(scrollregion=scroll_canvas.bbox("all"))
     except Exception:
         pass
     parent.wait_window(dlg)
+    cleanup_scroll()
     return result[0]
 
 
@@ -2631,6 +2908,9 @@ class PodcastSettingsResult:
     # When True, *podcast_audio_encode* overrides Config for podcast episodes.
     use_podcast_encode_override: bool = False
     podcast_audio_encode: AudioEncodeSettings | None = None
+    # When True, *podcast_video_encode* overrides device defaults for video eps.
+    use_podcast_video_encode_override: bool = False
+    podcast_video_encode: PodcastVideoEncodeSettings | None = None
     # Experimental: MTP track # from pub date (newest-first invert packing).
     podcast_tracknumber_as_date: bool = False
     # Experimental: prefix episode Title with YYYYMMDD.
@@ -2646,6 +2926,9 @@ class PodcastShowEncodeResult:
     audio_encode: AudioEncodeSettings | None = None
     # Encode-time tempo (1.0 = normal). Applied even when use_override is False.
     playback_speed: float = 1.0
+    # Per-show video encode override (independent of audio override).
+    use_video_override: bool = False
+    video_encode: PodcastVideoEncodeSettings | None = None
 
 
 @dataclass(frozen=True)
@@ -2837,13 +3120,17 @@ def show_podcast_settings_dialog(
     status_line: str = "",
     use_podcast_encode_override: bool = False,
     podcast_audio_encode: AudioEncodeSettings | None = None,
+    use_podcast_video_encode_override: bool = False,
+    podcast_video_encode: PodcastVideoEncodeSettings | None = None,
     podcast_tracknumber_as_date: bool = False,
     podcast_title_date_prefix: bool = False,
     global_audio_encode: AudioEncodeSettings | None = None,
     allowed_send_formats: frozenset[str] | None = None,
     profile_display_name: str | None = None,
+    video_options: DeviceVideoOptions | None = None,
+    include_broken_video_presets: bool = False,
 ) -> PodcastSettingsResult | None:
-    """Podcast schedule + default podcast encode. Save → result.
+    """Podcast schedule + default podcast audio/video encode. Save → result.
 
     Per-show encode is edited via the Podcasts tab show context menu.
     Audiobook encode is Config → Audiobook Encode…
@@ -3070,6 +3357,28 @@ def show_podcast_settings_dialog(
             wraplength=440, **secondary_label_kwargs(),
         ).pack(anchor="w", pady=(2, 0))
 
+    # ---- Podcast video encode (default for video episodes) ----
+    ttk.Separator(body, orient="horizontal").pack(fill="x", pady=(10, 10))
+    who = profile_display_name or "this device"
+    pod_video_override_var, pod_video_get_settings = (
+        _pack_video_encode_override_section(
+            body,
+            title="Podcast video encode",
+            blurb=(
+                f"Optional default for video podcast episodes on {who}. "
+                "Recipe, resolution, and muxed audio (same ladder as Send Video). "
+                "When off, uses the device profile defaults (e.g. AVI·XviD · "
+                "QVGA). Per-show overrides: show context → Encode Settings…"
+            ),
+            use_override=bool(use_podcast_video_encode_override),
+            initial=podcast_video_encode,
+            video_options=video_options,
+            include_broken_presets=bool(include_broken_video_presets),
+            checkbox_text="Use custom video encode for podcasts",
+            list_height=3,
+        )
+    )
+
     result: list[PodcastSettingsResult | None] = [None]
 
     def build_result(*, run_now: bool) -> PodcastSettingsResult | None:
@@ -3092,6 +3401,8 @@ def show_podcast_settings_dialog(
             return None
         use_pod = bool(pod_override_var.get())
         pod_settings = pod_get_settings() if use_pod else None
+        use_pod_video = bool(pod_video_override_var.get())
+        pod_video = pod_video_get_settings() if use_pod_video else None
         return PodcastSettingsResult(
             auto_enabled=bool(enabled_var.get()),
             schedule_days=tuple(normalize_schedule_days(chosen_days)),
@@ -3101,6 +3412,8 @@ def show_podcast_settings_dialog(
             run_full_sync_now=run_now,
             use_podcast_encode_override=use_pod,
             podcast_audio_encode=pod_settings,
+            use_podcast_video_encode_override=use_pod_video,
+            podcast_video_encode=pod_video,
             podcast_tracknumber_as_date=bool(track_date_var.get()),
             podcast_title_date_prefix=bool(title_date_var.get()),
         )
@@ -3256,12 +3569,20 @@ def show_podcast_show_encode_dialog(
     inherit_summary: str = "",
     allowed_send_formats: frozenset[str] | None = None,
     profile_display_name: str | None = None,
+    use_video_override: bool = False,
+    video_encode: PodcastVideoEncodeSettings | None = None,
+    video_inherit_summary: str = "",
+    video_options: DeviceVideoOptions | None = None,
+    include_broken_video_presets: bool = False,
 ) -> PodcastShowEncodeResult | None:
-    """Per-show encode override (Podcasts tab context menu). Save → result."""
+    """Per-show audio/video encode override (Podcasts tab context menu)."""
     from tkinter import DoubleVar
 
     title = (show_title or "Podcast").strip() or "Podcast"
     inherit = (inherit_summary or "").strip() or "podcast default / Config"
+    video_inherit = (
+        (video_inherit_summary or "").strip() or "podcast video default / device"
+    )
     speed0 = normalize_playback_speed(playback_speed)
     if use_override and audio_encode is not None:
         initial = resolve_settings(
@@ -3277,10 +3598,13 @@ def show_podcast_show_encode_dialog(
     dlg = Toplevel(parent)
     dlg.title(f"Encode — {title}")
     dlg.transient(parent)
-    dlg.resizable(False, False)
+    dlg.resizable(True, True)
 
-    body = Frame(dlg, padx=14, pady=12)
-    body.pack(fill=BOTH, expand=True)
+    btn_row = Frame(dlg, padx=14, pady=8)
+    btn_row.pack(fill="x", side="bottom")
+
+    scroll_host, body, cleanup_scroll = _pack_scrollable_dialog_body(dlg)
+    scroll_host.pack(fill=BOTH, expand=True)
 
     Label(
         body,
@@ -3291,23 +3615,23 @@ def show_podcast_show_encode_dialog(
     Label(
         body,
         text=(
-            "Optional encode recipe for this show only (e.g. talk shows "
-            "heavily compressed; music/RPG shows higher quality). When off, "
-            f"episodes use: {inherit}."
+            "Optional encode recipes for this show only. When audio override "
+            f"is off, episodes use: {inherit}."
         ),
         justify=LEFT,
-        wraplength=420, **secondary_label_kwargs(),
+        wraplength=420,
+        **secondary_label_kwargs(),
     ).pack(anchor="w", pady=(0, 8))
 
     override_var, get_settings = _pack_encode_override_section(
         body,
-        title="",
+        title="Audio encode",
         blurb="",
         use_override=bool(use_override),
         initial=initial,
         allowed_send_formats=allowed_send_formats,
-        checkbox_text="Use custom encode for this show",
-        list_height=5,
+        checkbox_text="Use custom audio encode for this show",
+        list_height=4,
     )
 
     # Playback speed (always available; applied at ffmpeg convert for this show).
@@ -3325,7 +3649,8 @@ def show_podcast_show_encode_dialog(
             f"({PLAYBACK_SPEED_MIN:g}×–{PLAYBACK_SPEED_MAX:g}×). 1.0× is normal."
         ),
         justify=LEFT,
-        wraplength=420, **secondary_label_kwargs(),
+        wraplength=420,
+        **secondary_label_kwargs(),
     ).pack(anchor="w", pady=(0, 4))
     speed_row = Frame(body)
     speed_row.pack(fill="x", pady=(0, 4))
@@ -3359,28 +3684,48 @@ def show_podcast_show_encode_dialog(
         who = profile_display_name or "this device"
         Label(
             body,
-            text=f"Formats limited by {who}: {names}.",
+            text=f"Audio formats limited by {who}: {names}.",
             justify=LEFT,
-            wraplength=420, **secondary_label_kwargs(),
+            wraplength=420,
+            **secondary_label_kwargs(),
         ).pack(anchor="w", pady=(4, 0))
+
+    ttk.Separator(body, orient="horizontal").pack(fill="x", pady=(12, 10))
+    video_override_var, video_get_settings = _pack_video_encode_override_section(
+        body,
+        title="Video encode",
+        blurb=(
+            "Optional recipe / resolution / muxed audio for video episodes "
+            f"from this show. When off, uses: {video_inherit}."
+        ),
+        use_override=bool(use_video_override),
+        initial=video_encode,
+        video_options=video_options,
+        include_broken_presets=bool(include_broken_video_presets),
+        checkbox_text="Use custom video encode for this show",
+        list_height=3,
+    )
 
     result: list[PodcastShowEncodeResult | None] = [None]
 
     def on_save() -> None:
         use = bool(override_var.get())
+        use_video = bool(video_override_var.get())
         result[0] = PodcastShowEncodeResult(
             use_override=use,
             audio_encode=get_settings() if use else None,
             playback_speed=normalize_playback_speed(speed_var.get()),
+            use_video_override=use_video,
+            video_encode=video_get_settings() if use_video else None,
         )
+        cleanup_scroll()
         dlg.destroy()
 
     def on_cancel() -> None:
         result[0] = None
+        cleanup_scroll()
         dlg.destroy()
 
-    btn_row = Frame(body)
-    btn_row.pack(fill="x", pady=(12, 0))
     Button(btn_row, text="Cancel", width=10, command=on_cancel).pack(
         side=RIGHT, padx=(6, 0)
     )
@@ -3389,12 +3734,23 @@ def show_podcast_show_encode_dialog(
     dlg.protocol("WM_DELETE_WINDOW", on_cancel)
     dlg.grab_set()
     try:
-        px = parent.winfo_rootx() + max(0, (parent.winfo_width() - 460) // 2)
-        py = parent.winfo_rooty() + max(0, (parent.winfo_height() - 420) // 3)
-        dlg.geometry(f"+{px}+{py}")
+        dlg.update_idletasks()
+        min_w = int(getattr(scroll_host, "_scroll_min_width", 480) or 480)
+        max_h = int(getattr(scroll_host, "_scroll_max_height", 640) or 640)
+        req_w = max(min_w, int(body.winfo_reqwidth()) + 36)
+        req_h = (
+            int(body.winfo_reqheight())
+            + int(btn_row.winfo_reqheight())
+            + 24
+        )
+        view_h = min(req_h, max_h)
+        px = parent.winfo_rootx() + max(0, (parent.winfo_width() - req_w) // 2)
+        py = parent.winfo_rooty() + max(0, (parent.winfo_height() - view_h) // 3)
+        dlg.geometry(f"{req_w}x{view_h}+{px}+{py}")
     except Exception:
         pass
     parent.wait_window(dlg)
+    cleanup_scroll()
     return result[0]
 
 

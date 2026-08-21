@@ -396,6 +396,31 @@ class LibraryPullPathTests(unittest.TestCase):
 
 
 class VideoEncodeProfileProbeTests(unittest.TestCase):
+    def test_parse_ratio_pair(self) -> None:
+        from mtpmanager.infra.ffmpeg_video import _parse_ratio_pair
+
+        self.assertEqual(_parse_ratio_pair("853:720"), (853, 720))
+        self.assertEqual(_parse_ratio_pair("16/9"), (16, 9))
+        self.assertIsNone(_parse_ratio_pair("N/A"))
+        self.assertIsNone(_parse_ratio_pair("0:1"))
+        self.assertIsNone(_parse_ratio_pair(None))
+
+    def test_aspect_anamorphic_flag(self) -> None:
+        from mtpmanager.infra.ffmpeg_video import VideoAspectInfo
+
+        square = VideoAspectInfo(width=640, height=480, sar_num=1, sar_den=1)
+        self.assertFalse(square.is_anamorphic)
+        ana = VideoAspectInfo(
+            width=720,
+            height=472,
+            sar_num=853,
+            sar_den=720,
+            dar_num=853,
+            dar_den=472,
+        )
+        self.assertTrue(ana.is_anamorphic)
+        self.assertAlmostEqual(ana.dar, 853 / 472, places=5)
+
     def test_vf_filter_keeps_source_fps_by_default(self) -> None:
         from mtpmanager.infra.ffmpeg_video import _vf_filter
 
@@ -406,11 +431,37 @@ class VideoEncodeProfileProbeTests(unittest.TestCase):
         # Fit storage pixels proportionally, then pad (not stretch-to-fill).
         self.assertIn("force_original_aspect_ratio=decrease", vf)
         self.assertIn("pad=640:480", vf)
-        # SAR cleared *before* scale so height shrinks with width from iw/ih.
-        self.assertTrue(
-            vf.startswith("setsar=1,scale=") or ",setsar=1,scale=" in f",{vf}"
+        # Square-pixel / unknown aspect: SAR cleared before fit scale.
+        self.assertTrue(vf.startswith("setsar=1,scale="))
+        self.assertNotIn("iw*", vf)
+
+    def test_vf_filter_expands_anamorphic_sar(self) -> None:
+        from mtpmanager.infra.ffmpeg_video import VideoAspectInfo, _vf_filter
+
+        aspect = VideoAspectInfo(
+            width=720,
+            height=472,
+            sar_num=853,
+            sar_den=720,
+            dar_num=853,
+            dar_den=472,
         )
-        self.assertLess(vf.index("setsar=1"), vf.index("scale="))
+        vf = _vf_filter(ZEN_VISION_M_VIDEO, aspect=aspect)
+        # Expand probed SAR before setsar=1 + fit/pad.
+        self.assertTrue(vf.startswith("scale=trunc(iw*853/720/2)*2:trunc(ih/2)*2,"))
+        self.assertIn("setsar=1", vf)
+        self.assertIn("force_original_aspect_ratio=decrease", vf)
+        self.assertIn("pad=640:480", vf)
+        # Expand step must come before the device fit scale.
+        self.assertLess(vf.index("iw*853/720"), vf.index("scale=640:480"))
+
+    def test_vf_filter_square_sar_skips_expand(self) -> None:
+        from mtpmanager.infra.ffmpeg_video import VideoAspectInfo, _vf_filter
+
+        aspect = VideoAspectInfo(width=1280, height=720, sar_num=1, sar_den=1)
+        vf = _vf_filter(ZEN_VISION_M_VIDEO, aspect=aspect)
+        self.assertTrue(vf.startswith("setsar=1,scale=640:480"))
+        self.assertNotIn("iw*", vf)
 
     def test_vf_filter_caps_when_force_fps(self) -> None:
         from mtpmanager.infra.ffmpeg_video import _vf_filter
@@ -650,6 +701,189 @@ class AudioStillVideoEncodeTests(unittest.TestCase):
                 r_fps in ("2/1", "2") or r_fps.startswith("2"),
                 f"expected ~2 fps, got {r_fps!r}",
             )
+
+
+class PodcastFullMotionVideoEncodeTests(unittest.TestCase):
+    """Full-motion podcast video must use SAR-aware convert_video_for_profile."""
+
+    def test_keep_download_path_calls_convert_video_for_profile(self) -> None:
+        from mtpmanager.app.podcast_ops import (
+            PodcastVideoJob,
+            send_podcast_video_to_zencast,
+        )
+        from mtpmanager.domain.track_id import new_track_guid
+        from mtpmanager.infra.podcast_index import Podcast, PodcastEpisode
+
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "ep.mp4"
+            src.write_bytes(b"fake-video")
+            guid = new_track_guid()
+            ep = PodcastEpisode(
+                id=1,
+                podcast_id=9,
+                guid=guid,
+                feed_guid="fg",
+                title="Anamorphic Ep",
+                local_path=str(src),
+            )
+            show = Podcast(
+                id=9,
+                feed_url="https://example.com/rss",
+                title="Show",
+            )
+            job = PodcastVideoJob(
+                episode=ep,
+                podcast=show,
+                local_path=str(src),
+                from_audio_still=False,
+            )
+            encoded = Path(tmp) / f"{guid}_device.avi"
+            encoded.write_bytes(b"enc-avi")
+
+            with patch(
+                "mtpmanager.infra.ffmpeg_video.convert_video_for_profile",
+                return_value=str(encoded),
+            ) as conv, patch(
+                "mtpmanager.app.podcast_ops.episode_cache_dir",
+                return_value=Path(tmp),
+            ), patch(
+                "mtpmanager.app.device_ops.prepare_and_send_video",
+                return_value=SendVideoResult(
+                    object_id=42,
+                    parent_id=128,
+                    remote_basename="Anamorphic Ep.avi",
+                    path=str(encoded),
+                    source_path=str(encoded),
+                    encoded=False,
+                ),
+            ) as prep:
+                send_podcast_video_to_zencast(
+                    _FakeTransport(),
+                    job,
+                    parent_id=128,
+                    encode_profile=ZEN_AVI_XVID_MP3,
+                    encode_for_device=True,
+                    keep_download=True,
+                )
+            conv.assert_called_once()
+            self.assertEqual(conv.call_args.args[0], str(src))
+            self.assertIs(conv.call_args.args[1], ZEN_AVI_XVID_MP3)
+            # Encode already done; prepare sends the device AVI as-is.
+            prep.assert_called_once()
+            self.assertFalse(prep.call_args.kwargs.get("encode_for_device"))
+
+    def test_no_cache_path_encodes_via_prepare_and_send_video(self) -> None:
+        from mtpmanager.app.podcast_ops import (
+            PodcastVideoJob,
+            send_podcast_video_to_zencast,
+        )
+        from mtpmanager.infra.podcast_index import Podcast, PodcastEpisode
+
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "ep.mp4"
+            src.write_bytes(b"fake-video")
+            ep = PodcastEpisode(
+                id=2,
+                podcast_id=9,
+                guid="not-a-valid-guid-shape",
+                feed_guid="fg",
+                title="Live Encode Ep",
+                local_path=str(src),
+            )
+            show = Podcast(
+                id=9,
+                feed_url="https://example.com/rss",
+                title="Show",
+            )
+            job = PodcastVideoJob(
+                episode=ep,
+                podcast=show,
+                local_path=str(src),
+                from_audio_still=False,
+            )
+            with patch(
+                "mtpmanager.infra.ffmpeg_video.convert_video_for_profile"
+            ) as conv, patch(
+                "mtpmanager.app.device_ops.prepare_and_send_video",
+                return_value=SendVideoResult(
+                    object_id=7,
+                    parent_id=128,
+                    remote_basename="Live Encode Ep.avi",
+                    path=str(src),
+                    source_path=str(src),
+                    encoded=True,
+                ),
+            ) as prep:
+                send_podcast_video_to_zencast(
+                    _FakeTransport(),
+                    job,
+                    parent_id=128,
+                    encode_profile=ZEN_AVI_XVID_MP3,
+                    encode_for_device=True,
+                    keep_download=False,
+                )
+            # No durable cache encode; prepare_and_send_video does the convert
+            # (which probes SAR inside convert_video_for_profile).
+            conv.assert_not_called()
+            prep.assert_called_once()
+            self.assertTrue(prep.call_args.kwargs.get("encode_for_device"))
+            self.assertIs(
+                prep.call_args.kwargs.get("encode_profile"), ZEN_AVI_XVID_MP3
+            )
+
+
+class ConvertVideoAspectProbeTests(unittest.TestCase):
+    def test_convert_video_for_profile_probes_aspect(self) -> None:
+        from mtpmanager.infra.ffmpeg_video import VideoAspectInfo
+
+        aspect = VideoAspectInfo(
+            width=720,
+            height=472,
+            sar_num=853,
+            sar_den=720,
+            dar_num=853,
+            dar_den=472,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "src.mp4"
+            src.write_bytes(b"x")
+            dest = Path(tmp) / "out.avi"
+            dest.write_bytes(b"encoded")
+            with patch(
+                "mtpmanager.infra.ffmpeg_video.probe_duration_seconds",
+                return_value=1.0,
+            ), patch(
+                "mtpmanager.infra.ffmpeg_video.probe_video_fps",
+                return_value=24.0,
+            ), patch(
+                "mtpmanager.infra.ffmpeg_video.probe_video_aspect",
+                return_value=aspect,
+            ) as probe, patch(
+                "mtpmanager.infra.ffmpeg_video._build_output_options",
+                return_value={"map": ["0:v:0"], "c:v": "mpeg4", "f": "avi"},
+            ) as build, patch(
+                "mtpmanager.infra.ffmpeg_video.FFmpeg",
+            ), patch(
+                "mtpmanager.infra.ffmpeg_video.run_ffmpeg_builder",
+            ):
+                from mtpmanager.infra.ffmpeg_video import convert_video_for_profile
+
+                # Pretend ffmpeg wrote the dest (convert checks size after run).
+                def _run(*_a, **_k):
+                    dest.write_bytes(b"encoded-ok")
+
+                with patch(
+                    "mtpmanager.infra.ffmpeg_video.run_ffmpeg_builder",
+                    side_effect=_run,
+                ):
+                    out = convert_video_for_profile(
+                        str(src),
+                        ZEN_AVI_XVID_MP3,
+                        dest_path=str(dest),
+                    )
+            self.assertEqual(out, str(dest))
+            probe.assert_called_once_with(str(src))
+            self.assertIs(build.call_args.kwargs.get("aspect"), aspect)
 
 
 class PodcastAudioAsVideoSendTests(unittest.TestCase):
